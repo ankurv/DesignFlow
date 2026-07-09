@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DesignFlow</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>var require = { paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.41.0/min/vs' } };</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.41.0/min/vs/loader.min.js"></script>
+<script>
+  require(['vs/editor/editor.main'], function () {
+    window.monacoReady = true;
+    if (window.onMonacoReady) window.onMonacoReady();
+  });
+</script>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<div class="intro-banner" id="introBanner">
+  <div class="banner-content">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path></svg>
+    <span><strong>Welcome to DesignFlow.</strong> Design, debate, and document your software architectures before handing them off to coding agents.</span>
+  </div>
+  <button class="banner-close" onclick="document.getElementById('introBanner').style.display='none'">×</button>
+</div>
+<header>
+  <div class="logo">Design<span>Flow</span></div>
+  <div class="status-pill">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">idle</span>
+  </div>
+  <div class="spacer"></div>
+  <span id="loggedInUserLabel" style="color:var(--text); font-weight:600; margin-right:15px; font-size:13px; display:none;"></span>
+  <button class="header-btn" onclick="submitLogout()" id="logoutBtn" style="margin-right:15px; display:none;">Logout</button>
+  <button class="header-btn" onclick="shutdownServer()" id="shutdownBtn" style="display:none; color: var(--red);">Shutdown Server</button>
+
+</header>
+
+<div class="project-strip" style="padding: 16px 24px;">
+  <span class="project-label" style="font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;">Current Project:</span>
+  <span class="project-state" id="projectState" style="font-size: 14px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
+  <button class="btn btn-secondary" id="openProjectBtn" onclick="openProject()" style="padding: 6px 12px; font-size: 12px; border-radius: 20px;">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:2px"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+    Switch Project
+  </button>
+  <div style="flex:1"></div>
+</div>
+
+<nav>
+  <div class="tab active" onclick="showTab('chat',this)">Live Feed</div>
+  <div class="tab" onclick="showTab('workspace',this)">Project Files</div>
+    <div class="tab" onclick="showTab('config',this)">Agents</div>
+  <div class="tab" onclick="showTab('mcp',this)">MCP Servers</div>
+  <div class="tab" onclick="showTab('settings',this)">Settings</div>
+  <div class="tab" onclick="showTab('history',this)">Run History</div>
+</nav>
+
+<div class="main">
+
+  
+  <!-- ── Settings ── -->
+  <div class="panel" id="panel-settings" style="padding: 30px; max-width: 800px; margin: 0 auto; overflow-y: auto; width: 100%;">
+    
+    <!-- Agent Settings -->
+    <h2 style="color:var(--text); margin-top:0; font-family:var(--heading-font); font-weight:600; margin-bottom:16px;">Run Settings</h2>
+    <div style="background:var(--bg2); padding:24px; border-radius:var(--radius); border:1px solid var(--border); margin-bottom:32px; display:flex; flex-direction:column; gap:20px;">
+      
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <span style="font-weight:600; font-size:14px; color:var(--text);">Max Tokens</span>
+          <span style="font-size:12px; color:var(--muted);">Set the maximum token limit per run</span>
+        </div>
+          <div style="display:flex; gap:12px; align-items:center;">
+          <input type="text" id="maxTokensInput" value="100000" autocomplete="off" data-lpignore="true" style="width:120px; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg); color:var(--text); font-family:var(--mono); text-align:right;">
+          <button class="btn btn-secondary" onclick="updateTokens()" style="padding:8px 16px;">Save</button>
+        </div>
+      </div>
+      
+      <div style="height:1px; background:var(--border); width:100%;"></div>
+
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <span style="font-weight:600; font-size:14px; color:var(--text);">Debate Level: <span id="debateLevelLabel" style="color:var(--accent2); font-weight:bold; margin-left:6px;">3</span></span>
+          <span style="font-size:12px; color:var(--muted);">Adjust the intensity and round count for agent debates</span>
+        </div>
+        <div style="display:flex; align-items:center; width: 200px;">
+          <input type="range" id="debateRoundsSlider" min="1" max="10" value="3" oninput="document.getElementById('debateLevelLabel').innerText=this.value" style="width:100%; accent-color:var(--accent); cursor:pointer;">
+        </div>
+      </div>
+    </div>
+
+    <h2 style="color:var(--text); margin-top:0; font-family:var(--heading-font); font-weight:600; margin-bottom:16px;">User Management</h2>
+    
+    <div style="background:var(--bg2); padding:24px; border-radius:var(--radius); border:1px solid var(--border); margin-bottom:32px;">
+      <h3 style="margin-top:0; font-size:15px; margin-bottom:16px;">Change My Password</h3>
+      <div style="display:flex; gap:12px; align-items:center;">
+        <input type="password" id="newPassword" placeholder="Enter new password" style="flex:1; max-width:300px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <button class="btn btn-secondary" onclick="changeMyPassword()" style="padding:10px 20px;">Update Password</button>
+      </div>
+    </div>
+    
+    <div id="adminSettingsBlock" style="display:none; background:var(--bg2); padding:24px; border-radius:var(--radius); border:1px solid var(--border);">
+      <h3 style="margin-top:0; font-size:15px; margin-bottom:16px;">Team Members (Admin)</h3>
+      <div style="background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; margin-bottom:24px;">
+        <table id="usersTable" style="width:100%; border-collapse:collapse; text-align:left; font-size:13px;">
+          <thead>
+            <tr style="background:rgba(255,255,255,0.02); border-bottom:1px solid var(--border);">
+              <th style="padding:12px 16px; font-weight:600; color:var(--muted);">Username</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--muted);">Role</th>
+              <th style="padding:12px 16px; font-weight:600; color:var(--muted); text-align:right;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody"></tbody>
+        </table>
+      </div>
+      
+      <h4 style="margin-top:0; margin-bottom:12px; font-size:14px;">Add New User</h4>
+      <div style="display:flex; gap:12px; align-items:center;">
+        <input type="text" id="newUsername" placeholder="Username" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <input type="password" id="newUserPassword" placeholder="Password" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <button class="btn btn-primary" onclick="addUser()" style="padding:10px 20px;">Create User</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Live Feed ── -->
+  <div class="panel active" id="panel-chat">
+    <div class="chat-layout">
+      <!-- Sidebar is hidden per user request, agents and inline tracker removed from here -->
+      <div class="chat-sidebar" style="display:none;">
+        <div class="sidebar-section" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:20px;">
+          <div style="display:none; flex-direction:column;">
+            <div class="sidebar-label">Agents</div>
+            <div id="agentList"></div>
+          </div>
+          
+          <div id="inlineTaskTracker" style="display:none;"></div>
+        </div>
+      </div>
+      <div class="feed-area">
+        <!-- Live feed and Agent Context side-by-side -->
+        <div style="display:flex; flex:1; overflow:hidden;">
+          <div class="feed" id="feed" style="flex:2; border-right:1px solid var(--border);"></div>
+          
+          <div style="flex:1; display:flex; flex-direction:column; overflow:hidden; background:var(--bg2);">
+            <div style="padding:20px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:14px; overflow-y:auto;">
+              <h2 style="margin:0; color:var(--text); font-family:var(--heading-font); text-transform:uppercase; font-size:14px; display:flex; align-items:center; gap:8px">
+                <div class="status-indicator running" id="contextAgentStatus"></div>
+                Current Work Summary
+              </h2>
+              <div id="contextAgentName" style="font-weight:700; color:var(--accent);">Ready to start</div>
+
+              <div style="display:flex; flex-direction:column; gap:10px;">
+                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Focus</div>
+                  <div id="contextWorkSummary" style="color:var(--text); font-size:13px; line-height:1.6;">Start a run to see a compact summary of what the team is exploring.</div>
+                </div>
+                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Why now</div>
+                  <div id="contextWhyNow" style="color:var(--muted); font-size:13px; line-height:1.6;">The team will summarize why the current step matters before diving deeper.</div>
+                </div>
+                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Expected output</div>
+                  <div id="contextExpectedOutput" style="color:var(--muted); font-size:13px; line-height:1.6;">You will see the next artifact or decision outcome here.</div>
+                </div>
+                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(99, 102, 241, 0.06); border-color:rgba(99, 102, 241, 0.35);">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--accent2); margin-bottom:6px;">Waiting on you</div>
+                  <div id="contextNeedsInput" style="color:var(--text); font-size:13px; line-height:1.6;">No user action needed right now.</div>
+                </div>
+              </div>
+
+              <div style="padding-top:4px; border-top:1px solid var(--border);">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px;">Quick involvement</div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                  <button class="btn btn-secondary" onclick="applyCollabSteer('approve')" style="padding:5px 10px; font-size:11px">Approve direction</button>
+                  <button class="btn btn-secondary" onclick="applyCollabSteer('alternatives')" style="padding:5px 10px; font-size:11px">Ask for alternatives</button>
+                  <button class="btn btn-secondary" onclick="applyCollabSteer('challenge')" style="padding:5px 10px; font-size:11px">Challenge assumption</button>
+                  <button class="btn btn-secondary" onclick="applyCollabSteer('simplify')" style="padding:5px 10px; font-size:11px">Simplify the plan</button>
+                  <button class="btn btn-secondary" onclick="applyCollabSteer('userflow')" style="padding:5px 10px; font-size:11px">Focus on user flow</button>
+                </div>
+                <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px;">Planned checkpoints</div>
+                  <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('framing')" style="padding:5px 10px; font-size:11px">Confirm framing</button>
+                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('architecture')" style="padding:5px 10px; font-size:11px">Confirm architecture</button>
+                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('plan')" style="padding:5px 10px; font-size:11px">Confirm priorities</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="steer-bar" style="display:flex; flex-direction:column; gap:10px">
+          <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+            <span style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-right:4px;">Workflow shortcuts</span>
+            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('new_design')" style="padding:5px 10px; font-size:11px">New design</button>
+            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('refine_plan')" style="padding:5px 10px; font-size:11px">Refine current plan</button>
+            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('resolve_issue')" style="padding:5px 10px; font-size:11px">Resolve plan issue</button>
+            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('redebate_decision')" style="padding:5px 10px; font-size:11px">Re-debate a decision</button>
+            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('simplify_scope')" style="padding:5px 10px; font-size:11px">Simplify scope</button>
+          </div>
+          <div style="display:flex; gap:10px; width:100%">
+            <input id="steerInput" placeholder="Type a prompt/task here and press Enter to start the run…" autocomplete="off" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
+            <button class="btn btn-secondary" id="sendBtn" onclick="steer()">Send</button>
+            <button class="btn btn-secondary" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
+            <button class="btn btn-secondary" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
+            <button class="btn btn-danger" id="stopBtn" onclick="stopRun()" style="display:none">Stop</button>
+            <button class="btn btn-primary" onclick="retryFailedTurn()" id="retryBtn" style="display:none">Retry Failed Turn</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Workspace ── -->
+  <div class="panel" id="panel-workspace">
+    <div class="ws-layout">
+      <div class="ws-sidebar">
+        <div class="sidebar-label" style="margin-bottom:10px">Architect Dashboard</div>
+        <button class="ws-file-btn active" onclick="loadWsFile('dashboard')" id="wsbtn-dashboard">📐 Design Dashboard</button>
+        <div class="sidebar-label" style="margin:16px 0 8px">DesignFlow state</div>
+        <button class="ws-file-btn" onclick="loadWsFile('design')" id="wsbtn-design">🎨 DESIGN.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('plan')" id="wsbtn-plan">📋 PLAN.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('decisions')" id="wsbtn-decisions">🧠 DECISIONS.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('consensus')" id="wsbtn-consensus">🤝 CONSENSUS.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('questions')" id="wsbtn-questions">❓ QUESTIONS.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('tests')" id="wsbtn-tests">🧪 TEST_RESULTS.md</button>
+        <button class="ws-file-btn" onclick="loadWsFile('logbook')" id="wsbtn-logbook">📖 LOGBOOK.md</button>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin:16px 0 8px">
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Project files</div>
+          <button class="btn btn-secondary" onclick="createNewFile()" style="padding:2px 6px; font-size:10px">+ New File</button>
+        </div>
+        <div id="srcFileList" style="display:flex;flex-direction:column;gap:3px"></div>
+      </div>
+      <div class="ws-content">
+        <div style="display:flex; align-items:center; justify-content:flex-end;">
+          <button class="btn btn-secondary" onclick="exportContext()" style="margin-top: 12px; margin-right: 12px; font-weight:600; padding:6px 14px;">⬇️ Export Context</button>
+        </div>
+        
+        <div id="dashboardView" style="margin-top: 12px; display:flex; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
+          
+          <!-- Action Required / User Input -->
+          <div id="contextPendingActions" style="background:rgba(99, 102, 241, 0.05); border:1px solid var(--accent); border-radius:var(--radius); padding:24px; display:none; flex-direction:column; box-shadow:0 8px 32px var(--accent-glow); animation:pulseBorder 2s infinite;">
+            <h2 style="margin-top:0; color:var(--accent2); font-family:var(--heading-font); text-transform:uppercase; font-size:15px; margin-bottom:16px; display:flex; align-items:center; gap:8px;">
+              <span style="font-size:18px">❓</span> Action Required
+            </h2>
+            <div id="contextQuestionsBody" class="md-content" style="font-size:14px; line-height:1.6; margin-bottom:20px; color:var(--text);"></div>
+            <div id="contextDecisionOptions" style="display:none; flex-wrap:wrap; gap:10px; margin-bottom:14px;"></div>
+            <div style="display:flex; flex-direction:column; gap:12px;">
+              <textarea id="contextAnswerInput" rows="4" placeholder="Type your decision, guidance, or answer here..." style="width:100%; resize:vertical; font-family:var(--font); padding:14px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:var(--text); font-size:14px;"></textarea>
+              <button class="btn btn-primary" onclick="submitContextAnswer()" style="align-self:flex-end; font-size:14px; padding:10px 24px;">Submit Decision</button>
+            </div>
+          </div>
+
+          <!-- Live Insights Stream -->
+          <div id="workflowShortcutSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
+            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔁 Iterate After You Hit an Issue</h4>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('resolve_issue')" style="padding:6px 12px; font-size:12px">Turn an issue into a plan fix</button>
+              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('redebate_decision')" style="padding:6px 12px; font-size:12px">Challenge a prior decision</button>
+              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('refine_plan')" style="padding:6px 12px; font-size:12px">Refine only the current plan</button>
+            </div>
+            <div style="font-size:13px; color:var(--muted); line-height:1.7;">Use these shortcuts to keep the design loop lightweight: preserve the current design, point to the specific issue you hit, and ask the team to revise only the affected parts with a short change summary.</div>
+          </div>
+
+          <div id="decisionMemorySection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
+            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🧠 Decision Memory</h4>
+            <div id="decisionMemoryBody" class="md-content" style="font-size:13.5px; line-height:1.65; color:#cbd5e1;">No key decisions captured yet.</div>
+          </div>
+
+          <div id="liveInsightsSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
+            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
+              <div class="status-indicator running" style="width:6px;height:6px"></div> Live Consensus Insights
+            </h4>
+            <div id="liveInsightsContainer" style="display:flex; flex-direction:column; gap:12px; font-size:13.5px; line-height:1.6; color:#cbd5e1;">
+              <div style="color:var(--muted); font-style:italic;" id="liveInsightsEmpty">No insights gathered yet. Start a run to see live team decisions!</div>
+            </div>
+          </div>
+          <!-- Mermaid visual map container -->
+          <div id="mermaidMapContainer" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:20px; display:none; flex-direction:column; flex:1">
+            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">📐 Visual Architecture & Flow Diagrams</h4>
+            <div id="mermaidDiagramsContainer" style="display:flex; flex-direction:column; gap:24px; flex:1"></div>
+          </div>
+        </div>
+
+        <!-- Standard File Editor -->
+        <div id="fileViewContainer" style="margin-top: 12px; display:none; flex-direction:column; flex:1; overflow:hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Agent Config ── -->
+  <div class="panel" id="panel-config">
+    <div class="config-layout">
+      <h2>Agent Team</h2>
+      <p class="muted-note">Configure global team templates or customize project overrides. Project-specific agents take precedence over global agents with matching names.</p>
+      
+      <!-- Active Scope Header -->
+      <div id="activeScopeBanner" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; margin-bottom:20px; display:flex; align-items:center; justify-content:space-between">
+        <div style="display:flex; flex-direction:column; gap:2px">
+          <span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.06em">Active Scope</span>
+          <span id="scopeLabel" style="font-family:var(--heading-font); font-size:15px; font-weight:700; color:var(--accent2)">Global Scope (No Project Open)</span>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center">
+          
+          <button class="btn btn-primary" onclick="addNewAgentCard()" style="font-size:12px; padding:6px 12px">＋ Add Agent</button>
+        </div>
+      </div>
+
+      <div class="agent-cards" id="agentCardsContainer"></div>
+
+    </div>
+  </div>
+
+  <div class="panel" id="panel-mcp">
+    <div class="config-layout">
+      <!-- MCP Servers -->
+      <div id="mcpConfigSection">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
+          <h2 style="margin:0;">MCP Servers (Local Tools)</h2>
+          <button class="btn btn-primary" onclick="document.getElementById('mcpAddForm').style.display='flex'" style="font-size:12px; padding:6px 12px">＋ Add Server</button>
+        </div>
+        <p class="muted-note" style="margin-bottom:16px;">Configure Model Context Protocol (MCP) servers to give agents access to external tools. Servers configured here will be available to Claude agents in this project.</p>
+        
+        <div id="mcpList" style="display:flex; flex-direction:column; gap:12px; margin-bottom:16px;"></div>
+        
+        <div id="mcpAddForm" style="display:none; flex-direction:column; gap:8px; background:var(--bg2); padding:16px; border-radius:var(--radius); border:1px solid var(--border)">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="font-size:13px; font-weight:600;">Add New MCP Server</div>
+            <button class="btn btn-secondary" style="padding:4px 8px; font-size:11px" onclick="document.getElementById('mcpAddForm').style.display='none'">Cancel</button>
+          </div>
+          <input type="text" id="mcpName" placeholder="Name (e.g. filesystem)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <input type="text" id="mcpCommand" placeholder="Command or SSE URL (e.g. npx or http://localhost:8000/sse)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <input type="text" id="mcpArgs" placeholder="Arguments (comma separated, e.g. -y,@modelcontextprotocol/server-filesystem,/Users)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <input type="text" id="mcpEnv" placeholder="Env Vars (key=value,key2=value2)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <button class="btn btn-primary" style="align-self:flex-start;" onclick="addMCPServer()">Save Server</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-history">
+    <div class="history-layout">
+      <h2>Run History</h2>
+      <p class="muted-note" style="margin-top:8px">Persisted in this project's internal DesignFlow workspace metadata.</p>
+      <div class="history-grid" id="historyGrid"><div class="empty-state">Open a project to view previous runs.</div></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="token-bar">
+  Total tokens: <span id="totalTokens">0</span>
+  &nbsp;·&nbsp; Cached input: <span id="totalCachedTokens">0</span>
+  &nbsp;·&nbsp; Estimated cost: <span id="totalCost">$0.000000</span>
+  &nbsp;·&nbsp; Events: <span id="eventCount">0</span>
+  &nbsp;·&nbsp; Run: <span id="runId">—</span>
+</div>
+
+
+  <script src="/js/state.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/workspace.js"></script>
+  <script src="/js/agents.js"></script>
+  <script src="/js/main.js"></script>
+
+<!-- Login Modal -->
+<div id="loginModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
+  <div style="background:var(--surface); padding:40px; border-radius:12px; border:1px solid var(--border); width:400px; display:flex; flex-direction:column; gap:20px;">
+    <h2 style="margin:0; text-align:center; color:var(--text);">Login to DesignFlow</h2>
+    <div>
+      <label style="color:var(--muted); font-size:12px; margin-bottom:5px; display:block;">Username</label>
+      <input type="text" id="loginUsername" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;">
+    </div>
+    <div>
+      <label style="color:var(--muted); font-size:12px; margin-bottom:5px; display:block;">Password</label>
+      <input type="password" id="loginPassword" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;" onkeydown="if(event.key==='Enter') submitLogin()">
+    </div>
+    <div id="loginError" style="color:#ff6b6b; font-size:12px; text-align:center; min-height:15px;"></div>
+    <button class="btn btn-primary" onclick="submitLogin()" style="width:100%; padding:12px; font-size:16px;">Login</button>
+  </div>
+</div>
+</body>
+</html>
