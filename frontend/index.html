@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css?v=20260710q">
+  <link rel="stylesheet" href="/css/style.css?v=20260710t">
 </head>
 <body>
 
@@ -142,7 +142,7 @@
         <div id="cockpitEmptyState" class="cockpit-empty-state">
           <div class="cockpit-empty-badge">DesignFlow</div>
           <h2>Open a project to start a focused design debate</h2>
-          <p>Load a repository or product folder first. Once a project is open, DesignFlow will show only the design summary, active questions, and the few next steps that actually matter.</p>
+          <p>Load a repository or product folder first. Your prompt, the agents’ discussion, and any questions that need your input will stay together in one workspace.</p>
           <div class="cockpit-empty-actions">
             <button class="btn btn-primary" onclick="openProject()">Open Project</button>
           </div>
@@ -162,50 +162,21 @@
               <span class="cockpit-meta-label">Stage</span>
               <span class="cockpit-meta-value" id="cockpitStage">Idle</span>
             </div>
+            <button class="btn btn-secondary cockpit-export-btn" onclick="exportContext()">Export context</button>
           </div>
 
-          <div class="steer-bar cockpit-composer">
-            <div class="cockpit-composer-topline">
+          <section class="discussion-window" aria-label="Design discussion">
+            <div class="discussion-header">
               <div>
-                <div class="cockpit-card-kicker">Guide the debate</div>
-                <div class="cockpit-composer-title">What should DesignFlow work on next?</div>
+                <div class="cockpit-card-kicker">Live workspace</div>
+                <h2>Prompt and agent discussion</h2>
               </div>
+              <span class="cockpit-chip" id="cockpitStatusChip">Idle</span>
             </div>
 
-            <div class="cockpit-composer-row">
-              <input id="steerInput" name="design_prompt" placeholder="Type a prompt/task here and press Enter to start the run…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
-              <div class="cockpit-composer-actions">
-                <button class="btn btn-primary cockpit-small-btn" id="sendBtn" onclick="steer()">Start run</button>
-                <button class="cockpit-inline-action" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
-                <button class="cockpit-inline-action" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
-                <button class="cockpit-inline-action danger" id="stopBtn" onclick="stopRun()" style="display:none">Stop</button>
-                <button class="cockpit-inline-action" onclick="retryFailedTurn()" id="retryBtn" style="display:none">Retry</button>
-              </div>
-            </div>
-          </div>
+            <div id="feed" class="feed discussion-feed"></div>
 
-          <div class="cockpit-main">
-          <div class="cockpit-primary">
-            <div class="cockpit-card cockpit-focus-card">
-              <div class="cockpit-card-header">
-                <div>
-                  <div class="cockpit-card-kicker">Current decision</div>
-                  <h3>What the team is trying to resolve</h3>
-                </div>
-                <span class="cockpit-chip" id="cockpitStatusChip">Idle</span>
-              </div>
-              <div class="cockpit-card-body" id="cockpitCurrentDecision">Start a run to surface the most important active decision.</div>
-              <div class="cockpit-focus-meta">
-                <div class="cockpit-focus-meta-block">
-                  <div class="cockpit-card-kicker">Recommendation</div>
-                  <div class="cockpit-focus-meta-text" id="cockpitRecommendation">Recommendations from the debate will appear here.</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="cockpit-secondary">
-            <div id="contextPendingActions" class="cockpit-card attention-card" style="display:none;">
+            <div id="contextPendingActions" class="discussion-input-request attention-card" style="display:none;">
               <div class="cockpit-card-header">
                 <div>
                   <div class="cockpit-card-kicker">Action required</div>
@@ -220,89 +191,19 @@
               </div>
             </div>
 
-            <div class="cockpit-card cockpit-summary-card">
-              <div class="cockpit-card-header">
-                <div>
-                  <div class="cockpit-card-kicker">Current work summary</div>
-                  <h3 id="contextAgentName">Ready to start</h3>
-                </div>
-                <div class="status-indicator running" id="contextAgentStatus"></div>
-              </div>
-
-              <div class="cockpit-subtabs" role="tablist" aria-label="Design cockpit details">
-                <button class="cockpit-subtab active" id="cockpitSubtab-summary" onclick="showCockpitInfoTab('summary')" type="button">Summary</button>
-                <button class="cockpit-subtab" id="cockpitSubtab-details" onclick="showCockpitInfoTab('details')" type="button">Details</button>
-                <button class="cockpit-subtab" id="cockpitSubtab-actions" onclick="showCockpitInfoTab('actions')" type="button">Actions</button>
-              </div>
-
-              <div class="cockpit-tab-panel active" id="cockpitPanel-summary">
-                <div class="cockpit-card-body compact-stack">
-                  <div class="summary-block">
-                    <div class="summary-label">Focus</div>
-                    <div id="contextWorkSummary">Start a run to see a compact summary of what the team is exploring.</div>
-                  </div>
-                  <div class="summary-block">
-                    <div class="summary-label">Next output</div>
-                    <div id="contextExpectedOutput">You will see the next artifact or decision outcome here.</div>
-                  </div>
-                  <div class="summary-block summary-block-accent">
-                    <div class="summary-label">Waiting on you</div>
-                    <div id="contextNeedsInput">No user action needed right now.</div>
-                  </div>
-                  <div id="contextWhyNow" style="display:none;">The team will summarize why the current step matters before diving deeper.</div>
-                </div>
-              </div>
-
-              <div class="cockpit-tab-panel cockpit-tab-panel-scroll" id="cockpitPanel-details" style="display:none;">
-                <div class="cockpit-table-wrap" id="cockpitSupportDetails">
-                    <table class="cockpit-detail-table">
-                      <tbody>
-                        <tr>
-                          <th>Latest updates</th>
-                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitRecentChanges"><div class="cockpit-empty">No meaningful changes yet.</div></div></td>
-                        </tr>
-                        <tr>
-                          <th>Decision timeline</th>
-                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitDecisionTimeline"><div class="cockpit-empty">No decisions captured yet.</div></div></td>
-                        </tr>
-                        <tr>
-                          <th>Open loops</th>
-                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitOpenLoops"><div class="cockpit-empty">No open loops detected.</div></div></td>
-                        </tr>
-                      </tbody>
-                    </table>
-                </div>
-              </div>
-
-              <div class="cockpit-tab-panel cockpit-tab-panel-scroll" id="cockpitPanel-actions" style="display:none;">
-                <div class="cockpit-action-groups">
-                  <div class="cockpit-action-group">
-                    <div class="cockpit-card-kicker">Workflow templates</div>
-                    <div class="action-grid compact-action-grid">
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('new_design')">New design</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('refine_plan')">Refine plan</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('resolve_issue')">Resolve issue</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('redebate_decision')">Re-debate decision</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('simplify_scope')">Simplify scope</button>
-                    </div>
-                  </div>
-                  <div class="cockpit-action-group">
-                    <div class="cockpit-card-kicker">Guide the team</div>
-                    <div class="action-grid compact-action-grid">
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('approve')">Approve</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('alternatives')">Alternatives</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('challenge')">Challenge</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('simplify')">Simplify</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('userflow')">User flow</button>
-                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCheckpointSteer('plan')">Priorities</button>
-                    </div>
-                  </div>
+            <div class="steer-bar cockpit-composer discussion-composer">
+              <div class="cockpit-composer-row">
+                <input id="steerInput" name="design_prompt" placeholder="Describe what you want the agents to design…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
+                <div class="cockpit-composer-actions">
+                  <button class="btn btn-primary cockpit-small-btn" id="sendBtn" onclick="steer()">Start run</button>
+                  <button class="cockpit-inline-action" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
+                  <button class="cockpit-inline-action" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
+                  <button class="cockpit-inline-action danger" id="stopBtn" onclick="stopRun()" style="display:none">Stop</button>
+                  <button class="cockpit-inline-action" onclick="retryFailedTurn()" id="retryBtn" style="display:none">Retry</button>
                 </div>
               </div>
             </div>
-          </div>
-          </div>
-          <div id="feed" style="display:none;"></div>
+          </section>
           <span id="reasoningLogMeta" style="display:none;"></span>
       </div>
     </div>
@@ -331,10 +232,6 @@
         <div id="srcFileList" style="display:flex;flex-direction:column;gap:3px"></div>
       </div>
       <div class="ws-content">
-        <div style="display:flex; align-items:center; justify-content:flex-end;">
-          <button class="btn btn-secondary" onclick="exportContext()" style="margin-top: 12px; margin-right: 12px; font-weight:600; padding:6px 12px; font-size:11.5px;">⬇️ Export Context</button>
-        </div>
-
         <div id="designCockpitView" style="margin-top: 12px; display:flex; flex-direction:column; flex:1; min-height:0;"></div>
         
         <div id="dashboardView" style="margin-top: 12px; display:none; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
@@ -400,6 +297,11 @@
 
   <div class="panel" id="panel-mcp">
     <div class="config-layout">
+      <div id="mcpProjectRequired" class="panel-empty-message" style="display:none;">
+        <h2>Open a project to configure MCP servers</h2>
+        <p>MCP servers belong to a project. Open or switch to a project, then return here to manage its local tools.</p>
+        <button class="btn btn-primary" onclick="openProject()">Open project</button>
+      </div>
       <!-- MCP Servers -->
       <div id="mcpConfigSection">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
@@ -447,9 +349,9 @@
 
 
   <script src="/js/state.js?v=20260710q"></script>
-  <script src="/js/api.js?v=20260710q"></script>
+  <script src="/js/api.js?v=20260710t"></script>
   <script src="/js/workspace.js?v=20260710q"></script>
-  <script src="/js/agents.js?v=20260710q"></script>
+  <script src="/js/agents.js?v=20260710r"></script>
   <script src="/js/main.js?v=20260710q"></script>
 
 <!-- Login Modal -->

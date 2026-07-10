@@ -421,6 +421,7 @@ function appendFeed(ev) {
   let summary = '';
   let detail = '';
   let metricsHtml = '';
+  let kindLabel = (ev.kind || 'update').replace(/_/g, ' ');
 
   switch(ev.kind) {
     case 'phase':
@@ -429,14 +430,15 @@ function appendFeed(ev) {
       break;
     case 'turn_start': {
       const verb = getAgentVerb(ev.agent);
-      summary = `${verb}... (${ev.data.turn_id || 'turn'} · attempt ${ev.data.attempt || 1})`;
+      summary = `${verb} through the request…`;
+      kindLabel = 'thinking';
       break;
     }
     case 'turn_end': {
       const u = ev.data.usage || {};
-      const verb = getAgentVerb(ev.agent);
-      summary = `${verb} completed (${ev.data.turn_id || 'turn'} · attempt ${ev.data.attempt || 1}) · ${(u.input_tokens||0).toLocaleString()} in, ${(u.output_tokens||0).toLocaleString()} out`;
       detail = ev.data.response || '';
+      summary = conversationalAgentSummary(detail, ev.agent);
+      kindLabel = 'summary';
       const totalTok = (u.input_tokens || 0) + (u.output_tokens || 0);
       const turnCost = ev.data.pricing_known ? formatCost(ev.data.cost_usd || 0) : 'unpriced';
       metricsHtml = `<span class="feed-metrics-badge">${totalTok.toLocaleString()} tok · ${turnCost}</span>`;
@@ -493,7 +495,7 @@ function appendFeed(ev) {
         <div class="feed-header-line">
           <div class="feed-agent-details">
             <span class="feed-agent">${ev.agent || 'System'}</span>
-            <span class="feed-kind">${ev.kind}</span>
+            <span class="feed-kind">${escHtml(kindLabel)}</span>
             ${metricsHtml}
           </div>
           <span class="feed-ts">${ts}</span>
@@ -510,6 +512,65 @@ function appendFeed(ev) {
   feed.appendChild(div);
   feed.scrollTop = feed.scrollHeight;
   if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
+}
+
+function conversationalAgentSummary(response, agent) {
+  const preferredSections = ['USER_SUMMARY', 'CONSENSUS_APPEND', 'DECISION_CHECKPOINT'];
+  for (const section of preferredSections) {
+    const value = parseProtocolSection(response || '', section);
+    if (value) return summarizeConversationText(value);
+  }
+
+  const cleaned = String(response || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^#{1,6}\s+.*$/gm, ' ')
+    .replace(/^[A-Z][A-Z_ ]+:\s*.*$/gm, ' ')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/[*_`>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned
+    ? summarizeConversationText(cleaned)
+    : `${agent || 'The agent'} finished reviewing the request.`;
+}
+
+function summarizeConversationText(text) {
+  const clean = String(text || '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/[*_`>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (clean.length <= 280) return clean;
+  const shortened = clean.slice(0, 277);
+  const sentenceEnd = Math.max(shortened.lastIndexOf('. '), shortened.lastIndexOf('? '), shortened.lastIndexOf('! '));
+  return `${sentenceEnd > 140 ? shortened.slice(0, sentenceEnd + 1) : shortened}…`;
+}
+
+function appendUserPrompt(message) {
+  const feed = document.getElementById('feed');
+  if (!feed || !message) return;
+  const item = document.createElement('div');
+  item.className = 'feed-item user-prompt';
+  const row = document.createElement('div');
+  row.className = 'feed-row';
+  const avatar = document.createElement('div');
+  avatar.className = 'feed-avatar';
+  avatar.style.background = 'var(--accent)';
+  avatar.textContent = 'Y';
+  const meta = document.createElement('div');
+  meta.className = 'feed-meta';
+  const header = document.createElement('div');
+  header.className = 'feed-header-line';
+  header.innerHTML = '<span class="feed-agent">You</span><span class="feed-ts">Just now</span>';
+  const text = document.createElement('div');
+  text.className = 'feed-text';
+  text.textContent = message;
+  meta.append(header, text);
+  row.append(avatar, meta);
+  item.appendChild(row);
+  feed.appendChild(item);
+  feed.scrollTop = feed.scrollHeight;
 }
 
 
@@ -601,6 +662,7 @@ async function startRun(prompt) {
   const data = await res.json();
   if (res.ok && data.ok) {
     document.getElementById('runId').textContent = data.run_id;
+    appendUserPrompt(idea);
     updateStatus('running');
   } else {
     notify(data.detail || 'Failed to start', true);
@@ -855,7 +917,10 @@ function clearFeed() {
   document.getElementById('totalTokens').textContent = '0';
   document.getElementById('totalCachedTokens').textContent = '0';
   document.getElementById('totalCost').textContent = '$0.000000';
-  document.getElementById('progressTaskList').innerHTML = '<div style="color:var(--muted);font-size:12px">No tasks defined in PLAN.md yet.</div>';
+  const progressTaskList = document.getElementById('progressTaskList');
+  if (progressTaskList) {
+    progressTaskList.innerHTML = '<div style="color:var(--muted);font-size:12px">No tasks defined in PLAN.md yet.</div>';
+  }
   document.getElementById('eventCount').textContent = '0';
   
   const liveInsights = document.getElementById('liveInsightsContainer');

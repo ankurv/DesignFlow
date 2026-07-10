@@ -438,11 +438,15 @@ function addNewAgentCard() {
 let mcpServers = [];
 
 async function loadMCPServers() {
+  const configSection = document.getElementById('mcpConfigSection');
+  const projectRequired = document.getElementById('mcpProjectRequired');
   if (!projectOpen) {
-    document.getElementById('mcpConfigSection').style.display = 'none';
+    if (configSection) configSection.style.display = 'none';
+    if (projectRequired) projectRequired.style.display = 'flex';
     return;
   }
-  document.getElementById('mcpConfigSection').style.display = 'block';
+  if (projectRequired) projectRequired.style.display = 'none';
+  if (configSection) configSection.style.display = 'block';
   const res = await fetch('/mcp').then(r => r.json());
   mcpServers = res.servers || [];
   renderMCPServers();
@@ -518,4 +522,3 @@ async function deleteMCPServer(id) {
     notify('Failed to delete MCP server', true);
   }
 }
-
