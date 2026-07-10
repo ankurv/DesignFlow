@@ -7,15 +7,45 @@ let agentColors = {};
 const COLORS = ['#818cf8','#22c55e','#14b8a6','#f97316','#eab308','#ec4899','#06b6d4'];
 let colorIdx = 0;
 let agentConfigs = []; // local copy for config panel
-let currentWsKey = 'dashboard';
+let currentWsKey = 'cockpit';
 let agentHealthStatus = {};
 let paused = false;
 let projectOpen = false;
 let currentProjectPath = '';
+let currentProjectBrief = '';
 let toastTimer = null;
 let lastMermaidCode = '';
 let promptHistory = [];
 let promptHistoryIndex = -1;
+
+function applyProjectState(data = {}) {
+  const isOpen = !!data.open;
+  projectOpen = isOpen;
+  currentProjectPath = isOpen ? (data.path || '') : '';
+  currentProjectBrief = isOpen ? (data.brief || '') : '';
+  document.body.classList.toggle('project-open', isOpen);
+
+  if (isOpen && data.settings && data.settings.max_tokens) {
+    const el = document.getElementById('maxTokensInput');
+    if (el) el.value = data.settings.max_tokens;
+    maxTokens = data.settings.max_tokens;
+  }
+
+  const stateEl = document.getElementById('projectState');
+  if (stateEl) {
+    if (isOpen && currentProjectPath) {
+      const parts = currentProjectPath.split('/');
+      const projName = parts[parts.length - 1] || currentProjectPath;
+      stateEl.textContent = projName;
+      stateEl.className = 'project-state ready';
+    } else {
+      stateEl.textContent = 'No project open';
+      stateEl.className = 'project-state';
+    }
+  }
+
+  if (typeof updateDesignCockpit === 'function') updateDesignCockpit();
+}
 
 function notify(message, isError=false) {
   const toast = document.getElementById('toast');
@@ -175,32 +205,42 @@ async function loadPresetTeam() {
   }
 }
 
-async function openProject() {
-  const path = prompt("Enter the absolute path to your project folder:", currentProjectPath || "");
+function closeProjectModal() {
+  const modal = document.getElementById('projectOpenModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitProjectPath() {
+  const input = document.getElementById('projectPathInput');
+  const path = input ? input.value.trim() : '';
   if (!path) return false;
-  
+  const ok = await openProject(path);
+  if (ok) closeProjectModal();
+  return ok;
+}
+
+async function openProject(pathOverride = '') {
+  const path = (pathOverride || '').trim();
+  if (!path) {
+    const modal = document.getElementById('projectOpenModal');
+    const input = document.getElementById('projectPathInput');
+    if (input) {
+      input.value = currentProjectPath || '';
+      input.focus();
+      input.select();
+    }
+    if (modal) modal.style.display = 'flex';
+    return false;
+  }
+
   const response = await fetch('/project/open', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({path})
   });
   const data = await response.json();
   if (!response.ok) { notify(data.detail || 'Could not open project', true); return false; }
-  projectOpen = true;
-  currentProjectPath = data.path;
-  
-  if (data.settings && data.settings.max_tokens) {
-    const el = document.getElementById('maxTokensInput');
-    if (el) el.value = data.settings.max_tokens;
-    maxTokens = data.settings.max_tokens;
-  }
-  
-  // Extract project name from path
-  const parts = data.path.split('/');
-  const projName = parts[parts.length - 1];
-  
-  document.getElementById('projectState').textContent = projName;
-  document.getElementById('projectState').className = 'project-state ready';
-  currentWsKey = 'dashboard';
+  applyProjectState(data);
+  currentWsKey = 'cockpit';
   await loadAgentConfig();
   renderHistory(data.recent_runs || []);
   await fetchAgentStatus();
@@ -214,22 +254,8 @@ async function openProject() {
 
 async function loadCurrentProject() {
   const data = await fetch('/project').then(r=>r.json());
+  applyProjectState(data);
   if (!data.open) return;
-  projectOpen = true;
-  currentProjectPath = data.path;
-  
-  if (data.settings && data.settings.max_tokens) {
-    const el = document.getElementById('maxTokensInput');
-    if (el) el.value = data.settings.max_tokens;
-    maxTokens = data.settings.max_tokens;
-  }
-  
-  const parts = data.path.split('/');
-  const projName = parts[parts.length - 1];
-  
-  document.getElementById('projectState').textContent = projName;
-  document.getElementById('projectState').className = 'project-state ready';
   renderHistory(data.recent_runs || []);
   await loadAgentConfig();
 }
-

@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/style.css?v=20260710q">
 </head>
 <body>
 
@@ -38,9 +38,9 @@
 
 </header>
 
-<div class="project-strip" style="padding: 16px 24px;">
+<div class="project-strip" style="padding: 10px 24px;">
   <span class="project-label" style="font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;">Current Project:</span>
-  <span class="project-state" id="projectState" style="font-size: 14px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
+  <span class="project-state" id="projectState" style="font-size: 13px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
   <button class="btn btn-secondary" id="openProjectBtn" onclick="openProject()" style="padding: 6px 12px; font-size: 12px; border-radius: 20px;">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:2px"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
     Switch Project
@@ -49,8 +49,7 @@
 </div>
 
 <nav>
-  <div class="tab active" onclick="showTab('chat',this)">Live Feed</div>
-  <div class="tab" onclick="showTab('workspace',this)">Project Files</div>
+  <div class="tab active" onclick="showTab('workspace',this)">Architect Dashboard</div>
     <div class="tab" onclick="showTab('config',this)">Agents</div>
   <div class="tab" onclick="showTab('mcp',this)">MCP Servers</div>
   <div class="tab" onclick="showTab('settings',this)">Settings</div>
@@ -73,7 +72,7 @@
           <span style="font-size:12px; color:var(--muted);">Set the maximum token limit per run</span>
         </div>
           <div style="display:flex; gap:12px; align-items:center;">
-          <input type="text" id="maxTokensInput" value="100000" autocomplete="off" data-lpignore="true" style="width:120px; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg); color:var(--text); font-family:var(--mono); text-align:right;">
+          <input type="text" id="maxTokensInput" name="run_max_tokens" value="100000" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="width:120px; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg); color:var(--text); font-family:var(--mono); text-align:right;">
           <button class="btn btn-secondary" onclick="updateTokens()" style="padding:8px 16px;">Save</button>
         </div>
       </div>
@@ -96,7 +95,7 @@
     <div style="background:var(--bg2); padding:24px; border-radius:var(--radius); border:1px solid var(--border); margin-bottom:32px;">
       <h3 style="margin-top:0; font-size:15px; margin-bottom:16px;">Change My Password</h3>
       <div style="display:flex; gap:12px; align-items:center;">
-        <input type="password" id="newPassword" placeholder="Enter new password" style="flex:1; max-width:300px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <input type="text" id="newPassword" name="account_new_password" class="masked-input" placeholder="Enter new password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:300px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
         <button class="btn btn-secondary" onclick="changeMyPassword()" style="padding:10px 20px;">Update Password</button>
       </div>
     </div>
@@ -118,15 +117,15 @@
       
       <h4 style="margin-top:0; margin-bottom:12px; font-size:14px;">Add New User</h4>
       <div style="display:flex; gap:12px; align-items:center;">
-        <input type="text" id="newUsername" placeholder="Username" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
-        <input type="password" id="newUserPassword" placeholder="Password" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
-        <button class="btn btn-primary" onclick="addUser()" style="padding:10px 20px;">Create User</button>
+        <input type="text" id="newUsername" name="member_username" placeholder="Username" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <input type="text" id="newUserPassword" name="member_new_password" class="masked-input" placeholder="Temporary password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
+        <button class="btn btn-primary" onclick="addUser()" style="padding:8px 14px;">Create User</button>
       </div>
     </div>
   </div>
 
   <!-- ── Live Feed ── -->
-  <div class="panel active" id="panel-chat">
+  <div class="panel" id="panel-chat">
     <div class="chat-layout">
       <!-- Sidebar is hidden per user request, agents and inline tracker removed from here -->
       <div class="chat-sidebar" style="display:none;">
@@ -139,87 +138,180 @@
           <div id="inlineTaskTracker" style="display:none;"></div>
         </div>
       </div>
-      <div class="feed-area">
-        <!-- Live feed and Agent Context side-by-side -->
-        <div style="display:flex; flex:1; overflow:hidden;">
-          <div class="feed" id="feed" style="flex:2; border-right:1px solid var(--border);"></div>
-          
-          <div style="flex:1; display:flex; flex-direction:column; overflow:hidden; background:var(--bg2);">
-            <div style="padding:20px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:14px; overflow-y:auto;">
-              <h2 style="margin:0; color:var(--text); font-family:var(--heading-font); text-transform:uppercase; font-size:14px; display:flex; align-items:center; gap:8px">
-                <div class="status-indicator running" id="contextAgentStatus"></div>
-                Current Work Summary
-              </h2>
-              <div id="contextAgentName" style="font-weight:700; color:var(--accent);">Ready to start</div>
+      <div class="feed-area cockpit-shell">
+        <div id="cockpitEmptyState" class="cockpit-empty-state">
+          <div class="cockpit-empty-badge">DesignFlow</div>
+          <h2>Open a project to start a focused design debate</h2>
+          <p>Load a repository or product folder first. Once a project is open, DesignFlow will show only the design summary, active questions, and the few next steps that actually matter.</p>
+          <div class="cockpit-empty-actions">
+            <button class="btn btn-primary" onclick="openProject()">Open Project</button>
+          </div>
+        </div>
 
-              <div style="display:flex; flex-direction:column; gap:10px;">
-                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Focus</div>
-                  <div id="contextWorkSummary" style="color:var(--text); font-size:13px; line-height:1.6;">Start a run to see a compact summary of what the team is exploring.</div>
+        <div id="cockpitLoadedState" class="cockpit-loaded-state" style="display:none;">
+          <div class="cockpit-topbar cockpit-meta-row">
+            <div class="cockpit-meta-item">
+              <span class="cockpit-meta-label">Project</span>
+              <span class="cockpit-meta-value" id="cockpitProjectGoal">Open a project to begin.</span>
+            </div>
+            <div class="cockpit-meta-item">
+              <span class="cockpit-meta-label">Stage</span>
+              <span class="cockpit-meta-value" id="cockpitStage">Idle</span>
+            </div>
+          </div>
+
+          <div class="steer-bar cockpit-composer">
+            <div class="cockpit-composer-topline">
+              <div>
+                <div class="cockpit-card-kicker">Guide the debate</div>
+                <div class="cockpit-composer-title">What should DesignFlow work on next?</div>
+              </div>
+            </div>
+
+            <div class="cockpit-composer-row">
+              <input id="steerInput" name="design_prompt" placeholder="Type a prompt/task here and press Enter to start the run…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
+              <div class="cockpit-composer-actions">
+                <button class="btn btn-primary cockpit-small-btn" id="sendBtn" onclick="steer()">Start run</button>
+                <button class="cockpit-inline-action" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
+                <button class="cockpit-inline-action" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
+                <button class="cockpit-inline-action danger" id="stopBtn" onclick="stopRun()" style="display:none">Stop</button>
+                <button class="cockpit-inline-action" onclick="retryFailedTurn()" id="retryBtn" style="display:none">Retry</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="cockpit-main">
+          <div class="cockpit-primary">
+            <div class="cockpit-card cockpit-focus-card">
+              <div class="cockpit-card-header">
+                <div>
+                  <div class="cockpit-card-kicker">Current decision</div>
+                  <h3>What the team is trying to resolve</h3>
                 </div>
-                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Why now</div>
-                  <div id="contextWhyNow" style="color:var(--muted); font-size:13px; line-height:1.6;">The team will summarize why the current step matters before diving deeper.</div>
+                <span class="cockpit-chip" id="cockpitStatusChip">Idle</span>
+              </div>
+              <div class="cockpit-card-body" id="cockpitCurrentDecision">Start a run to surface the most important active decision.</div>
+              <div class="cockpit-focus-meta">
+                <div class="cockpit-focus-meta-block">
+                  <div class="cockpit-card-kicker">Recommendation</div>
+                  <div class="cockpit-focus-meta-text" id="cockpitRecommendation">Recommendations from the debate will appear here.</div>
                 </div>
-                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,0.02);">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px;">Expected output</div>
-                  <div id="contextExpectedOutput" style="color:var(--muted); font-size:13px; line-height:1.6;">You will see the next artifact or decision outcome here.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cockpit-secondary">
+            <div id="contextPendingActions" class="cockpit-card attention-card" style="display:none;">
+              <div class="cockpit-card-header">
+                <div>
+                  <div class="cockpit-card-kicker">Action required</div>
+                  <h3>Waiting on your input</h3>
                 </div>
-                <div style="padding:12px; border:1px solid var(--border); border-radius:10px; background:rgba(99, 102, 241, 0.06); border-color:rgba(99, 102, 241, 0.35);">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--accent2); margin-bottom:6px;">Waiting on you</div>
-                  <div id="contextNeedsInput" style="color:var(--text); font-size:13px; line-height:1.6;">No user action needed right now.</div>
+              </div>
+              <div id="contextQuestionsBody" class="cockpit-card-body md-content" style="margin-bottom:16px;"></div>
+              <div id="contextDecisionOptions" style="display:none; flex-wrap:wrap; gap:10px; margin-bottom:14px;"></div>
+              <div style="display:flex; flex-direction:column; gap:12px;">
+                <textarea id="contextAnswerInput" name="decision_response" rows="4" placeholder="Type your decision, guidance, or answer here..." autocomplete="off" autocorrect="off" autocapitalize="sentences" spellcheck="true" data-lpignore="true" style="width:100%; resize:vertical; font-family:var(--font); padding:14px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:var(--text); font-size:14px;"></textarea>
+                <button class="btn btn-primary cockpit-small-btn" onclick="submitContextAnswer()" style="align-self:flex-end;">Submit</button>
+              </div>
+            </div>
+
+            <div class="cockpit-card cockpit-summary-card">
+              <div class="cockpit-card-header">
+                <div>
+                  <div class="cockpit-card-kicker">Current work summary</div>
+                  <h3 id="contextAgentName">Ready to start</h3>
+                </div>
+                <div class="status-indicator running" id="contextAgentStatus"></div>
+              </div>
+
+              <div class="cockpit-subtabs" role="tablist" aria-label="Design cockpit details">
+                <button class="cockpit-subtab active" id="cockpitSubtab-summary" onclick="showCockpitInfoTab('summary')" type="button">Summary</button>
+                <button class="cockpit-subtab" id="cockpitSubtab-details" onclick="showCockpitInfoTab('details')" type="button">Details</button>
+                <button class="cockpit-subtab" id="cockpitSubtab-actions" onclick="showCockpitInfoTab('actions')" type="button">Actions</button>
+              </div>
+
+              <div class="cockpit-tab-panel active" id="cockpitPanel-summary">
+                <div class="cockpit-card-body compact-stack">
+                  <div class="summary-block">
+                    <div class="summary-label">Focus</div>
+                    <div id="contextWorkSummary">Start a run to see a compact summary of what the team is exploring.</div>
+                  </div>
+                  <div class="summary-block">
+                    <div class="summary-label">Next output</div>
+                    <div id="contextExpectedOutput">You will see the next artifact or decision outcome here.</div>
+                  </div>
+                  <div class="summary-block summary-block-accent">
+                    <div class="summary-label">Waiting on you</div>
+                    <div id="contextNeedsInput">No user action needed right now.</div>
+                  </div>
+                  <div id="contextWhyNow" style="display:none;">The team will summarize why the current step matters before diving deeper.</div>
                 </div>
               </div>
 
-              <div style="padding-top:4px; border-top:1px solid var(--border);">
-                <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px;">Quick involvement</div>
-                <div style="display:flex; flex-wrap:wrap; gap:8px;">
-                  <button class="btn btn-secondary" onclick="applyCollabSteer('approve')" style="padding:5px 10px; font-size:11px">Approve direction</button>
-                  <button class="btn btn-secondary" onclick="applyCollabSteer('alternatives')" style="padding:5px 10px; font-size:11px">Ask for alternatives</button>
-                  <button class="btn btn-secondary" onclick="applyCollabSteer('challenge')" style="padding:5px 10px; font-size:11px">Challenge assumption</button>
-                  <button class="btn btn-secondary" onclick="applyCollabSteer('simplify')" style="padding:5px 10px; font-size:11px">Simplify the plan</button>
-                  <button class="btn btn-secondary" onclick="applyCollabSteer('userflow')" style="padding:5px 10px; font-size:11px">Focus on user flow</button>
+              <div class="cockpit-tab-panel cockpit-tab-panel-scroll" id="cockpitPanel-details" style="display:none;">
+                <div class="cockpit-table-wrap" id="cockpitSupportDetails">
+                    <table class="cockpit-detail-table">
+                      <tbody>
+                        <tr>
+                          <th>Latest updates</th>
+                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitRecentChanges"><div class="cockpit-empty">No meaningful changes yet.</div></div></td>
+                        </tr>
+                        <tr>
+                          <th>Decision timeline</th>
+                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitDecisionTimeline"><div class="cockpit-empty">No decisions captured yet.</div></div></td>
+                        </tr>
+                        <tr>
+                          <th>Open loops</th>
+                          <td><div class="cockpit-list cockpit-list-compact" id="cockpitOpenLoops"><div class="cockpit-empty">No open loops detected.</div></div></td>
+                        </tr>
+                      </tbody>
+                    </table>
                 </div>
-                <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
-                  <div style="font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px;">Planned checkpoints</div>
-                  <div style="display:flex; flex-wrap:wrap; gap:8px;">
-                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('framing')" style="padding:5px 10px; font-size:11px">Confirm framing</button>
-                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('architecture')" style="padding:5px 10px; font-size:11px">Confirm architecture</button>
-                    <button class="btn btn-secondary" onclick="applyCheckpointSteer('plan')" style="padding:5px 10px; font-size:11px">Confirm priorities</button>
+              </div>
+
+              <div class="cockpit-tab-panel cockpit-tab-panel-scroll" id="cockpitPanel-actions" style="display:none;">
+                <div class="cockpit-action-groups">
+                  <div class="cockpit-action-group">
+                    <div class="cockpit-card-kicker">Workflow templates</div>
+                    <div class="action-grid compact-action-grid">
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('new_design')">New design</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('refine_plan')">Refine plan</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('resolve_issue')">Resolve issue</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('redebate_decision')">Re-debate decision</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyWorkflowTemplate('simplify_scope')">Simplify scope</button>
+                    </div>
+                  </div>
+                  <div class="cockpit-action-group">
+                    <div class="cockpit-card-kicker">Guide the team</div>
+                    <div class="action-grid compact-action-grid">
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('approve')">Approve</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('alternatives')">Alternatives</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('challenge')">Challenge</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('simplify')">Simplify</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCollabSteer('userflow')">User flow</button>
+                      <button class="btn btn-secondary cockpit-tiny-btn" onclick="applyCheckpointSteer('plan')">Priorities</button>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
-        <div class="steer-bar" style="display:flex; flex-direction:column; gap:10px">
-          <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-            <span style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-right:4px;">Workflow shortcuts</span>
-            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('new_design')" style="padding:5px 10px; font-size:11px">New design</button>
-            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('refine_plan')" style="padding:5px 10px; font-size:11px">Refine current plan</button>
-            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('resolve_issue')" style="padding:5px 10px; font-size:11px">Resolve plan issue</button>
-            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('redebate_decision')" style="padding:5px 10px; font-size:11px">Re-debate a decision</button>
-            <button class="btn btn-secondary" onclick="applyWorkflowTemplate('simplify_scope')" style="padding:5px 10px; font-size:11px">Simplify scope</button>
           </div>
-          <div style="display:flex; gap:10px; width:100%">
-            <input id="steerInput" placeholder="Type a prompt/task here and press Enter to start the run…" autocomplete="off" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
-            <button class="btn btn-secondary" id="sendBtn" onclick="steer()">Send</button>
-            <button class="btn btn-secondary" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
-            <button class="btn btn-secondary" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
-            <button class="btn btn-danger" id="stopBtn" onclick="stopRun()" style="display:none">Stop</button>
-            <button class="btn btn-primary" onclick="retryFailedTurn()" id="retryBtn" style="display:none">Retry Failed Turn</button>
-          </div>
-        </div>
+          <div id="feed" style="display:none;"></div>
+          <span id="reasoningLogMeta" style="display:none;"></span>
       </div>
     </div>
   </div>
+  </div>
 
   <!-- ── Workspace ── -->
-  <div class="panel" id="panel-workspace">
+  <div class="panel active" id="panel-workspace">
     <div class="ws-layout">
       <div class="ws-sidebar">
         <div class="sidebar-label" style="margin-bottom:10px">Architect Dashboard</div>
-        <button class="ws-file-btn active" onclick="loadWsFile('dashboard')" id="wsbtn-dashboard">📐 Design Dashboard</button>
+        <button class="ws-file-btn active" onclick="loadWsFile('cockpit')" id="wsbtn-cockpit">🧭 Design</button>
+        <button class="ws-file-btn" onclick="loadWsFile('dashboard')" id="wsbtn-dashboard">📐 Dashboard</button>
         <div class="sidebar-label" style="margin:16px 0 8px">DesignFlow state</div>
         <button class="ws-file-btn" onclick="loadWsFile('design')" id="wsbtn-design">🎨 DESIGN.md</button>
         <button class="ws-file-btn" onclick="loadWsFile('plan')" id="wsbtn-plan">📋 PLAN.md</button>
@@ -230,30 +322,18 @@
         <button class="ws-file-btn" onclick="loadWsFile('logbook')" id="wsbtn-logbook">📖 LOGBOOK.md</button>
         <div style="display:flex; justify-content:space-between; align-items:center; margin:16px 0 8px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Project files</div>
-          <button class="btn btn-secondary" onclick="createNewFile()" style="padding:2px 6px; font-size:10px">+ New File</button>
+          <button class="btn btn-secondary" onclick="createNewFile()" style="padding:5px 9px; font-size:10.5px">+ New File</button>
         </div>
         <div id="srcFileList" style="display:flex;flex-direction:column;gap:3px"></div>
       </div>
       <div class="ws-content">
         <div style="display:flex; align-items:center; justify-content:flex-end;">
-          <button class="btn btn-secondary" onclick="exportContext()" style="margin-top: 12px; margin-right: 12px; font-weight:600; padding:6px 14px;">⬇️ Export Context</button>
+          <button class="btn btn-secondary" onclick="exportContext()" style="margin-top: 12px; margin-right: 12px; font-weight:600; padding:6px 12px; font-size:11.5px;">⬇️ Export Context</button>
         </div>
-        
-        <div id="dashboardView" style="margin-top: 12px; display:flex; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
-          
-          <!-- Action Required / User Input -->
-          <div id="contextPendingActions" style="background:rgba(99, 102, 241, 0.05); border:1px solid var(--accent); border-radius:var(--radius); padding:24px; display:none; flex-direction:column; box-shadow:0 8px 32px var(--accent-glow); animation:pulseBorder 2s infinite;">
-            <h2 style="margin-top:0; color:var(--accent2); font-family:var(--heading-font); text-transform:uppercase; font-size:15px; margin-bottom:16px; display:flex; align-items:center; gap:8px;">
-              <span style="font-size:18px">❓</span> Action Required
-            </h2>
-            <div id="contextQuestionsBody" class="md-content" style="font-size:14px; line-height:1.6; margin-bottom:20px; color:var(--text);"></div>
-            <div id="contextDecisionOptions" style="display:none; flex-wrap:wrap; gap:10px; margin-bottom:14px;"></div>
-            <div style="display:flex; flex-direction:column; gap:12px;">
-              <textarea id="contextAnswerInput" rows="4" placeholder="Type your decision, guidance, or answer here..." style="width:100%; resize:vertical; font-family:var(--font); padding:14px; border-radius:8px; border:1px solid var(--border); background:rgba(0,0,0,0.2); color:var(--text); font-size:14px;"></textarea>
-              <button class="btn btn-primary" onclick="submitContextAnswer()" style="align-self:flex-end; font-size:14px; padding:10px 24px;">Submit Decision</button>
-            </div>
-          </div>
 
+        <div id="designCockpitView" style="margin-top: 12px; display:flex; flex-direction:column; flex:1; min-height:0;"></div>
+        
+        <div id="dashboardView" style="margin-top: 12px; display:none; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
           <!-- Live Insights Stream -->
           <div id="workflowShortcutSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔁 Iterate After You Hit an Issue</h4>
@@ -362,11 +442,11 @@
 </div>
 
 
-  <script src="/js/state.js"></script>
-  <script src="/js/api.js"></script>
-  <script src="/js/workspace.js"></script>
-  <script src="/js/agents.js"></script>
-  <script src="/js/main.js"></script>
+  <script src="/js/state.js?v=20260710q"></script>
+  <script src="/js/api.js?v=20260710q"></script>
+  <script src="/js/workspace.js?v=20260710q"></script>
+  <script src="/js/agents.js?v=20260710q"></script>
+  <script src="/js/main.js?v=20260710q"></script>
 
 <!-- Login Modal -->
 <div id="loginModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
@@ -374,14 +454,31 @@
     <h2 style="margin:0; text-align:center; color:var(--text);">Login to DesignFlow</h2>
     <div>
       <label style="color:var(--muted); font-size:12px; margin-bottom:5px; display:block;">Username</label>
-      <input type="text" id="loginUsername" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;">
+      <input type="text" id="loginUsername" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;">
     </div>
     <div>
       <label style="color:var(--muted); font-size:12px; margin-bottom:5px; display:block;">Password</label>
-      <input type="password" id="loginPassword" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;" onkeydown="if(event.key==='Enter') submitLogin()">
+      <input type="password" id="loginPassword" name="current-password" autocomplete="current-password" spellcheck="false" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;" onkeydown="if(event.key==='Enter') submitLogin()">
     </div>
     <div id="loginError" style="color:#ff6b6b; font-size:12px; text-align:center; min-height:15px;"></div>
-    <button class="btn btn-primary" onclick="submitLogin()" style="width:100%; padding:12px; font-size:16px;">Login</button>
+    <button class="btn btn-primary" onclick="submitLogin()" style="width:100%; padding:10px 12px; font-size:12.5px;">Login</button>
+  </div>
+</div>
+
+<div id="projectOpenModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.72); z-index:9998; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
+  <div style="background:var(--bg2); width:min(680px, calc(100vw - 32px)); padding:28px; border-radius:16px; border:1px solid var(--border); display:flex; flex-direction:column; gap:16px; box-shadow:0 24px 60px rgba(0,0,0,0.35);">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
+      <div>
+        <h2 style="margin:0; color:var(--text); font-family:var(--heading-font);">Open a project</h2>
+        <p style="margin:8px 0 0; color:var(--muted); line-height:1.6;">Enter the absolute path to the repository or product folder you want DesignFlow to use.</p>
+      </div>
+      <button class="btn btn-secondary" onclick="closeProjectModal()" style="padding:6px 10px;">Close</button>
+    </div>
+    <input type="text" id="projectPathInput" name="project_path" placeholder="/Users/avarsheny/friendster" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="if(event.key==='Enter') submitProjectPath()" style="width:100%; padding:14px 16px; border-radius:12px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px;">
+    <div style="display:flex; justify-content:flex-end; gap:10px;">
+      <button class="btn btn-secondary" onclick="closeProjectModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitProjectPath()">Open Project</button>
+    </div>
   </div>
 </div>
 </body>

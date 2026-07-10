@@ -117,6 +117,17 @@ function updateCurrentWorkSummary(fields = {}) {
   if (needs) needs.textContent = fields.needsInput || 'No user action needed right now.';
 }
 
+window.showCockpitInfoTab = function(name) {
+  const tabs = ['summary', 'details', 'actions'];
+  for (const key of tabs) {
+    const btn = document.getElementById(`cockpitSubtab-${key}`);
+    const panel = document.getElementById(`cockpitPanel-${key}`);
+    if (btn) btn.classList.toggle('active', key === name);
+    if (panel) panel.style.display = key === name ? 'block' : 'none';
+    if (panel) panel.classList.toggle('active', key === name);
+  }
+};
+
 
 const CHECKPOINT_STEER_TEMPLATES = {
   framing: 'Pause and confirm the current problem framing, assumptions, and constraints with me before going deeper.',
@@ -165,7 +176,7 @@ function renderQuestionBody(content) {
       optionsEl.style.display = 'flex';
       optionsEl.innerHTML = parsed.options.map(opt => {
         const recommended = parsed.recommendation === opt.label;
-        return `<button class="btn ${recommended ? 'btn-primary' : 'btn-secondary'}" onclick="useDecisionOption('${escAttr(opt.label)}','${escAttr(opt.text)}')" style="padding:8px 12px; font-size:12px">${recommended ? 'Recommended · ' : ''}${escHtml(opt.label)} — ${escHtml(opt.text)}</button>`;
+        return `<button class="btn ${recommended ? 'btn-primary' : 'btn-secondary'}" onclick="useDecisionOption('${escAttr(opt.label)}','${escAttr(opt.text)}')" style="padding:7px 10px; font-size:11.5px">${recommended ? 'Recommended · ' : ''}${escHtml(opt.label)} — ${escHtml(opt.text)}</button>`;
       }).join('');
     } else {
       optionsEl.style.display = 'none';
@@ -173,6 +184,157 @@ function renderQuestionBody(content) {
     }
   }
   return parseMarkdown(content);
+}
+
+
+let recentFileWrites = [];
+
+function extractMarkdownSection(doc, heading) {
+  if (!doc) return '';
+  const lines = doc.split('\n');
+  const target = heading.trim().toLowerCase();
+  const startIdx = lines.findIndex(line => line.trim().toLowerCase() === `## ${target}`);
+  if (startIdx === -1) return '';
+  const body = [];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith('## ')) break;
+    body.push(lines[i]);
+  }
+  return body.join('\n').trim();
+}
+
+function markdownBullets(text, limit = 4) {
+  return (text || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => /^[-*]\s+/.test(line))
+    .map(line => line.replace(/^[-*]\s+/, '').trim())
+    .slice(0, limit);
+}
+
+function checklistSummary(plan) {
+  const matches = [...(plan || '').matchAll(/- \[( |x)\] (.+)/gi)];
+  const done = matches.filter(m => m[1].toLowerCase() === 'x').length;
+  return { total: matches.length, done, pending: Math.max(0, matches.length - done) };
+}
+
+function inferStage({ questions, decisions, plan, design }) {
+  if ((questions || '').trim() && questions.trim() !== '(empty)') return 'Waiting on input';
+  if ((decisions || '').trim() === '(empty)' || !(decisions || '').trim()) return 'Framing';
+  if ((plan || '').includes('## Implementation Phases')) return 'Planning';
+  if ((design || '').toLowerCase().includes('api') || (design || '').toLowerCase().includes('architecture')) return 'Architecture';
+  return 'Exploration';
+}
+
+function inferConfidence({ questions, decisions, plan }) {
+  if ((questions || '').trim() && questions.trim() !== '(empty)') return 'Needs input';
+  const summary = checklistSummary(plan || '');
+  if ((decisions || '').trim() && summary.total > 0) return 'High';
+  if ((decisions || '').trim()) return 'Medium';
+  return 'Early';
+}
+
+function recommendationFromContent(questions, decisions) {
+  const rec = (questions || '').match(/recommendation\s*[:\-]\s*(.+)/i);
+  if (rec) return rec[1].trim();
+  const bullets = markdownBullets(decisions || '', 2);
+  return bullets[0] || 'No strong recommendation captured yet.';
+}
+
+function latestDecisionTimeline(decisions) {
+  const lines = (decisions || '').split('\n').map(line => line.trim()).filter(Boolean);
+  const items = [];
+  for (const line of lines) {
+    if (/^###?\s+/.test(line)) {
+      items.push({ title: line.replace(/^###?\s+/, ''), meta: 'Decision section' });
+    } else if (/^[-*]\s+/.test(line)) {
+      items.push({ title: line.replace(/^[-*]\s+/, ''), meta: 'Recorded decision' });
+    }
+    if (items.length >= 5) break;
+  }
+  return items;
+}
+
+function openLoopsFromArtifacts({ questions, plan, design }) {
+  const loops = [];
+  if ((questions || '').trim() && questions.trim() !== '(empty)') {
+    loops.push({ title: 'User input required', meta: summarizeInstructions((questions || '').replace(/^#.*$/gm, '').trim()) });
+  }
+  const risks = markdownBullets(extractMarkdownSection(plan || '', 'Risks'), 3);
+  risks.forEach(risk => loops.push({ title: risk, meta: 'Risk from PLAN.md' }));
+  const assumptions = markdownBullets(extractMarkdownSection(plan || '', 'Assumptions'), 2);
+  assumptions.forEach(item => loops.push({ title: item, meta: 'Validate assumption' }));
+  if (!loops.length && (design || '').trim() && !(design || '').includes('```mermaid')) {
+    loops.push({ title: 'Visual architecture still weak', meta: 'Consider adding or refining the main diagram.' });
+  }
+  return loops.slice(0, 5);
+}
+
+function renderCockpitList(id, items, emptyText) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!items || !items.length) {
+    el.innerHTML = `<div class="cockpit-empty">${escHtml(emptyText)}</div>`;
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="cockpit-list-item">
+      <div class="cockpit-list-item-title">${escHtml(item.title || item)}</div>
+      ${item.meta ? `<div class="cockpit-list-item-meta">${escHtml(item.meta)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+async function updateDesignCockpit() {
+  const goalEl = document.getElementById('cockpitProjectGoal');
+  if (goalEl) {
+    if (projectOpen && currentProjectPath) {
+      const parts = currentProjectPath.split('/').filter(Boolean);
+      goalEl.textContent = parts[parts.length - 1] || currentProjectPath;
+    } else {
+      goalEl.textContent = 'Open a project to begin.';
+    }
+  }
+  const emptyState = document.getElementById('cockpitEmptyState');
+  const loadedState = document.getElementById('cockpitLoadedState');
+  if (emptyState) emptyState.style.display = projectOpen ? 'none' : 'flex';
+  if (loadedState) loadedState.style.display = projectOpen ? 'flex' : 'none';
+  if (!projectOpen) return;
+  try {
+    const [designRes, planRes, decisionsRes, questionsRes] = await Promise.all([
+      fetch('/workspace/file/design').then(r => r.json()).catch(() => ({ content: '' })),
+      fetch('/workspace/file/plan').then(r => r.json()).catch(() => ({ content: '' })),
+      fetch('/workspace/file/decisions').then(r => r.json()).catch(() => ({ content: '' })),
+      fetch('/workspace/file/questions').then(r => r.json()).catch(() => ({ content: '' })),
+    ]);
+    const design = designRes.content || '';
+    const plan = planRes.content || '';
+    const decisions = decisionsRes.content || '';
+    const questions = questionsRes.content || '';
+    const stage = inferStage({ questions, decisions, plan, design });
+    const decisionText = (questions && questions !== '(empty)')
+      ? questions.replace(/^#.*$/gm, '').trim()
+      : (latestDecisionTimeline(decisions)[0]?.title || 'No active decision is surfaced right now.');
+    const recommendation = recommendationFromContent(questions, decisions);
+    const loops = openLoopsFromArtifacts({ questions, plan, design });
+
+    const stageEl = document.getElementById('cockpitStage');
+    if (stageEl) stageEl.textContent = stage;
+    const decisionEl = document.getElementById('cockpitCurrentDecision');
+    if (decisionEl) decisionEl.textContent = decisionText || 'No active decision is surfaced right now.';
+    const recommendationEl = document.getElementById('cockpitRecommendation');
+    if (recommendationEl) recommendationEl.textContent = recommendation || 'Recommendations from the debate will appear here.';
+    const statusEl = document.getElementById('cockpitStatusChip');
+    if (statusEl) statusEl.textContent = (appStatus || 'idle').replace(/_/g, ' ');
+    const logMetaEl = document.getElementById('reasoningLogMeta');
+    if (logMetaEl) logMetaEl.textContent = `${eventCount} events captured`;
+
+    renderCockpitList('cockpitDecisionTimeline', latestDecisionTimeline(decisions).slice(0, 3), 'No decisions captured yet.');
+    renderCockpitList('cockpitOpenLoops', loops.slice(0, 3), 'No open loops detected.');
+    renderCockpitList('cockpitRecentChanges', recentFileWrites.slice(0, 2).map(item => ({ title: item.file, meta: item.meta })), 'No meaningful changes yet.');
+  } catch (err) {
+    console.error('Failed to update design cockpit', err);
+  }
 }
 
 function connectSSE() {
@@ -204,6 +366,10 @@ function handleEvent(ev) {
     }
   }
   if (ev.kind === 'done')  { updateStatus('done'); loadRunHistory(); }
+  if (ev.kind === 'file_write') {
+    recentFileWrites.unshift({ file: ev.data.file || 'Unknown file', meta: ev.data.preview || 'Artifact updated' });
+    recentFileWrites = recentFileWrites.slice(0, 8);
+  }
   if (ev.kind === 'error') updateStatus(ev.data.recoverable ? 'needs_attention' : 'error');
 
   // Parse coordinator turn into user-facing summary cards
@@ -236,8 +402,13 @@ function handleEvent(ev) {
   if (ev.kind === 'turn_end') {
     if (typeof refreshWorkspace === 'function') refreshWorkspace();
     extractLiveInsights(ev);
+    updateDesignCockpit();
+  }
+  if (ev.kind === 'phase' || ev.kind === 'file_write' || ev.kind === 'done') {
+    updateDesignCockpit();
   }
 }
+
 
 function appendFeed(ev) {
   const feed = document.getElementById('feed');
@@ -329,7 +500,7 @@ function appendFeed(ev) {
         </div>
         <div class="feed-text" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
           <span style="flex: 1">${escHtml(summary)}</span>
-          ${detail ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 12px; font-weight: bold; line-height: 1; border-radius: 4px;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
+          ${detail ? `<button class="btn btn-secondary" style="padding: 2px 7px; font-size: 11px; font-weight: bold; line-height: 1; border-radius: 4px;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
         </div>
         ${detail ? `<div class="feed-detail markdown-body" style="display: ${ev.data.verdict === 'PAUSE_FOR_INPUT' ? 'block' : 'none'}; margin-top: 8px;">${parseMarkdown(detail)}</div>` : ''}
       </div>
@@ -569,7 +740,6 @@ function updateStatus(s) {
 
   if (s === 'idle' || s === 'done' || s === 'error') {
     if (nameEl) nameEl.textContent = 'Ready to start';
-    if (instEl) instEl.textContent = 'Type a high-level feature request below to start the design process.';
     if (stEl) stEl.className = 'status-indicator idle';
     
     if (steerInput) steerInput.placeholder = 'Type a prompt/task here and press Enter to start the run…';
@@ -614,7 +784,13 @@ async function runChipPrompt(prompt) {
 }
 
 async function fetchAgentStatus() {
-  const res = await fetch('/run/status').then(r=>r.json());
+  const [res, project] = await Promise.all([
+    fetch('/run/status').then(r=>r.json()),
+    fetch('/project').then(r=>r.json()).catch(() => ({ open: false })),
+  ]);
+  if (typeof applyProjectState === 'function') {
+    applyProjectState(project);
+  }
   if (res.status && res.status !== appStatus) {
     updateStatus(res.status);
   }
@@ -626,7 +802,7 @@ async function fetchAgentStatus() {
   }
   const list = document.getElementById('agentList');
   const maxTokens = Math.max(1, ...visibleAgents.map(a => a.total_tokens || 0));
-  list.innerHTML = visibleAgents.map(a => {
+  if (list) list.innerHTML = visibleAgents.map(a => {
     const color = agentColors[a.name] || '#64748b';
     const statusColor = {thinking:'var(--yellow)',waiting:'var(--yellow)',done:'var(--green)',error:'var(--red)',idle:'var(--muted)'}[a.status] || 'var(--muted)';
     const cost = a.pricing_known ? formatCost(a.cost_usd || 0) : 'cost n/a';
@@ -666,6 +842,7 @@ async function fetchAgentStatus() {
   document.getElementById('totalTokens').textContent = totalTokens.toLocaleString();
   document.getElementById('totalCachedTokens').textContent = cached.toLocaleString() + (hasUnreportedCache ? ' + unreported' : '');
   document.getElementById('totalCost').textContent = costText;
+  updateDesignCockpit();
 }
 
 function formatCost(value) {
@@ -693,6 +870,8 @@ function clearFeed() {
     expectedOutput: 'You will see the next artifact or decision outcome here.',
     needsInput: 'No user action needed right now.',
   });
+  recentFileWrites = [];
+  updateDesignCockpit();
 }
 
 async function showInteractiveQuestions() {

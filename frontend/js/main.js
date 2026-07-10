@@ -4,16 +4,48 @@ function showTab(id, tabElement) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('panel-'+id).classList.add('active');
   if (tabElement) tabElement.classList.add('active');
-  if (id === 'workspace') refreshWorkspace();
+  if (id === 'workspace') {
+    refreshWorkspace();
+    fetchAgentStatus();
+  }
   if (id === 'config') loadAgentConfig();
   if (id === 'mcp') loadMCPServers();
   if (id === 'history') loadRunHistory();
-  if (id === 'chat') fetchAgentStatus();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+if (window.initializeArchitectDashboard) {
+  window.initializeArchitectDashboard();
+}
 if (window.mermaid) {
-  mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    securityLevel: 'loose',
+    themeVariables: {
+      background: '#0a0f1a',
+      primaryColor: 'rgba(118, 131, 255, 0.08)',
+      primaryTextColor: '#e8eef7',
+      primaryBorderColor: 'rgba(148, 163, 184, 0.22)',
+      secondaryColor: 'rgba(255, 255, 255, 0.03)',
+      secondaryTextColor: '#e8eef7',
+      secondaryBorderColor: 'rgba(148, 163, 184, 0.18)',
+      tertiaryColor: 'rgba(118, 131, 255, 0.05)',
+      tertiaryTextColor: '#dbe5f3',
+      tertiaryBorderColor: 'rgba(148, 163, 184, 0.16)',
+      lineColor: '#93a4bc',
+      textColor: '#e8eef7',
+      mainBkg: 'rgba(10, 15, 26, 0.92)',
+      secondBkg: 'rgba(15, 21, 35, 0.94)',
+      tertiaryBkg: 'rgba(118, 131, 255, 0.06)',
+      clusterBkg: 'rgba(118, 131, 255, 0.05)',
+      clusterBorder: 'rgba(148, 163, 184, 0.18)',
+      edgeLabelBackground: 'rgba(10, 15, 26, 0.92)',
+      labelBoxBkgColor: 'rgba(10, 15, 26, 0.92)',
+      labelBoxBorderColor: 'rgba(148, 163, 184, 0.16)',
+      fontFamily: 'Plus Jakarta Sans, system-ui, sans-serif'
+    }
+  });
 }
 connectSSE();
 loadCurrentProject();
