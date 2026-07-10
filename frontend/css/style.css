@@ -1328,6 +1328,83 @@
 .mermaid-figure .cluster polygon {
   fill: rgba(118, 131, 255, 0.05) !important;
 }
+.recent-projects-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255,255,255,0.02);
+}
+.recent-projects-modal {
+  margin-top: 2px;
+}
+.recent-projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.recent-projects-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+  font-weight: 700;
+}
+.recent-projects-clear {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.recent-projects-clear:hover {
+  color: var(--text);
+}
+.recent-projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.recent-project-btn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(10, 15, 26, 0.5);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+}
+.recent-project-btn:hover {
+  border-color: rgba(167, 177, 255, 0.28);
+  background: rgba(118, 131, 255, 0.06);
+  transform: translateY(-1px);
+}
+.recent-project-name {
+  font-family: var(--heading-font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.recent-project-path {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .mermaid-figure .edgeLabel,
 .mermaid-figure .label,
 .mermaid-figure .cluster-label,

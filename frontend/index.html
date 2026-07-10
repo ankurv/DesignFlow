@@ -146,6 +146,10 @@
           <div class="cockpit-empty-actions">
             <button class="btn btn-primary" onclick="openProject()">Open Project</button>
           </div>
+          <div id="recentProjectsEmptyState" class="recent-projects-shell" style="display:none;">
+            <div class="recent-projects-label">Recent projects</div>
+            <div id="recentProjectsEmptyList" class="recent-projects-list"></div>
+          </div>
         </div>
 
         <div id="cockpitLoadedState" class="cockpit-loaded-state" style="display:none;">
@@ -475,6 +479,13 @@
       <button class="btn btn-secondary" onclick="closeProjectModal()" style="padding:6px 10px;">Close</button>
     </div>
     <input type="text" id="projectPathInput" name="project_path" placeholder="/Users/avarsheny/friendster" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="if(event.key==='Enter') submitProjectPath()" style="width:100%; padding:14px 16px; border-radius:12px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px;">
+    <div id="recentProjectsModal" class="recent-projects-shell recent-projects-modal" style="display:none;">
+      <div class="recent-projects-header">
+        <div class="recent-projects-label">Recent projects</div>
+        <button class="recent-projects-clear" type="button" onclick="clearRecentProjects()">Clear</button>
+      </div>
+      <div id="recentProjectsModalList" class="recent-projects-list"></div>
+    </div>
     <div style="display:flex; justify-content:flex-end; gap:10px;">
       <button class="btn btn-secondary" onclick="closeProjectModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitProjectPath()">Open Project</button>
