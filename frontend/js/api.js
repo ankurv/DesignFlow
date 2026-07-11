@@ -147,43 +147,85 @@ window.applyCheckpointSteer = function(key) {
 
 function extractDecisionOptions(text) {
   const options = [];
-  const bulletRegex = /^\s*-\s*\[([A-Z])\]\s+(.+)$/gm;
-  for (const match of text.matchAll(bulletRegex)) {
-    options.push({ label: match[1], text: match[2].trim() });
+  const lines = String(text || '').split('\n');
+  let optionGroupStarted = false;
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*\[([A-Z])\]\s+(.+)$/);
+    if (match) {
+      optionGroupStarted = true;
+      options.push({ label: match[1], text: match[2].trim() });
+      if (options.length === 3) break;
+    } else if (optionGroupStarted && line.trim()) {
+      break;
+    }
   }
   if (!options.length) {
     const altRegex = /^\s*([A-Z])[\).:-]\s+(.+)$/gm;
     for (const match of text.matchAll(altRegex)) {
       options.push({ label: match[1], text: match[2].trim() });
+      if (options.length === 3) break;
     }
   }
   const rec = text.match(/recommendation\s*[:\-]\s*([A-Z])/i);
-  return { options, recommendation: rec ? rec[1].toUpperCase() : '' };
+  const allOptionCount = [...String(text || '').matchAll(/^\s*-\s*\[[A-Z]\]\s+.+$/gm)].length;
+  return {
+    options,
+    recommendation: rec ? rec[1].toUpperCase() : '',
+    hasMoreDecisions: allOptionCount > options.length,
+  };
 }
 
 window.useDecisionOption = function(label, text) {
-  const input = document.getElementById('contextAnswerInput');
+  const input = document.getElementById('steerInput');
   if (!input) return;
   input.value = `${label}${text ? ' — ' + text : ''}`;
   input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 };
 
 function renderQuestionBody(content) {
   const parsed = extractDecisionOptions(content || '');
   const optionsEl = document.getElementById('contextDecisionOptions');
   if (optionsEl) {
-    if (parsed.options.length) {
-      optionsEl.style.display = 'flex';
-      optionsEl.innerHTML = parsed.options.map(opt => {
-        const recommended = parsed.recommendation === opt.label;
-        return `<button class="btn ${recommended ? 'btn-primary' : 'btn-secondary'}" onclick="useDecisionOption('${escAttr(opt.label)}','${escAttr(opt.text)}')" style="padding:7px 10px; font-size:11.5px">${recommended ? 'Recommended · ' : ''}${escHtml(opt.label)} — ${escHtml(opt.text)}</button>`;
-      }).join('');
-    } else {
-      optionsEl.style.display = 'none';
-      optionsEl.innerHTML = '';
-    }
+    optionsEl.style.display = 'none';
+    optionsEl.innerHTML = '';
   }
-  return parseMarkdown(content);
+  if (!parsed.options.length) return parseMarkdown(content);
+
+  const firstOptionIndex = content.search(/^\s*-\s*\[[A-Z]\]\s+/m);
+  const intro = firstOptionIndex > 0 ? content.slice(0, firstOptionIndex).trim() : '# Decision checkpoint';
+  const recommendationMatch = content.match(/recommendation\s*[:\-][^\n]*(?:\n(?!\s*-\s*\[[A-Z]\])[^\n]+)?/i);
+  const recommendation = recommendationMatch ? recommendationMatch[0].trim() : '';
+  const buttons = parsed.options.map(opt => {
+    const recommended = parsed.recommendation === opt.label;
+    return `<button class="decision-option btn ${recommended ? 'btn-primary' : 'btn-secondary'}" onclick="useDecisionOption('${escAttr(opt.label)}','${escAttr(opt.text)}')">${recommended ? 'Recommended · ' : ''}${escHtml(opt.label)} — ${escHtml(opt.text)}</button>`;
+  }).join('');
+  const more = parsed.hasMoreDecisions
+    ? '<div class="decision-more-note">Additional decisions will be asked after you answer this one.</div>'
+    : '';
+  return `<div class="decision-group"><div class="decision-question-copy">${parseMarkdown(intro)}${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><div class="decision-inline-options">${buttons}</div></div>`;
+}
+
+function renderInteractiveQuestionPanel(content) {
+  const pendingPane = document.getElementById('contextPendingActions');
+  const bodyEl = document.getElementById('contextQuestionsBody');
+  const hasQuestion = !!(content && content.trim() && content.trim() !== '(empty)');
+  if (!pendingPane || !bodyEl) return false;
+
+  if (!hasQuestion) {
+    pendingPane.style.display = 'none';
+    return false;
+  }
+
+  pendingPane.style.display = 'flex';
+  bodyEl.innerHTML = renderQuestionBody(content);
+  const steerInput = document.getElementById('steerInput');
+  const sendBtn = document.getElementById('sendBtn');
+  if (steerInput && !steerInput.value) {
+    steerInput.placeholder = 'Choose an option above or type your answer here…';
+  }
+  if (sendBtn) sendBtn.textContent = 'Submit decision';
+  return true;
 }
 
 
@@ -317,6 +359,7 @@ async function updateDesignCockpit() {
       : (latestDecisionTimeline(decisions)[0]?.title || 'No active decision is surfaced right now.');
     const recommendation = recommendationFromContent(questions, decisions);
     const loops = openLoopsFromArtifacts({ questions, plan, design });
+    renderInteractiveQuestionPanel(questions);
 
     const stageEl = document.getElementById('cockpitStage');
     if (stageEl) stageEl.textContent = stage;
@@ -467,18 +510,17 @@ function appendFeed(ev) {
       summary = `Steering injected: "${ev.data.message}"`;
       break;
     case 'retry':
-      summary = `${ev.data.turn_id || 'Turn'} waiting · attempt ${ev.data.attempt} · retry in ${formatDuration(ev.data.retry_in_seconds)}`;
-      detail = ev.data.reason || '';
+      summary = `${friendlyProviderError(ev.data.reason)} Retrying in ${formatDuration(ev.data.retry_in_seconds)}.`;
+      kindLabel = 'retrying';
       break;
     case 'done':
-      summary = '✅ Run complete';
+      summary = 'Planning baseline ready for implementation and further discovery.';
       updateStatus('done');
       break;
     case 'error':
-      summary = ev.data.recoverable
-        ? `${ev.data.turn_id} failed on attempt ${ev.data.attempt} · fix ${ev.agent} and retry this turn`
-        : `Error: ${ev.data.error}`;
-      detail = ev.data.error || ev.data.message || '';
+      summary = friendlyProviderError(ev.data.error || ev.data.message);
+      if (ev.data.recoverable) summary += ' You can retry after resolving the provider issue.';
+      kindLabel = 'error';
       break;
     default:
       summary = JSON.stringify(ev.data).slice(0, 100);
@@ -512,6 +554,35 @@ function appendFeed(ev) {
   feed.appendChild(div);
   feed.scrollTop = feed.scrollHeight;
   if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
+}
+
+function friendlyProviderError(rawError) {
+  const error = String(rawError || '').toLowerCase();
+  if (/quota|insufficient_quota|resource.?exhausted|billing|credit balance|usage limit/.test(error)) {
+    return 'Model quota exhausted.';
+  }
+  if (/rate.?limit|too many requests|status.?429|\b429\b/.test(error)) {
+    return 'Provider rate limit reached.';
+  }
+  if (/api.?key|auth|credential|unauthorized|forbidden|status.?401|status.?403|\b401\b|\b403\b/.test(error)) {
+    return 'Provider authentication failed.';
+  }
+  if (/model.*(not found|unavailable|unsupported|deprecated)|unknown model|invalid model/.test(error)) {
+    return 'Configured model is unavailable.';
+  }
+  if (/context.?length|context window|maximum context|token limit|too many tokens/.test(error)) {
+    return 'Request exceeds the model context limit.';
+  }
+  if (/timeout|timed out|deadline exceeded/.test(error)) {
+    return 'Model provider timed out.';
+  }
+  if (/network|connection|connect failed|dns|name resolution|fetch failed|service unavailable|status.?5\d\d/.test(error)) {
+    return 'Model provider is temporarily unavailable.';
+  }
+  if (/content filter|safety|policy violation|blocked/.test(error)) {
+    return 'Request was blocked by the provider safety policy.';
+  }
+  return 'Agent request failed.';
 }
 
 function conversationalAgentSummary(response, agent) {
@@ -942,25 +1013,7 @@ function clearFeed() {
 async function showInteractiveQuestions() {
   try {
     const res = await fetch('/workspace/file/questions').then(r=>r.json());
-    if (res && res.content && res.content.trim().length > 0 && res.content.trim() !== '(empty)') {
-      const pendingPane = document.getElementById('contextPendingActions');
-      const bodyEl = document.getElementById('contextQuestionsBody');
-      if (pendingPane && bodyEl) {
-        pendingPane.style.display = 'flex';
-        bodyEl.innerHTML = renderQuestionBody(res.content);
-        const plain = res.content.replace(/^#.*$/gm, '').replace(/\s+/g, ' ').trim();
-        updateCurrentWorkSummary({
-          agentName: document.getElementById('contextAgentName')?.textContent || 'User input needed',
-          summary: document.getElementById('contextWorkSummary')?.textContent || 'The team needs your input before moving forward.',
-          whyNow: document.getElementById('contextWhyNow')?.textContent || 'A decision or clarification is blocking the next design step.',
-          expectedOutput: document.getElementById('contextExpectedOutput')?.textContent || 'A resolved decision so the team can continue.',
-          needsInput: plain || 'Review the open decision and reply with your preference.',
-        });
-        if (typeof loadWsFile === 'function') {
-          loadWsFile('dashboard');
-        }
-      }
-    }
+    renderInteractiveQuestionPanel(res?.content || '');
   } catch (err) {
     console.error("Failed to load interactive questions", err);
   }
@@ -1014,26 +1067,16 @@ function extractLiveInsights(ev) {
   }
 }
 
-window.submitContextAnswer = function() {
-  const answer = document.getElementById('contextAnswerInput').value;
-  if (!answer.trim()) return;
-  
-  const steerInput = document.getElementById('steerInput');
-  if (steerInput) {
-     steerInput.value = answer;
-     steer();
-  }
-  
-  document.getElementById('contextPendingActions').style.display = 'none';
-  document.getElementById('contextAnswerInput').value = '';
-};
-
 async function exportContext() {
   try {
     const planRes = await fetch('/workspace/file/plan');
     const planData = planRes.ok ? await planRes.json() : {content: 'No PLAN.md found.'};
     const designRes = await fetch('/workspace/file/design');
     const designData = designRes.ok ? await designRes.json() : {content: 'No DESIGN.md found.'};
+    const decisionsRes = await fetch('/workspace/file/decisions');
+    const decisionsData = decisionsRes.ok ? await decisionsRes.json() : {content: 'No DECISIONS.md found.'};
+    const questionsRes = await fetch('/workspace/file/questions');
+    const questionsData = questionsRes.ok ? await questionsRes.json() : {content: '(empty)'};
     const wsRes = await fetch('/workspace');
     const wsData = wsRes.ok ? await wsRes.json() : {root: 'project'};
     
@@ -1044,7 +1087,24 @@ async function exportContext() {
         projName = parts[parts.length - 1] || "project";
     }
     
-    const bundled = `# Architecture Design\n\n${designData.content}\n\n# Implementation Plan\n\n${planData.content}`;
+    const unresolved = questionsData.content && questionsData.content.trim() !== '(empty)'
+      ? `\n\n# Unresolved Questions\n\n${questionsData.content}`
+      : '';
+    const bundled = `# DesignFlow Planning Baseline
+
+This package converts a high-level goal into a stronger technical starting point. It is not a final implementation specification. Validate the documented assumptions, follow the discovery checkpoints, and update the architecture when real code, data, provider behavior, or user feedback contradicts the plan.
+
+# Architecture Design
+
+${designData.content}
+
+# Implementation Plan
+
+${planData.content}
+
+# Decision Ledger
+
+${decisionsData.content}${unresolved}`;
     
     const blob = new Blob([bundled], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -1056,7 +1116,7 @@ async function exportContext() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     
-    alert(`DESIGN.md and PLAN.md bundled and downloaded as ${projName}.md!`);
+    alert(`Planning baseline bundled and downloaded as ${projName}.md!`);
   } catch (e) {
     alert('Failed to export context: ' + e.message);
   }

@@ -104,7 +104,7 @@ function renderSingleCard(cfg, idx, isGlobal) {
       setTimeout(() => checkAgentHealth(cfg, uid), 50);
     }
     const hoverTitle = statusInfo.status === 'failed' 
-      ? statusInfo.error 
+      ? friendlyProviderError(statusInfo.error)
       : (statusInfo.status === 'success' ? 'Agent working correctly' : 'Testing connection...');
 
     return `
@@ -336,7 +336,7 @@ async function checkAgentHealth(cfg, uid) {
     if (dot) {
       dot.className = `health-dot ${agentHealthStatus[uid].status}`;
       dot.title = agentHealthStatus[uid].status === 'failed' 
-        ? agentHealthStatus[uid].error 
+        ? friendlyProviderError(agentHealthStatus[uid].error)
         : (agentHealthStatus[uid].status === 'success' ? 'Agent working correctly' : 'Testing connection...');
     }
   }

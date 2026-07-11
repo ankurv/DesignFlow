@@ -100,7 +100,11 @@ VALID_PLAN = """## Requirements
 - plan is actionable
 
 ## Implementation Phases
-- phase 1 planning
+- [ ] Phase 1: validate the riskiest assumption
+- [ ] Phase 2: implement the baseline
+
+## Discovery Checkpoints
+- Verify provider behavior with a small spike before integration.
 """
 
 VALID_DESIGN = """## Architecture
@@ -112,6 +116,16 @@ flowchart TD
 
 ## Notes
 Initial architecture.
+
+## Known Unknowns & Validation Plan
+- Validate the storage choice with representative data before implementation.
+"""
+
+VALID_DECISIONS = """## Accepted Decisions
+- Start with SQLite for the planning baseline because deployment simplicity matters more than scale initially.
+
+## Trade-offs
+- Revisit the database choice after measuring representative concurrency and query patterns.
 """
 
 
@@ -409,6 +423,9 @@ CONTINUE
 
 ## DESIGN_UPDATE
 {VALID_DESIGN}
+
+## DECISIONS_UPDATE
+{VALID_DECISIONS}
 """
         boss_response_2 = """## NEXT_AGENT
 worker
@@ -551,7 +568,7 @@ print('hello world')
             AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
             replies=[
                 "## NEXT_AGENT\nUSER\n## INSTRUCTIONS\nWhich db?\n## DECISION_CHECKPOINT\nsqlite or pg\n## VERDICT\nPAUSE_FOR_INPUT",
-                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nFinished db question\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## VERDICT\nCOMPLETE"
+                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nFinished db question\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}\n## VERDICT\nCOMPLETE"
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -585,7 +602,7 @@ print('hello world')
             AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
             replies=[
                 "## NEXT_AGENT\nboss\n## INSTRUCTIONS\nfinalize now\n## QUALITY_GATE\nPASS\n## VERDICT\nCOMPLETE",
-                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nfinalize after fixing validation feedback\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## VERDICT\nCOMPLETE",
+                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nfinalize after fixing validation feedback\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}\n## VERDICT\nCOMPLETE",
             ]
         )
         events = []
@@ -608,6 +625,33 @@ print('hello world')
             ))
             self.assertIn("Requirements", orchestrator.ws.read("plan"))
             self.assertIn("```mermaid", orchestrator.ws.read("design"))
+
+    def test_completion_requires_specialist_coverage_and_user_checkpoint(self):
+        agents = [
+            StatefulFake(AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True})),
+            StatefulFake(AgentConfig(name="architect", kind="openai", model="gpt-4o")),
+            StatefulFake(AgentConfig(name="security", kind="openai", model="gpt-4o")),
+            StatefulFake(AgentConfig(name="product", kind="openai", model="gpt-4o")),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(
+                agents=agents,
+                workspace=Workspace(directory),
+                require_approval=True,
+            )
+            orchestrator._coordinator_name = "boss"
+            orchestrator.ws.ensure()
+            orchestrator.ws.write("plan", f"# Plan\n\n{VALID_PLAN}")
+            orchestrator.ws.write("design", f"# Architecture Design\n\n{VALID_DESIGN}")
+            orchestrator.ws.write("decisions", f"# Key Decisions\n\n{VALID_DECISIONS}")
+
+            errors = orchestrator._coordinator_completion_errors("PASS")
+            self.assertTrue(any("3 more distinct" in error for error in errors))
+            self.assertTrue(any("material user decision" in error for error in errors))
+
+            orchestrator._consulted_specialists.update({"architect", "security", "product"})
+            orchestrator._user_checkpoint_count = 1
+            self.assertEqual(orchestrator._coordinator_completion_errors("PASS"), [])
 
     def test_run_token_budget_stops_after_budget_is_hit(self):
         debate = """## DESIGN_APPEND

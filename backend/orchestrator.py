@@ -183,7 +183,7 @@ SPECIALIZED_PERSONAS = {
 }
 
 COORDINATOR_SYSTEM = """You are the COORDINATOR of an autonomous software architecture and design team.
-Your SOLE goal is to coordinate the team's agents to architect a system and produce a comprehensive DESIGN.md, a crisp PLAN.md implementation checklist, and a DECISIONS.md ledger of the key choices based on the user's idea. 
+Your SOLE goal is to coordinate the team's agents to turn a high-level goal into a credible planning baseline: a comprehensive DESIGN.md, a crisp PLAN.md implementation checklist, and a DECISIONS.md ledger of the key choices. The artifacts should give a coding agent a strong starting point, but MUST NOT claim to be a final or perfectly complete implementation specification.
 CRITICAL: You MUST NOT write any executable code (e.g. .py, .js, .html). Your output will be fed to a separate coding agent.
 Your debate depth limit is: {max_debate_rounds} rounds.
 
@@ -197,6 +197,13 @@ Guidelines for Design & Architectural Gathering:
 7. **Architecture Diagrams**: Intelligently evaluate if the architecture warrants a visual diagram. If it does, ensure the agents include professional Mermaid diagrams in DESIGN.md. Prefer clarity over density: split large systems into multiple focused diagrams, keep labels short, keep abstraction levels separated, and avoid decorative styling that makes diagrams harder to scan.
 8. **Plan Structure (CRITICAL)**: PLAN.md MUST be a clean, crisp, end-to-end implementation checklist that we will feed to a separate coding agent. It should contain clear chronologically-ordered implementation phases and checkable tasks. Do NOT include debate transcripts in PLAN.md or DESIGN.md.
 9. **Planned User Checkpoints**: Actively involve the user at three moments when useful: after framing assumptions, after choosing a major architecture direction, and before finalizing the plan. Keep these checkpoints concise, decision-oriented, and easy to answer.
+10. **Known Unknowns Are Required**: DESIGN.md MUST contain a dedicated "## Known Unknowns & Validation Plan" section. Record uncertain assumptions, provider/framework details that need verification, product questions deferred to implementation, and the cheapest way to validate each one. Do not hide uncertainty behind confident prose.
+11. **Implementation Discovery**: PLAN.md MUST contain a "## Discovery Checkpoints" section. Identify the points where the coding agent should pause, test a spike, inspect real data, or ask the user before locking in an implementation choice.
+12. **Concrete Technical Depth**: Where relevant, cover API payload/response/error shapes, schema constraints and indexes, state transitions, failure and recovery behavior, security boundaries, observability, external-provider degradation, and test strategy. Mark non-applicable areas instead of inventing unnecessary architecture.
+13. **Canonical Artifacts**: Treat DESIGN.md, PLAN.md, and DECISIONS.md in the DesignFlow workspace as the only canonical planning artifacts. Consolidate contradictions instead of producing parallel or duplicate design documents.
+14. **Specialist Coverage Before Completion**: For a multi-agent team, consult at least three distinct, relevant specialists before completion (or every available specialist when fewer than three exist). Give each specialist a bounded technical question; do not summon agents merely to repeat the whole plan.
+15. **Debate Before Agreement**: Material choices such as platform, data ownership, authentication, privacy, deployment, external providers, consistency, cost, or irreversible scope must include at least two credible options, explicit trade-offs, and a recommendation. Ask a second specialist to challenge high-impact recommendations when an appropriate specialist is available.
+16. **User Confirmation On Complex Choices**: Before marking a multi-agent planning run complete, pause at least once for the user to confirm a material product or architecture choice. Ask exactly ONE decision per checkpoint with 2-3 concise options, recommend one, explain consequences, and allow a custom answer. Never bundle several unrelated questions into one pause; ask the next material question only after the user answers the current one. Do not ask the user to approve trivial implementation details.
 
 Structured workflow description:
 1. **Dynamic Summoning (Strict Needs-Based)**: You have access to a large pool of specialized experts. You MUST selectively summon them by setting ## NEXT_AGENT ONLY if their specific expertise is strictly required by the project scope. Do not summon UI agents for backend projects, or database architects for static sites, etc. If multiple competing roles are available for a required domain, force them to rigorously debate trade-offs.
@@ -249,14 +256,14 @@ Respond in this EXACT format:
 <specific internal instructions or guidance for this agent's turn, or your clarifying question for the user>
 
 ## DECISION_CHECKPOINT
-<ONLY output this section if VERDICT is PAUSE_FOR_INPUT. Use this exact structure when possible: a short Decision line, 2-3 options as markdown bullets like - [A] choice, - [B] choice, a Recommendation line, and a brief consequence/trade-off note for each option.>
+<ONLY output this section if VERDICT is PAUSE_FOR_INPUT. Include exactly one material decision. Use this structure: a short Decision line, 2-3 options as markdown bullets like - [A] choice, - [B] choice, a Recommendation line, and a brief consequence/trade-off note. Never bundle multiple decisions in this section.>
 
 ## QUALITY_GATE
-<ONLY output this section if VERDICT is COMPLETE. Verify requirement coverage, task acceptance criteria, unresolved questions, contradictory decisions, risk mitigations, and valid diagrams. Output PASS or FAIL.>
+<ONLY output this section if VERDICT is COMPLETE. Verify requirement coverage, task acceptance criteria, known unknowns, discovery checkpoints, unresolved questions, contradictory decisions, risk mitigations, and valid diagrams. PASS means the planning baseline is coherent enough to begin implementation; it does not mean implementation discovery is finished. Output PASS or FAIL.>
 
 ## VERDICT
 <CONTINUE, COMPLETE, or PAUSE_FOR_INPUT>
-(Note: When the design and plan are finalized, set VERDICT to COMPLETE. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
+(Note: When a coherent planning baseline is ready, set VERDICT to COMPLETE. This means ready to begin iterative implementation, not final specification certainty. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
 
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
@@ -303,6 +310,8 @@ class Orchestrator:
         self._context_invocations: dict[str, int] = {}
         self._context_full_refresh_gap = 8
         self._context_full_refresh_every = 4
+        self._consulted_specialists: set[str] = set()
+        self._user_checkpoint_count = 0
 
         if self.restore:
             self.load_state()
@@ -319,6 +328,9 @@ class Orchestrator:
 
     async def steer(self, message: str):
         """Inject a human message that all agents will see next turn."""
+        pending_question = self.ws.read("questions").strip()
+        if pending_question and pending_question != "(empty)":
+            self._user_checkpoint_count += 1
         await self._steer_queue.put(message)
         self.ws.clear_questions()
         self.ws.reset_context_tracking()
@@ -892,6 +904,18 @@ class Orchestrator:
         if not self._quality_gate_passed(quality_gate):
             errors.append("Coordinator QUALITY_GATE must start with PASS before completion.")
         errors.extend(self.ws.validate_planning_artifacts())
+        specialists = [agent for agent in self.agents if agent.name != self._coordinator_name]
+        required_specialists = min(3, len(specialists))
+        if len(self._consulted_specialists) < required_specialists:
+            missing = required_specialists - len(self._consulted_specialists)
+            errors.append(
+                f"Consult {missing} more distinct relevant specialist(s) before completion "
+                f"({len(self._consulted_specialists)}/{required_specialists} consulted)."
+            )
+        if self.require_approval and required_specialists >= 2 and self._user_checkpoint_count < 1:
+            errors.append(
+                "Pause for at least one material user decision and receive the user's confirmation before completion."
+            )
         return errors
 
     async def _coordinator_loop(self, coordinator: AgentBase):
@@ -1008,7 +1032,7 @@ class Orchestrator:
                 f"## DESIGN_UPDATE\n<complete updated design document>\n\n"
                 f"## PLAN_UPDATE\n<complete updated plan document>\n\n"
                 f"## DECISIONS_UPDATE\n<complete updated decision log with rationale and trade-offs>\n\n"
-                f"## DECISION_CHECKPOINT\n<if you need the user to make a critical decision, use markdown bullets like - [A] option, - [B] option, plus a Recommendation line and concise trade-offs>\n\n"
+                f"## DECISION_CHECKPOINT\n<if you need the user to make a critical decision, ask exactly one decision with 2-3 markdown options like - [A] option, - [B] option, plus a Recommendation line and concise trade-offs; never bundle multiple questions>\n\n"
                 f"## QUESTIONS\n<if you need clarification from the user, write your questions here>\n\n"
                 f"## FILE: path/to/file.ext\n<complete file content>\n\n"
                 f"Please execute your turn now."
@@ -1019,6 +1043,7 @@ class Orchestrator:
 
             agent_response = await self._send_agent(selected_agent, agent_prompt, agent_turn_id, agent_turn_context)
             self._record_turn_usage(selected_agent)
+            self._consulted_specialists.add(selected_agent.name)
             self._last_agent_feedback = f"{selected_agent.name} said:\n{agent_response}"
 
             agent_decision = self.ws.parse_section(agent_response, "DECISION_CHECKPOINT").strip()

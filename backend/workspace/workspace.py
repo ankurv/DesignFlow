@@ -42,6 +42,7 @@ class Workspace:
         "Risks",
         "Acceptance Criteria",
         "Implementation Phases",
+        "Discovery Checkpoints",
     ]
     EXCLUDED_PARTS = {
         ".agentflow", ".git", ".hg", ".svn", "node_modules", "vendor",
@@ -270,6 +271,7 @@ class Workspace:
         errors: list[str] = []
         plan = self.read("plan")
         design = self.read("design")
+        decisions = self.read("decisions")
 
         missing_headers = [
             heading for heading in self.REQUIRED_PLAN_HEADERS
@@ -282,6 +284,21 @@ class Workspace:
 
         if "```mermaid" not in design.lower() or "```" not in design:
             errors.append("DESIGN.md must include at least one Mermaid diagram block.")
+
+        if not self._has_markdown_h2(design, "Known Unknowns & Validation Plan"):
+            errors.append("DESIGN.md must include a 'Known Unknowns & Validation Plan' section.")
+
+        decision_body = re.sub(r"^#.*$", "", decisions, flags=re.MULTILINE).strip()
+        if decisions == "(empty)" or len(decision_body) < 40:
+            errors.append("DECISIONS.md must record substantive choices, trade-offs, and rationale.")
+
+        phases = re.search(
+            r"^##\s*Implementation Phases\s*$([\s\S]*?)(?=^##\s|\Z)",
+            plan,
+            re.MULTILINE,
+        )
+        if not phases or not re.search(r"^- \[[ xX]\] ", phases.group(1), re.MULTILINE):
+            errors.append("PLAN.md Implementation Phases must contain checkable '- [ ]' tasks.")
 
         questions_path = self._file("questions")
         if questions_path.exists():

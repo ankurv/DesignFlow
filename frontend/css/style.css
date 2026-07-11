@@ -887,14 +887,77 @@
 }
 .discussion-input-request {
   display: flex;
+  flex: 0 1 42%;
+  min-height: 150px;
+  max-height: 42%;
   flex-direction: column;
+  overflow: hidden;
   margin: 0 18px 14px;
   padding: 16px;
   border: 1px solid rgba(245, 158, 11, 0.28);
   border-radius: 14px;
   background: rgba(245, 158, 11, 0.06);
 }
+.discussion-input-request .cockpit-card-header { flex: 0 0 auto; }
+.decision-scroll-region {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-gutter: stable;
+}
+.decision-options {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.decision-options .btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  justify-content: flex-start;
+  line-height: 1.45;
+}
+.decision-group {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(340px, 1.2fr);
+  gap: 18px;
+  align-items: start;
+}
+.decision-question-copy h1,
+.decision-question-copy h2,
+.decision-question-copy h3 {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+.decision-recommendation {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.decision-more-note {
+  margin-top: 10px;
+  color: var(--yellow);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.decision-inline-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.decision-option {
+  width: 100%;
+  padding: 8px 10px;
+  white-space: normal;
+  text-align: left;
+  justify-content: flex-start;
+  line-height: 1.4;
+}
+@media (max-width: 900px) {
+  .decision-group { grid-template-columns: 1fr; }
+}
 .discussion-composer {
+  flex: 0 0 auto;
   padding: 14px 18px 16px;
   border-top: 1px solid rgba(148, 163, 184, 0.1);
   background: rgba(8, 12, 21, 0.72);

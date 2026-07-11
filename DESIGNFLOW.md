@@ -3,7 +3,7 @@
 ## What is DesignFlow?
 DesignFlow is a premium, interactive **AI Architect Dashboard**. Instead of letting AI blindly generate codebases, DesignFlow focuses exclusively on the critical initial step of software development: **Architecture, Strategy, and Planning**. 
 
-You feed it an idea, and it orchestrates a massive, multi-model debate among specialized AI personas to produce a crisp, structured implementation plan. You can then export this plan and hand it to any AI builder (like Cursor, Codex, or Windsurf) to flawlessly write the code.
+You feed it an idea, and it orchestrates a multi-model debate among specialized AI personas to produce a structured technical planning baseline. You can export that baseline to a coding agent such as Cursor, Codex, or Windsurf, then refine the plan as implementation reveals new constraints and opportunities.
 
 ---
 
@@ -21,12 +21,14 @@ Gone are the days of manually configuring 15 different agents. The DesignFlow ba
 
 ### 2. Cross-Model Debates (Model Agnostic)
 DesignFlow natively supports cross-model intelligence. If you provide multiple API keys (e.g., Claude, OpenAI, Gemini), the backend distributes the 15 specialized personas across your keys in a round-robin format. 
-This means you can watch **Claude** (playing the UX Simplifier) natively debate **OpenAI** (playing the Red Team) to build the ultimate architecture.
+This means you can watch **Claude** (playing the UX Simplifier) challenge **OpenAI** (playing the Red Team) to uncover trade-offs and strengthen the planning baseline.
+
+For multi-agent planning runs, DesignFlow requires contributions from up to three distinct relevant specialists before the planning baseline can complete. Material choices must compare credible alternatives, and approval-enabled runs require at least one user-confirmed decision checkpoint so the team does not silently lock in a high-impact assumption.
 
 ### 3. Exhaustive Tree-Based Planning
 The Orchestrator forces the Virtual Company through a rigorous two-tiered design phase:
 1. **High-Level Strategy**: Debating the architecture, tech stack, and scalability, outputting a beautiful `DESIGN.md` complete with Mermaid.js flowcharts.
-2. **Deep-Dive Implementation Tree**: For *every single* sub-item in the high-level plan, the Orchestrator forces the experts to debate exactly how to implement and test it. The final output is an exhaustive, deeply nested markdown tree inside `PLAN.md`.
+2. **Implementation Starting Plan**: The Orchestrator expands the high-level direction into sequenced, checkable work, acceptance criteria, known unknowns, and discovery checkpoints. `PLAN.md` is intentionally a strong starting point rather than a claim that implementation discovery is finished.
 
 ### 4. Enterprise API Routing
 DesignFlow supports enterprise-grade connections out of the box:
@@ -37,7 +39,7 @@ DesignFlow supports enterprise-grade connections out of the box:
 - **Monaco Editor Integration**: The internal text editor is powered by Monaco (the engine behind VS Code) for a premium, syntax-highlighted project viewing experience.
 - **Streamlined Debate Controls**: Complex agent settings were replaced with a simple "Debate Level" slider to control the depth of the plan.
 - **Max Token Failsafe**: A hard Token Limit input allows the Orchestrator to monitor `input + output` tokens across all 15 agents and pull the emergency brake if a debate spirals, saving API costs.
-- **1-Click Context Export**: A dedicated button instantly bundles your `DESIGN.md` and `PLAN.md` into your clipboard, perfectly formatted to be pasted into a coding agent.
+- **1-Click Context Export**: A dedicated button bundles `DESIGN.md`, `PLAN.md`, `DECISIONS.md`, and unresolved questions into a planning-baseline package for a coding agent.
 
 ---
 
