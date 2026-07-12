@@ -9,7 +9,9 @@ let colorIdx = 0;
 let agentConfigs = []; // local copy for config panel
 let currentWsKey = 'cockpit';
 let agentHealthStatus = {};
+let agentCapacityStatus = {};
 let paused = false;
+let awaitingDecisionInput = false;
 let projectOpen = false;
 let currentProjectPath = '';
 let currentProjectBrief = '';
@@ -307,6 +309,17 @@ async function openProject(pathOverride = '') {
   });
   const data = await response.json();
   if (!response.ok) { notify(data.detail || 'Could not open project', true); return false; }
+  // Persistent project artifacts must not carry transient run UI across projects.
+  awaitingDecisionInput = false;
+  paused = false;
+  appStatus = 'idle';
+  eventCount = 0;
+  const pendingActions = document.getElementById('contextPendingActions');
+  if (pendingActions) pendingActions.style.display = 'none';
+  const feed = document.getElementById('feed');
+  if (feed) feed.innerHTML = '';
+  const eventCounter = document.getElementById('eventCount');
+  if (eventCounter) eventCounter.textContent = '0';
   rememberRecentProject(path);
   applyProjectState(data);
   currentWsKey = 'cockpit';

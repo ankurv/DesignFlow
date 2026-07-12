@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css?v=20260711g">
+  <link rel="stylesheet" href="/css/style.css?v=20260712j">
 </head>
 <body>
 
@@ -48,12 +48,12 @@
   <div style="flex:1"></div>
 </div>
 
-<nav>
-  <div class="tab active" onclick="showTab('workspace',this)">Architect Dashboard</div>
-    <div class="tab" onclick="showTab('config',this)">Agents</div>
-  <div class="tab" onclick="showTab('mcp',this)">MCP Servers</div>
-  <div class="tab" onclick="showTab('settings',this)">Settings</div>
-  <div class="tab" onclick="showTab('history',this)">Run History</div>
+<nav aria-label="Primary navigation">
+  <button type="button" class="tab active" aria-selected="true" onclick="showTab('workspace',this)">Architect Dashboard</button>
+  <button type="button" class="tab" aria-selected="false" onclick="showTab('config',this)">Agents</button>
+  <button type="button" class="tab" aria-selected="false" onclick="showTab('mcp',this)">MCP Servers</button>
+  <button type="button" class="tab" aria-selected="false" onclick="showTab('settings',this)">Settings</button>
+  <button type="button" class="tab" aria-selected="false" onclick="showTab('history',this)">Run History</button>
 </nav>
 
 <div class="main">
@@ -285,13 +285,7 @@
         </div>
         <div class="agent-cards" id="agentCardsContainer"></div>
       </section>
-      <aside class="agent-editor-panel" id="agentEditorPanel">
-        <div class="agent-editor-empty">
-          <div class="agent-editor-empty-icon">＋</div>
-          <h3>Add or select an agent</h3>
-          <p>The setup form opens here without moving the team list.</p>
-        </div>
-      </aside>
+      <aside class="agent-editor-panel" id="agentEditorPanel" hidden></aside>
     </div>
   </div>
 
@@ -340,19 +334,19 @@
 <div class="toast" id="toast"></div>
 
 <div class="token-bar">
-  Total tokens: <span id="totalTokens">0</span>
+  Project tokens: <span id="totalTokens">0</span>
   &nbsp;·&nbsp; Cached input: <span id="totalCachedTokens">0</span>
-  &nbsp;·&nbsp; Estimated cost: <span id="totalCost">$0.000000</span>
+  &nbsp;·&nbsp; Project estimated cost: <span id="totalCost">$0.000000</span>
   &nbsp;·&nbsp; Events: <span id="eventCount">0</span>
   &nbsp;·&nbsp; Run: <span id="runId">—</span>
 </div>
 
 
-  <script src="/js/state.js?v=20260710q"></script>
-  <script src="/js/api.js?v=20260711d"></script>
+  <script src="/js/state.js?v=20260712a"></script>
+  <script src="/js/api.js?v=20260712d"></script>
   <script src="/js/workspace.js?v=20260710q"></script>
-  <script src="/js/agents.js?v=20260711d"></script>
-  <script src="/js/main.js?v=20260710q"></script>
+  <script src="/js/agents.js?v=20260712f"></script>
+  <script src="/js/main.js?v=20260712a"></script>
 
 <!-- Login Modal -->
 <div id="loginModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(5px);">

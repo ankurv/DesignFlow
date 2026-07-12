@@ -1,9 +1,15 @@
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function showTab(id, tabElement) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.remove('active');
+    t.setAttribute('aria-selected', 'false');
+  });
   document.getElementById('panel-'+id).classList.add('active');
-  if (tabElement) tabElement.classList.add('active');
+  if (tabElement) {
+    tabElement.classList.add('active');
+    tabElement.setAttribute('aria-selected', 'true');
+  }
   if (id === 'workspace') {
     refreshWorkspace();
     fetchAgentStatus();
@@ -52,4 +58,8 @@ loadCurrentProject();
 loadAgentConfig();
 loadMCPServers();
 fetchAgentStatus();
-setInterval(fetchAgentStatus, 4000);
+setInterval(() => {
+  // This reads local run state only. Provider health checks are manual or run
+  // once when agents are loaded, because they can consume provider quota.
+  if (['running', 'paused', 'needs_attention'].includes(appStatus)) fetchAgentStatus();
+}, 4000);

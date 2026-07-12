@@ -68,7 +68,7 @@ def discover_models(config: AgentConfig) -> list[str]:
         ]
     elif kind == "ollama":
         import urllib.request
-        base_url = config.extra.get("base_url", "http://localhost:11434").rstrip("/")
+        base_url = (config.base_url or config.extra.get("base_url") or "http://localhost:11434").rstrip("/")
         with urllib.request.urlopen(f"{base_url}/api/tags", timeout=15) as response:
             payload = json.loads(response.read())
         ids = [item.get("name", "") for item in payload.get("models", [])]
@@ -225,6 +225,18 @@ class OpenAIAgent(AgentBase):
 
     def _raw_send(self, messages: list[dict], system: str, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> tuple[str, Usage]:
         from typing import Callable
+        if "integrate.api.nvidia.com" in (self.config.base_url or ""):
+            request_messages = ([{"role": "system", "content": system}] if system else []) + messages
+            response = self._client.chat.completions.create(
+                model=self.config.model,
+                messages=request_messages,
+                max_tokens=self.config.extra.get("max_tokens", 2000),
+            )
+            raw = response.usage
+            return response.choices[0].message.content or "", Usage(
+                input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
+                output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+            )
         kwargs = {
             "model": self.config.model or "gpt-4o",
             "input": messages[-1]["content"],

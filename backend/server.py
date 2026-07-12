@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from backend.auth import auth_manager, Session
 from pydantic import BaseModel
@@ -22,8 +23,10 @@ from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
 from .crypto import encrypt_key, decrypt_key
+from .errors import classify_provider_error
 
 app = FastAPI(title="DesignFlow", version="1.1.0")
+logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -41,6 +44,7 @@ class AppState:
         self.run_id: Optional[str] = None
         self.run_task: Optional[asyncio.Task] = None
         self.status = "idle"
+        self.awaiting_input = False
         self.current_idea = ""
 
     def open_project(self, path: str) -> Workspace:
@@ -58,6 +62,7 @@ class AppState:
         self.run_id = None
         self.run_task = None
         self.status = "idle"
+        self.awaiting_input = False
         self.current_idea = workspace.brief()
         return workspace
 
@@ -192,12 +197,18 @@ def broadcast(event: Event, state):
     data = event.to_dict()
     if event.kind == EventKind.ERROR and event.data.get("recoverable"):
         state.status = "needs_attention"
+        state.awaiting_input = False
     elif event.kind == EventKind.TURN_START and event.data.get("resumed"):
         state.status = "running"
+        state.awaiting_input = False
     elif event.kind == EventKind.PHASE and event.data.get("status") in {"waiting_for_approval", "waiting_for_continuation", "budget_exhausted"}:
         state.status = "paused"
+        state.awaiting_input = event.data.get("status") == "waiting_for_approval"
     elif event.kind == EventKind.PHASE and event.data.get("status") == "continuing_debate":
         state.status = "running"
+        state.awaiting_input = False
+    elif event.kind in {EventKind.DONE, EventKind.ERROR}:
+        state.awaiting_input = False
     state.event_log.append(data)
     if state.store:
         state.store.append_event(state.run_id, data)
@@ -467,7 +478,7 @@ def test_agent_config(body: AgentConfigIn, state: AppState = Depends(get_state))
         agent.send("ping")
         return {"ok": True}
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, **classify_provider_error(exc).to_dict()}
 
 
 @app.post("/agents/models")
@@ -479,7 +490,7 @@ def list_provider_models(body: AgentConfigIn, state: AppState = Depends(get_stat
             raise ValueError("No compatible text-generation models were returned")
         return {"ok": True, "models": models}
     except Exception as exc:
-        return {"ok": False, "models": [], "error": str(exc)}
+        return {"ok": False, "models": [], **classify_provider_error(exc).to_dict()}
 
 
 class StartBody(BaseModel):
@@ -544,6 +555,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
     state.run_id = str(uuid.uuid4())[:8]
     state.current_idea = idea
     state.status = "running"
+    state.awaiting_input = False
     if state.store:
         state.store.start_run(state.run_id, idea)
 
@@ -564,6 +576,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
             snapshot = await state.orchestrator.run(idea)
             if state.status != "idle":
                 state.status = "done"
+                state.awaiting_input = False
                 if state.store and state.run_id:
                     state.store.finish_run(
                         state.run_id, "done",
@@ -582,7 +595,10 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
             pass
         except Exception as exc:
             state.status = "error"
-            broadcast(Event(kind=EventKind.ERROR, data={"error": str(exc)}), state)
+            state.awaiting_input = False
+            logger.exception("Orchestrator run failed")
+            public_error, error_code = Orchestrator._public_error(exc)
+            broadcast(Event(kind=EventKind.ERROR, data={"error": public_error, "error_code": error_code}), state)
             if state.store and state.run_id:
                 state.store.finish_run(
                     state.run_id, "error",
@@ -603,6 +619,7 @@ def reset_run(state: AppState = Depends(get_state)):
         except OSError:
             pass
     state.status = "idle"
+    state.awaiting_input = False
     state.orchestrator = None
     state.event_log.clear()
     return {"ok": True}
@@ -615,6 +632,7 @@ def pause_run(state: AppState = Depends(get_state)):
     if state.orchestrator:
         state.orchestrator.pause()
         state.status = "paused"
+        state.awaiting_input = False
     return {"ok": True, "status": state.status}
 
 
@@ -630,6 +648,7 @@ def resume_run(body: Optional[ResumeBody] = None, state: AppState = Depends(get_
             state.orchestrator.max_tokens = body.max_tokens
         state.orchestrator.resume()
         state.status = "running"
+        state.awaiting_input = False
     return {"ok": True, "status": state.status}
 
 
@@ -639,8 +658,13 @@ def retry_failed_turn(state: AppState = Depends(get_state)):
         raise HTTPException(400, "There is no failed turn to retry")
     state.orchestrator.retry_failed_turn()
     state.status = "running"
-    return {"ok": True, "status": state.status,
-            "turn": state.orchestrator.failed_turn}
+    state.awaiting_input = False
+    failed = state.orchestrator.failed_turn or {}
+    return {"ok": True, "status": state.status, "turn": {
+        "turn_id": failed.get("turn_id"),
+        "attempt": failed.get("attempt"),
+        "agent": failed.get("agent"),
+    }}
 
 
 @app.post("/run/stop")
@@ -657,6 +681,7 @@ def stop_run(state: AppState = Depends(get_state)):
                 [agent.state_dict() for agent in state.orchestrator.agents],
             )
     state.status = "idle"
+    state.awaiting_input = False
     return {"ok": True}
 
 
@@ -677,10 +702,15 @@ def run_status(state: AppState = Depends(get_state)):
     agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
     return {
         "status": state.status,
+        "awaiting_input": state.awaiting_input,
         "run_id": state.run_id,
         "idea": state.current_idea,
         "project_path": state.workspace.path if state.workspace else "",
         "agents": agents,
+        "project_usage": state.store.project_usage() if state.store else {
+            "total_tokens": 0, "cached_input_tokens": 0,
+            "estimated_cost_usd": 0, "pricing_complete": True, "run_count": 0,
+        },
         "failed_turn": state.orchestrator.failed_turn if state.orchestrator else None,
     }
 

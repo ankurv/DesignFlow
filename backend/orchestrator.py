@@ -6,6 +6,7 @@ Human steering: pause, inject a message into the debate, swap agent roles.
 
 from __future__ import annotations
 import asyncio
+from difflib import SequenceMatcher, get_close_matches
 import os
 import re
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from typing import Any, Callable, Optional
 from backend.mcp_client import MCPManager
 
 from .agents.base import AgentBase, Message, Usage
+from .errors import classify_provider_error
 from .workspace.workspace import Workspace
 
 
@@ -363,9 +365,52 @@ class Orchestrator:
 
     # ── Main entry ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _fuzzy_intent(text: str) -> str:
+        """Classify only a few low-risk commands; ambiguity falls through to AI."""
+        normalized = re.sub(r"[^a-z0-9@ ]+", " ", (text or "").lower())
+        normalized = " ".join(normalized.split())
+        if not normalized or len(normalized.split()) > 7:
+            return ""
+        intents = {
+            "help": ("help", "show help", "what can i do", "how do i use this"),
+            "status": ("status", "show status", "project status", "run status", "where are we"),
+            "agents": ("list agents", "show agents", "who are the agents", "what agents are available"),
+        }
+        best_intent, best_score = "", 0.0
+        for intent, examples in intents.items():
+            score = max(SequenceMatcher(None, normalized, example).ratio() for example in examples)
+            if score > best_score:
+                best_intent, best_score = intent, score
+        return best_intent if best_score >= 0.84 else ""
+
+    def _local_command_response(self, idea: str) -> str:
+        intent = self._fuzzy_intent(idea)
+        if intent == "help":
+            return "Describe a product goal to start a design debate. You can also use @AgentName, ask for status, or list agents."
+        if intent == "agents":
+            return "Available agents: " + ", ".join(f"{agent.name} ({agent.config.role or 'generalist'})" for agent in self.agents) + "."
+        if intent == "status":
+            snapshot = self.ws.snapshot()
+            ready = [name.upper() for name in ("design", "plan", "decisions", "questions") if str(snapshot.get(name, "")).strip()]
+            artifacts = ", ".join(ready) if ready else "no planning artifacts yet"
+            return f"Project status: {artifacts}. Run usage is {self.run_token_total:,} of {self.max_tokens:,} configured tokens."
+        return ""
+
     async def run(self, idea: str):
         self._running = True
         self.idea = idea
+
+        local_response = self._local_command_response(idea)
+        if local_response:
+            self._emit(Event(EventKind.TURN_END, agent="DesignFlow", data={
+                "turn_id": "local-command", "attempt": 1, "step": 0,
+                "response": local_response, "actor_role": "system",
+                "is_coordinator": False, "usage": Usage().to_dict(),
+                "cost_usd": 0.0, "pricing_known": True,
+            }))
+            self._running = False
+            return self.ws.snapshot()
         
         # Load and start MCP servers if present
         if hasattr(self.ws, "store") and self.ws.store:
@@ -426,18 +471,20 @@ class Orchestrator:
         # Parse explicit @mentions first
         target_agent = None
         prompt_text = idea
-        import re
         match = re.search(r'@(\w+)', idea)
         if match:
             mention = match.group(1).lower()
-            for agent in self.agents:
-                if agent.name.lower() == mention:
-                    target_agent = agent
-                    prompt_text = re.sub(rf'@{match.group(1)}\s*', '', idea, flags=re.IGNORECASE).strip()
-                    break
+            names = {agent.name.lower(): agent for agent in self.agents}
+            matched_name = mention if mention in names else next(iter(get_close_matches(mention, names, n=1, cutoff=0.82)), "")
+            if matched_name:
+                target_agent = names[matched_name]
+                prompt_text = re.sub(rf'@{match.group(1)}\s*', '', idea, flags=re.IGNORECASE).strip()
 
         idea_lower = idea.lower()
-        explicit_debate = any(k in idea_lower for k in ["debate", "discuss", "discussion", "project", "loop", "run debate"]) or os.environ.get("AGENTFLOW_TEST") == "1"
+        debate_terms = ("debate", "discuss", "discussion", "project", "loop", "run debate")
+        words = re.findall(r"[a-z]+", idea_lower)
+        fuzzy_debate = any(get_close_matches(word, debate_terms[:3], n=1, cutoff=0.84) for word in words)
+        explicit_debate = any(k in idea_lower for k in debate_terms) or fuzzy_debate or os.environ.get("AGENTFLOW_TEST") == "1"
         
         # Default to continuous multi-agent loop if we have a coordinator, UNLESS they @mentioned a specific agent.
         is_direct = target_agent is not None or (not explicit_debate and not coordinator)
@@ -736,6 +783,7 @@ class Orchestrator:
             except RuntimeError as exc:
                 if not self._is_rate_limit(exc):
                     agent.mark_error(str(exc))
+                    public_error, error_code = self._public_error(exc)
                     self._failed_turn = {
                         "turn_id": turn_id,
                         "attempt": attempt,
@@ -749,7 +797,11 @@ class Orchestrator:
                     self._paused = True
                     self._pause_event.clear()
                     self._emit(Event(EventKind.ERROR, agent=agent.name, data={
-                        **self.failed_turn,
+                        "turn_id": turn_id,
+                        "attempt": attempt,
+                        "agent_id": agent.config.id,
+                        "error": public_error,
+                        "error_code": error_code,
                         "recoverable": True,
                         "message": "Fix this agent's configuration, save it, then retry the failed turn.",
                     }))
@@ -798,6 +850,12 @@ class Orchestrator:
             "error 429", "limit reached",
         )
         return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _public_error(exc: Exception) -> tuple[str, str]:
+        """Return a bounded UI-safe error without prompts or provider dumps."""
+        public = classify_provider_error(exc)
+        return public.message, public.code
 
     @staticmethod
     def _retry_delay(exc: Exception, attempt: int, agent: AgentBase) -> int:

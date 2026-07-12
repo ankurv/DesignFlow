@@ -75,6 +75,11 @@ class ProjectStore:
                 );
                 """
             )
+            columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
+            if "cached_input_tokens" not in columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0")
+            if "pricing_complete" not in columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN pricing_complete INTEGER NOT NULL DEFAULT 1")
 
     def load_agents(self) -> list[dict]:
         with self._lock:
@@ -113,25 +118,49 @@ class ProjectStore:
     def finish_run(self, run_id: str, status: str, agents: list[dict]):
         now = datetime.now(timezone.utc).isoformat()
         tokens = sum(int(agent.get("total_tokens", 0) or 0) for agent in agents)
+        cached = sum(int(agent.get("cached_input_tokens", 0) or 0) for agent in agents)
         cost = sum(float(agent.get("cost_usd", 0) or 0) for agent in agents)
+        pricing_complete = int(all(agent.get("pricing_known", False) for agent in agents))
         with self._lock, self._db:
             self._db.execute(
                 """UPDATE runs
-                   SET status=?, completed_at=?, total_tokens=?, estimated_cost_usd=?
+                   SET status=?, completed_at=?, total_tokens=?, cached_input_tokens=?,
+                       estimated_cost_usd=?, pricing_complete=?
                    WHERE run_id=?""",
-                (status, now, tokens, cost, run_id),
+                (status, now, tokens, cached, cost, pricing_complete, run_id),
             )
 
     def update_run_metrics(self, run_id: str, agents: list[dict]):
         tokens = sum(int(agent.get("total_tokens", 0) or 0) for agent in agents)
+        cached = sum(int(agent.get("cached_input_tokens", 0) or 0) for agent in agents)
         cost = sum(float(agent.get("cost_usd", 0) or 0) for agent in agents)
+        pricing_complete = int(all(agent.get("pricing_known", False) for agent in agents))
         with self._lock, self._db:
             self._db.execute(
                 """UPDATE runs
-                   SET total_tokens=?, estimated_cost_usd=?
+                   SET total_tokens=?, cached_input_tokens=?, estimated_cost_usd=?, pricing_complete=?
                    WHERE run_id=?""",
-                (tokens, cost, run_id),
+                (tokens, cached, cost, pricing_complete, run_id),
             )
+
+    def project_usage(self) -> dict:
+        """Return durable cumulative usage for every run in this project."""
+        with self._lock:
+            row = self._db.execute(
+                """SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                          COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                          COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+                          COALESCE(MIN(pricing_complete), 1) AS pricing_complete,
+                          COUNT(*) AS run_count
+                   FROM runs"""
+            ).fetchone()
+        return {
+            "total_tokens": int(row["total_tokens"] or 0),
+            "cached_input_tokens": int(row["cached_input_tokens"] or 0),
+            "estimated_cost_usd": float(row["estimated_cost_usd"] or 0),
+            "pricing_complete": bool(row["pricing_complete"]),
+            "run_count": int(row["run_count"] or 0),
+        }
 
     def append_event(self, run_id: str | None, event: dict):
         with self._lock, self._db:
@@ -214,7 +243,7 @@ class ProjectStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT run_id, idea, status, started_at, completed_at,
-                          total_tokens, estimated_cost_usd
+                          total_tokens, cached_input_tokens, estimated_cost_usd, pricing_complete
                    FROM runs ORDER BY started_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()

@@ -209,7 +209,7 @@ function renderQuestionBody(content) {
 function renderInteractiveQuestionPanel(content) {
   const pendingPane = document.getElementById('contextPendingActions');
   const bodyEl = document.getElementById('contextQuestionsBody');
-  const hasQuestion = !!(content && content.trim() && content.trim() !== '(empty)');
+  const hasQuestion = awaitingDecisionInput && !!(content && content.trim() && content.trim() !== '(empty)');
   if (!pendingPane || !bodyEl) return false;
 
   if (!hasQuestion) {
@@ -398,22 +398,24 @@ function handleEvent(ev) {
   // Update status
   if (ev.kind === 'phase') {
     if (ev.data.status === 'waiting_for_continuation' || ev.data.status === 'waiting_for_approval' || ev.data.status === 'budget_exhausted') {
+      awaitingDecisionInput = ev.data.status === 'waiting_for_approval';
       updateStatus('paused');
       if (ev.data.status === 'waiting_for_approval') {
         showInteractiveQuestions();
       }
     } else {
+      awaitingDecisionInput = false;
       updateStatus('running');
       const pendingActions = document.getElementById('contextPendingActions');
       if (pendingActions) pendingActions.style.display = 'none';
     }
   }
-  if (ev.kind === 'done')  { updateStatus('done'); loadRunHistory(); }
+  if (ev.kind === 'done')  { awaitingDecisionInput = false; updateStatus('done'); loadRunHistory(); }
   if (ev.kind === 'file_write') {
     recentFileWrites.unshift({ file: ev.data.file || 'Unknown file', meta: ev.data.preview || 'Artifact updated' });
     recentFileWrites = recentFileWrites.slice(0, 8);
   }
-  if (ev.kind === 'error') updateStatus(ev.data.recoverable ? 'needs_attention' : 'error');
+  if (ev.kind === 'error') { awaitingDecisionInput = false; updateStatus(ev.data.recoverable ? 'needs_attention' : 'error'); }
 
   // Parse coordinator turn into user-facing summary cards
   if (ev.kind === 'turn_end' && isCoordinatorEvent(ev)) {
@@ -468,6 +470,11 @@ function appendFeed(ev) {
 
   switch(ev.kind) {
     case 'phase':
+      if (ev.data.status === 'budget_exhausted') {
+        summary = `Run token budget reached (${Number(ev.data.run_total_tokens || 0).toLocaleString()} of ${Number(ev.data.run_max_tokens || 0).toLocaleString()}). Increase the limit or stop the run.`;
+        kindLabel = 'token limit';
+        break;
+      }
       summary = `Phase: ${ev.data.phase?.toUpperCase() || ''} ${ev.data.status ? '— ' + ev.data.status : ''} ${ev.data.iteration ? 'iter ' + ev.data.iteration : ''} ${ev.data.round ? 'round ' + ev.data.round : ''}`;
       if (ev.data.roles) summary += ' | ' + Object.entries(ev.data.roles).map(([r,a])=>`${a}=${r}`).join(' ');
       break;
@@ -518,7 +525,7 @@ function appendFeed(ev) {
       updateStatus('done');
       break;
     case 'error':
-      summary = friendlyProviderError(ev.data.error || ev.data.message);
+      summary = ev.data.error_code ? String(ev.data.error || 'Agent request failed.') : friendlyProviderError(ev.data.error || ev.data.message);
       if (ev.data.recoverable) summary += ' You can retry after resolving the provider issue.';
       kindLabel = 'error';
       break;
@@ -551,8 +558,9 @@ function appendFeed(ev) {
     </div>
   `;
 
+  const wasNearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   feed.appendChild(div);
-  feed.scrollTop = feed.scrollHeight;
+  if (wasNearBottom) feed.scrollTop = feed.scrollHeight;
   if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
 }
 
@@ -842,6 +850,10 @@ async function steer() {
 function updateStatus(s) {
   appStatus = s;
   paused = (s === 'paused');
+  if (!awaitingDecisionInput) {
+    const pendingActions = document.getElementById('contextPendingActions');
+    if (pendingActions) pendingActions.style.display = 'none';
+  }
   const dot = document.getElementById('statusDot');
   const txt = document.getElementById('statusText');
   const pauseBtn = document.getElementById('pauseBtn');
@@ -872,6 +884,7 @@ function updateStatus(s) {
   const stEl = document.getElementById('contextAgentStatus');
 
   if (s === 'idle' || s === 'done' || s === 'error') {
+    awaitingDecisionInput = false;
     if (nameEl) nameEl.textContent = 'Ready to start';
     if (stEl) stEl.className = 'status-indicator idle';
     
@@ -924,10 +937,26 @@ async function fetchAgentStatus() {
   if (typeof applyProjectState === 'function') {
     applyProjectState(project);
   }
-  if (res.status && res.status !== appStatus) {
+  if (res.status) {
+    awaitingDecisionInput = res.awaiting_input === true;
     updateStatus(res.status);
   }
   let visibleAgents = res.agents || [];
+  agentCapacityStatus = {};
+  (res.agents || []).forEach(agent => {
+    const rawId = String(agent.id || '');
+    const baseId = rawId.includes('_') ? rawId.split('_')[0] : rawId;
+    if (!baseId) return;
+    ['global-', 'project-'].forEach(prefix => {
+      const uid = prefix + baseId;
+      const current = agentCapacityStatus[uid] || {total_tokens:0, cost_usd:0, pricing_known:true};
+      current.total_tokens += Number(agent.total_tokens || 0);
+      current.cost_usd += Number(agent.cost_usd || 0);
+      current.pricing_known = current.pricing_known && agent.pricing_known !== false;
+      if (agent.retry_at) current.retry_at = agent.retry_at;
+      agentCapacityStatus[uid] = current;
+    });
+  });
   if (!visibleAgents.length) {
     const configured = await fetch('/agents').then(r=>r.json());
     visibleAgents = (configured.merged || []).map(a => ({...a, status:'idle', total_tokens:0,
@@ -966,14 +995,13 @@ async function fetchAgentStatus() {
     </div>`;
   }).join('');
 
-  totalTokens = (res.agents || []).reduce((sum, a) => sum + (a.total_tokens || 0), 0);
-  const cached = (res.agents || []).reduce((sum, a) => sum + (a.cached_input_tokens || 0), 0);
-  const hasUnreportedCache = (res.agents || []).some(a => a.cache_reporting === 'unavailable');
-  totalCost = (res.agents || []).reduce((sum, a) => sum + (a.cost_usd || 0), 0);
-  const allKnown = (res.agents || []).every(a => a.pricing_known);
-  const costText = allKnown ? formatCost(totalCost) : `${formatCost(totalCost)} + unpriced`;
+  const projectUsage = res.project_usage || {};
+  totalTokens = Number(projectUsage.total_tokens || 0);
+  const cached = Number(projectUsage.cached_input_tokens || 0);
+  totalCost = Number(projectUsage.estimated_cost_usd || 0);
+  const costText = projectUsage.pricing_complete === false ? `${formatCost(totalCost)} + unpriced` : formatCost(totalCost);
   document.getElementById('totalTokens').textContent = totalTokens.toLocaleString();
-  document.getElementById('totalCachedTokens').textContent = cached.toLocaleString() + (hasUnreportedCache ? ' + unreported' : '');
+  document.getElementById('totalCachedTokens').textContent = cached.toLocaleString();
   document.getElementById('totalCost').textContent = costText;
   updateDesignCockpit();
 }
@@ -984,10 +1012,7 @@ function formatCost(value) {
 
 function clearFeed() {
   document.getElementById('feed').innerHTML = '';
-  totalTokens = 0; eventCount = 0;
-  document.getElementById('totalTokens').textContent = '0';
-  document.getElementById('totalCachedTokens').textContent = '0';
-  document.getElementById('totalCost').textContent = '$0.000000';
+  eventCount = 0;
   const progressTaskList = document.getElementById('progressTaskList');
   if (progressTaskList) {
     progressTaskList.innerHTML = '<div style="color:var(--muted);font-size:12px">No tasks defined in PLAN.md yet.</div>';

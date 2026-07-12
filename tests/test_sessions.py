@@ -13,6 +13,7 @@ from unittest.mock import patch
 from backend.agents.base import AgentBase, AgentConfig, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
 from backend.orchestrator import Orchestrator
+from backend.errors import classify_provider_error
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
 
@@ -401,6 +402,10 @@ class SessionTests(unittest.TestCase):
             event.kind.value == "error" and event.data.get("recoverable")
             for event in events
         ))
+        public_error = next(event for event in events if event.kind.value == "error")
+        self.assertNotIn("prompt", public_error.data)
+        self.assertNotIn("same turn", json.dumps(public_error.data))
+        self.assertLess(len(json.dumps(public_error.data)), 500)
         self.assertTrue(any(
             event.kind.value == "turn_start" and event.data.get("resumed")
             for event in events
@@ -893,7 +898,11 @@ VOTE: DISAGREE
             }
             res = client.post("/agents/test", json=agent_payload)
             self.assertEqual(res.status_code, 200)
-            self.assertEqual(res.json(), {"ok": False, "error": "API Key Expired"})
+            data = res.json()
+            self.assertFalse(data["ok"])
+            self.assertEqual(data["error_code"], "authentication_failed")
+            self.assertEqual(data["error"], "Provider authentication or model access failed.")
+            self.assertNotIn("Expired", data["error"])
 
     def test_project_settings_persistence(self):
         from fastapi.testclient import TestClient
@@ -1056,6 +1065,72 @@ class FrontendPrivacyTests(unittest.TestCase):
         self.assertNotIn("/Users/", html)
         self.assertNotIn("/home/", html)
         self.assertIn('placeholder="/path/to/your/project"', html)
+
+
+class DeterministicRoutingTests(unittest.TestCase):
+    def test_simple_commands_use_high_confidence_fuzzy_routing(self):
+        self.assertEqual(Orchestrator._fuzzy_intent("show staus"), "status")
+        self.assertEqual(Orchestrator._fuzzy_intent("list agents"), "agents")
+        self.assertEqual(Orchestrator._fuzzy_intent("help"), "help")
+        self.assertEqual(Orchestrator._fuzzy_intent("design a secure payment architecture"), "")
+
+    def test_provider_errors_prefer_structured_status_codes(self):
+        forbidden = RuntimeError("a very long provider response")
+        forbidden.status_code = 403
+        public = classify_provider_error(forbidden)
+        self.assertEqual(public.code, "authentication_failed")
+        self.assertNotIn("long provider response", public.message)
+
+        limited = RuntimeError("request rejected")
+        limited.status_code = 429
+        public = classify_provider_error(limited)
+        self.assertEqual(public.code, "rate_limited")
+        self.assertTrue(public.retryable)
+
+        quota = RuntimeError("insufficient_quota: add billing credits")
+        quota.status_code = 429
+        self.assertEqual(classify_provider_error(quota).code, "quota_exhausted")
+
+    def test_decision_checkpoint_state_has_an_explicit_lifecycle(self):
+        from backend.server import AppState, broadcast
+        from backend.orchestrator import Event, EventKind
+
+        state = AppState()
+        broadcast(Event(EventKind.PHASE, data={"status": "waiting_for_approval"}), state)
+        self.assertEqual(state.status, "paused")
+        self.assertTrue(state.awaiting_input)
+
+        broadcast(Event(EventKind.PHASE, data={"status": "continuing_debate"}), state)
+        self.assertEqual(state.status, "running")
+        self.assertFalse(state.awaiting_input)
+
+        broadcast(Event(EventKind.DONE, data={}), state)
+        self.assertFalse(state.awaiting_input)
+
+    def test_project_usage_survives_store_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory) / ".agentflow"
+            store = ProjectStore(metadata)
+            store.start_run("run-1", "first")
+            store.finish_run("run-1", "done", [{
+                "total_tokens": 120, "cached_input_tokens": 30,
+                "cost_usd": 0.012, "pricing_known": True,
+            }])
+            store.start_run("run-2", "second")
+            store.update_run_metrics("run-2", [{
+                "total_tokens": 80, "cached_input_tokens": 10,
+                "cost_usd": 0.008, "pricing_known": False,
+            }])
+            store.close()
+
+            reopened = ProjectStore(metadata)
+            usage = reopened.project_usage()
+            self.assertEqual(usage["total_tokens"], 200)
+            self.assertEqual(usage["cached_input_tokens"], 40)
+            self.assertAlmostEqual(usage["estimated_cost_usd"], 0.02)
+            self.assertFalse(usage["pricing_complete"])
+            self.assertEqual(usage["run_count"], 2)
+            reopened.close()
 
 if __name__ == "__main__":
     unittest.main()
