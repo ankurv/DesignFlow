@@ -1,5 +1,5 @@
 // ── Agent config ──────────────────────────────────────────────────────────────
-const KINDS = ['claude','openai','gemini','cli','ollama'];
+const KINDS = ['claude','openai','groq','gemini','cli','ollama'];
 let globalAgentConfigs = [];
 let projectAgentConfigs = [];
 let editingAgentId = null; // String format: 'global-<id>' or 'project-<id>'
@@ -57,17 +57,16 @@ function renderAgentCards() {
   }
 
   container.innerHTML = html;
+  renderAgentEditor();
 }
 
 function renderSingleCard(cfg, idx, isGlobal) {
   const uid = (isGlobal ? 'global-' : 'project-') + cfg.id;
-  const isEditing = editingAgentId === uid;
-  
-  if (!isEditing) {
+  const isSelected = editingAgentId === uid;
     const isCoordinator = cfg.extra?.is_coordinator;
     const initial = (cfg.name || '?').charAt(0).toUpperCase();
     let kindClass = 'color-default';
-    if (['claude','openai','gemini','cli','ollama'].includes(cfg.kind)) {
+    if (['claude','openai','groq','gemini','cli','ollama'].includes(cfg.kind)) {
       kindClass = `color-${cfg.kind}`;
     }
     
@@ -89,7 +88,6 @@ function renderSingleCard(cfg, idx, isGlobal) {
     } else {
       actionButtons += `
         <button class="btn btn-secondary" onclick="startEditAgent('${uid}', false, ${idx})" style="padding:4px 10px;font-size:11px">Edit</button>
-        <button class="btn btn-secondary" onclick="promoteToGlobal('${cfg.id}')" style="padding:4px 10px;font-size:11px">Make Global</button>
         <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}', false)" style="padding:4px 10px;font-size:11px">Delete</button>
       `;
     }
@@ -108,7 +106,7 @@ function renderSingleCard(cfg, idx, isGlobal) {
       : (statusInfo.status === 'success' ? 'Agent working correctly' : 'Testing connection...');
 
     return `
-      <div class="agent-card" id="card-${uid}">
+      <div class="agent-card ${isSelected ? 'selected' : ''}" id="card-${uid}">
         <div class="agent-card-row">
           <div class="agent-card-avatar ${kindClass}">
             ${initial}
@@ -134,84 +132,98 @@ function renderSingleCard(cfg, idx, isGlobal) {
         </div>
       </div>
     `;
-  } else {
-    // EDIT MODE FORM
-    const data = editingAgentData;
-    return `
-      <div class="agent-card editing" id="card-${uid}">
-        <div style="font-family:var(--heading-font);font-size:13.5px;font-weight:700;margin-bottom:12px;color:var(--accent2);border-bottom:1px solid var(--border);padding-bottom:6px">
-          Editing ${isGlobal ? 'Global' : 'Project'} Agent: ${escHtml(cfg.name || 'New Agent')}
-        </div>
-        <div class="form-grid">
-          <div class="form-group">
-            <label>Agent Name</label>
-            <input value="${escAttr(data.name)}" placeholder="Builder, Ada, critic..." oninput="editingAgentData.name=this.value">
-          </div>
-          <div class="form-group">
-            <label>Kind</label>
-            <select onchange="editingAgentData.kind=this.value;renderAgentCards()">
-              ${KINDS.map(k=>`<option value="${k}" ${k===data.kind?'selected':''}>${k}</option>`).join('')}
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Role</label>
-            <input value="${escAttr(data.role||'')}" placeholder="developer, reviewer, tester..." oninput="editingAgentData.role=this.value">
-          </div>
-          <div class="form-group">
-            <label>Model</label>
-            <input value="${escAttr(data.model||'')}" placeholder="${modelPlaceholder(data.kind)}" oninput="editingAgentData.model=this.value">
-          </div>
-          <div class="form-group full" style="display:flex;align-items:center;gap:6px;margin:4px 0">
-            <input type="checkbox" id="edit-coordinator-${uid}" ${data.extra?.is_coordinator ? 'checked' : ''} onchange="editingAgentData.extra.is_coordinator=this.checked" style="width:auto;margin:0">
-            <label for="edit-coordinator-${uid}" style="cursor:pointer;font-weight:600;font-size:11px;user-select:none;margin:0;text-transform:none">Team Coordinator (acts as manager of debate & execution loop)</label>
-          </div>
-          
-          <div class="form-group full">
-            <label>API Key</label>
-            <input type="password" value="${escAttr(data.api_key||'')}" placeholder="fallback to env var" oninput="editingAgentData.api_key=this.value" autocomplete="new-password" data-lpignore="true">
-          </div>
-          <div class="form-group full">
-            <label>CLI command (for local models)</label>
-            <input value="${escAttr(data.cli_command||'')}" placeholder="e.g. ollama run llama3" oninput="editingAgentData.cli_command=this.value">
-          </div>
-          <details style="grid-column: span 2; margin-top: 6px;">
-            <summary style="font-size:11px;font-weight:600;color:var(--accent2);cursor:pointer;user-select:none;outline:none">Enterprise Endpoints</summary>
-            <div class="form-grid" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border)">
-              <div class="form-group full">
-                <label>Base URL (Foundry / DeepInfra)</label>
-                <input value="${escAttr(data.base_url||'')}" placeholder="e.g. https://api.endpoints.anyscale.com/v1" oninput="editingAgentData.base_url=this.value">
-              </div>
-              <div class="form-group full">
-                <label>Cloud Platform (Anthropic)</label>
-                <select onchange="setEditingExtra('platform', this.value)">
-                  <option value="" ${!data.extra?.platform ? 'selected' : ''}>Standard Public API</option>
-                  <option value="bedrock" ${data.extra?.platform === 'bedrock' ? 'selected' : ''}>AWS Bedrock</option>
-                  <option value="vertex" ${data.extra?.platform === 'vertex' ? 'selected' : ''}>GCP Vertex AI</option>
-                </select>
-              </div>
-            </div>
-          </details>
-          <details style="grid-column: span 2; margin-top: 6px;">
-            <summary style="font-size:11px;font-weight:600;color:var(--accent2);cursor:pointer;user-select:none;outline:none">Override System Prompt</summary>
-            <div class="form-grid" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border)">
-              <div class="form-group full">
-                <textarea style="height:60px" oninput="editingAgentData.system_prompt=this.value">${escHtml(data.system_prompt||'')}</textarea>
-              </div>
-            </div>
-          </details>
-        </div>
-        <div class="agent-form-actions">
-          <button class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button>
-          <button class="btn btn-primary" onclick="saveAgent('${cfg.id}', ${isGlobal})">Save</button>
-        </div>
-      </div>
-    `;
+}
+
+function renderAgentEditor() {
+  const panel = document.getElementById('agentEditorPanel');
+  if (!panel) return;
+  if (!editingAgentId) {
+    panel.innerHTML = `<div class="agent-editor-empty"><div class="agent-editor-empty-icon">＋</div><h3>Add or select an agent</h3><p>The setup form opens here without moving the team list.</p></div>`;
+    return;
   }
+
+  const data = editingAgentData;
+  const isGlobal = editingAgentId.startsWith('global-');
+  const agentId = editingAgentId.replace(/^(global|project)-/, '');
+  const isNew = agentId.startsWith('new-');
+  const isCli = data.kind === 'cli';
+  const isOllama = data.kind === 'ollama';
+  const needsApiKey = !isCli && !isOllama;
+  const models = data.extra?.available_models || [];
+
+  panel.innerHTML = `
+    <div class="agent-editor-header">
+      <div><span class="agent-editor-eyebrow">${isGlobal ? 'Global team' : 'Project team'}</span><h3>${isNew ? 'Add agent' : 'Edit agent'}</h3></div>
+      <button class="agent-editor-close" onclick="cancelEditAgent()" aria-label="Close editor">×</button>
+    </div>
+    <div class="agent-editor-form">
+      <div class="form-group"><label>Agent name *</label><input value="${escAttr(data.name || '')}" placeholder="e.g. Security reviewer" oninput="editingAgentData.name=this.value"></div>
+      <div class="form-group"><label>Type *</label><select onchange="changeEditingAgentKind(this.value)">${KINDS.map(k=>`<option value="${k}" ${k===data.kind?'selected':''}>${k === 'cli' ? 'CLI command' : k.charAt(0).toUpperCase()+k.slice(1)}</option>`).join('')}</select></div>
+      <div class="form-group"><label>Specialty</label><input value="${escAttr(data.role || '')}" placeholder="e.g. security, UX, backend" oninput="editingAgentData.role=this.value"></div>
+      ${isCli ? `
+        <div class="form-group"><label>Command *</label><input value="${escAttr(data.cli_command || '')}" placeholder="e.g. my-agent --stdio" oninput="editingAgentData.cli_command=this.value"></div>
+        <p class="agent-field-note">CLI agents run this local command and do not need an API key or URL.</p>
+      ` : `
+        <div class="form-group"><label>Model <button type="button" class="model-discover-btn" onclick="discoverAgentModels('${editingAgentId}')">Discover models</button></label><input list="model-options-editor" value="${escAttr(data.model || '')}" placeholder="${modelPlaceholder(data.kind)}" oninput="editingAgentData.model=this.value"><datalist id="model-options-editor">${models.map(model => `<option value="${escAttr(model)}"></option>`).join('')}</datalist></div>
+        ${needsApiKey ? `<div class="form-group"><label>API key *</label><input type="password" value="${escAttr(data.api_key || '')}" placeholder="Required" oninput="editingAgentData.api_key=this.value" autocomplete="new-password" data-lpignore="true"></div>` : ''}
+        <div class="form-group"><label>${isOllama ? 'Ollama URL' : 'Base URL'} <span class="label-optional">Optional</span></label><input value="${escAttr(data.base_url || '')}" placeholder="${isOllama ? 'http://localhost:11434' : 'Use provider default'}" oninput="editingAgentData.base_url=this.value"></div>
+        <p class="agent-field-note">Discovering models helps DesignFlow vary the models used by specialized agents.</p>
+      `}
+      <label class="agent-coordinator-option"><input type="checkbox" ${data.extra?.is_coordinator ? 'checked' : ''} onchange="editingAgentData.extra.is_coordinator=this.checked"><span><strong>Team coordinator</strong><small>Manages the debate and execution loop.</small></span></label>
+    </div>
+    <div class="agent-form-actions"><button class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button class="btn btn-primary" onclick="saveAgent('${agentId}', ${isGlobal})">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
+}
+
+function changeEditingAgentKind(kind) {
+  editingAgentData.kind = kind;
+  editingAgentData.extra = editingAgentData.extra || {};
+  delete editingAgentData.extra.available_models;
+  renderAgentEditor();
 }
 
 function modelPlaceholder(kind) {
-  return {claude:'claude-sonnet-4-6',openai:'gpt-4o',gemini:'gemini-2.5-flash',ollama:'llama3',cli:''}[kind]||'';
+  return {claude:'claude-sonnet-4-6',openai:'gpt-4o',groq:'llama-3.3-70b-versatile',gemini:'gemini-2.5-flash',ollama:'llama3',cli:''}[kind]||'';
 }
+
+window.discoverAgentModels = async function(uid) {
+  if (!editingAgentData || !editingAgentData.kind) return;
+  if (editingAgentData.kind === 'cli') {
+    notify('CLI agents do not expose a model catalog.', true);
+    return;
+  }
+  try {
+    const response = await fetch('/agents/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: editingAgentData.name || 'model-discovery',
+        kind: editingAgentData.kind,
+        role: editingAgentData.role || '',
+        model: editingAgentData.model || '',
+        api_key: editingAgentData.api_key || '',
+        base_url: editingAgentData.base_url || '',
+        cli_command: editingAgentData.cli_command || '',
+        system_prompt: editingAgentData.system_prompt || '',
+        max_history_turns: Number(editingAgentData.max_history_turns || 20),
+        extra: editingAgentData.extra || {},
+      })
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      notify(friendlyProviderError(data.error), true);
+      return;
+    }
+    editingAgentData.extra = editingAgentData.extra || {};
+    editingAgentData.extra.available_models = data.models || [];
+    if (!editingAgentData.model && data.models?.length) {
+      editingAgentData.model = data.models[0];
+    }
+    renderAgentEditor();
+    notify(`Found ${data.models.length} compatible models. The virtual team will rotate across them.`);
+  } catch (err) {
+    notify('Could not query provider models.', true);
+  }
+};
 
 function setEditingExtra(key, value) {
   if (!editingAgentData.extra) editingAgentData.extra = {};
@@ -251,6 +263,14 @@ function cancelEditAgent() {
 async function saveAgent(agentId, isGlobal) {
   if (!editingAgentData.name || !editingAgentData.name.trim()) {
     notify('Agent name is required.', true);
+    return;
+  }
+  if (editingAgentData.kind === 'cli' && !editingAgentData.cli_command?.trim()) {
+    notify('Command is required for a CLI agent.', true);
+    return;
+  }
+  if (!['cli', 'ollama'].includes(editingAgentData.kind) && !editingAgentData.api_key?.trim()) {
+    notify('API key is required for this provider.', true);
     return;
   }
 
@@ -314,6 +334,7 @@ async function checkAgentHealth(cfg, uid) {
         role: cfg.role || '',
         model: cfg.model || '',
         api_key: cfg.api_key || '',
+        base_url: cfg.base_url || '',
         cli_command: cfg.cli_command || '',
         system_prompt: cfg.system_prompt || '',
         max_history_turns: Number(cfg.max_history_turns || 20),

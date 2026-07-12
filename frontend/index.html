@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css?v=20260711c">
+  <link rel="stylesheet" href="/css/style.css?v=20260711g">
 </head>
 <body>
 
@@ -272,24 +272,26 @@
 
   <!-- ── Agent Config ── -->
   <div class="panel" id="panel-config">
-    <div class="config-layout">
-      <h2>Agent Team</h2>
-      <p class="muted-note">Configure global team templates or customize project overrides. Project-specific agents take precedence over global agents with matching names.</p>
-      
-      <!-- Active Scope Header -->
-      <div id="activeScopeBanner" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:14px 18px; margin-bottom:20px; display:flex; align-items:center; justify-content:space-between">
-        <div style="display:flex; flex-direction:column; gap:2px">
-          <span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.06em">Active Scope</span>
-          <span id="scopeLabel" style="font-family:var(--heading-font); font-size:15px; font-weight:700; color:var(--accent2)">Global Scope (No Project Open)</span>
-        </div>
-        <div style="display:flex; gap:10px; align-items:center">
-          
+    <div class="config-layout agent-config-layout">
+      <section class="agent-list-pane">
+        <h2>Agent Team</h2>
+        <p class="muted-note">Use different models and specialties to challenge assumptions from multiple angles.</p>
+        <div id="activeScopeBanner" class="agent-scope-banner">
+          <div style="display:flex; flex-direction:column; gap:2px">
+            <span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.06em">Active Scope</span>
+            <span id="scopeLabel" style="font-family:var(--heading-font); font-size:15px; font-weight:700; color:var(--accent2)">Global Scope (No Project Open)</span>
+          </div>
           <button class="btn btn-primary" onclick="addNewAgentCard()" style="font-size:12px; padding:6px 12px">＋ Add Agent</button>
         </div>
-      </div>
-
-      <div class="agent-cards" id="agentCardsContainer"></div>
-
+        <div class="agent-cards" id="agentCardsContainer"></div>
+      </section>
+      <aside class="agent-editor-panel" id="agentEditorPanel">
+        <div class="agent-editor-empty">
+          <div class="agent-editor-empty-icon">＋</div>
+          <h3>Add or select an agent</h3>
+          <p>The setup form opens here without moving the team list.</p>
+        </div>
+      </aside>
     </div>
   </div>
 
@@ -349,7 +351,7 @@
   <script src="/js/state.js?v=20260710q"></script>
   <script src="/js/api.js?v=20260711d"></script>
   <script src="/js/workspace.js?v=20260710q"></script>
-  <script src="/js/agents.js?v=20260711a"></script>
+  <script src="/js/agents.js?v=20260711d"></script>
   <script src="/js/main.js?v=20260710q"></script>
 
 <!-- Login Modal -->

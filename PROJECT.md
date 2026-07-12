@@ -20,10 +20,12 @@ Gone are the days of manually configuring 15 different agents. The DesignFlow ba
 - **Silent Researcher**: Reads your existing codebase in the background to ensure the other models don't hallucinate APIs.
 
 ### 2. Cross-Model Debates (Model Agnostic)
-DesignFlow natively supports cross-model intelligence. If you provide multiple API keys (e.g., Claude, OpenAI, Gemini), the backend distributes the 15 specialized personas across your keys in a round-robin format. 
+DesignFlow natively supports cross-model intelligence. If you provide multiple API keys (e.g., Claude, OpenAI, Groq, Gemini), the backend distributes specialized personas across your configured providers.
 This means you can watch **Claude** (playing the UX Simplifier) challenge **OpenAI** (playing the Red Team) to uncover trade-offs and strengthen the planning baseline.
 
 For multi-agent planning runs, DesignFlow requires contributions from up to three distinct relevant specialists before the planning baseline can complete. Material choices must compare credible alternatives, and approval-enabled runs require at least one user-confirmed decision checkpoint so the team does not silently lock in a high-impact assumption.
+
+When a provider key is configured, DesignFlow can query its live model catalog. The selected model remains preferred, while generated specialists rotate across other compatible discovered models to increase reasoning diversity within the same provider.
 
 ### 3. Exhaustive Tree-Based Planning
 The Orchestrator forces the Virtual Company through a rigorous two-tiered design phase:

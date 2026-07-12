@@ -13,6 +13,75 @@ from pathlib import Path
 from .base import AgentBase, AgentConfig, Usage
 
 
+def _usable_model_ids(raw_ids: list[str]) -> list[str]:
+    """Keep general text-generation models and remove obvious non-chat endpoints."""
+    excluded = (
+        "embed", "embedding", "whisper", "tts", "speech", "audio", "image",
+        "dall-e", "moderation", "realtime", "transcribe", "guard", "vision-preview",
+    )
+    unique = []
+    for raw in raw_ids:
+        model_id = str(raw or "").strip()
+        if not model_id or any(token in model_id.lower() for token in excluded):
+            continue
+        if model_id not in unique:
+            unique.append(model_id)
+    return unique
+
+
+def discover_models(config: AgentConfig) -> list[str]:
+    """Query a configured provider for currently available generation models."""
+    kind = config.kind
+    if kind == "openai":
+        import openai
+        key = config.api_key or os.environ.get("OPENAI_API_KEY", "")
+        kwargs = {"api_key": key} if key else {}
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        models = openai.OpenAI(**kwargs).models.list()
+        ids = [item.id for item in models.data]
+    elif kind == "groq":
+        from groq import Groq
+        key = config.api_key or os.environ.get("GROQ_API_KEY", "")
+        kwargs = {"api_key": key} if key else {}
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        models = Groq(**kwargs).models.list()
+        ids = [item.id for item in models.data]
+    elif kind == "claude":
+        import anthropic
+        key = config.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        kwargs = {"api_key": key} if key else {}
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        models = anthropic.Anthropic(**kwargs).models.list()
+        ids = [item.id for item in models.data]
+    elif kind == "gemini":
+        import google.generativeai as genai
+        key = config.api_key or os.environ.get("GEMINI_API_KEY", "")
+        if key:
+            genai.configure(api_key=key)
+        ids = [
+            item.name.removeprefix("models/")
+            for item in genai.list_models()
+            if "generateContent" in (getattr(item, "supported_generation_methods", []) or [])
+        ]
+    elif kind == "ollama":
+        import urllib.request
+        base_url = config.extra.get("base_url", "http://localhost:11434").rstrip("/")
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=15) as response:
+            payload = json.loads(response.read())
+        ids = [item.get("name", "") for item in payload.get("models", [])]
+    else:
+        return [config.model] if config.model else []
+
+    models = _usable_model_ids(ids)
+    if config.model and config.model in models:
+        models.remove(config.model)
+        models.insert(0, config.model)
+    return models[:20]
+
+
 class ClaudeAgent(AgentBase):
     def __init__(self, config: AgentConfig):
         super().__init__(config)
@@ -187,6 +256,52 @@ class OpenAIAgent(AgentBase):
 
     def provider_session_id(self) -> str:
         return self._response_id or ""
+
+
+class GroqAgent(AgentBase):
+    """Native Groq chat-completions adapter."""
+
+    def __init__(self, config: AgentConfig):
+        super().__init__(config)
+        self._configure_client()
+
+    def _configure_client(self):
+        from groq import Groq
+
+        key = self.config.api_key or os.environ.get("GROQ_API_KEY", "")
+        kwargs = {}
+        if key:
+            kwargs["api_key"] = key
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        self._client = Groq(**kwargs)
+
+    def reconfigure(self, config: AgentConfig):
+        previous = (self.config.api_key, self.config.base_url)
+        super().reconfigure(config)
+        if (config.api_key, config.base_url) != previous:
+            self._configure_client()
+
+    def _raw_send(self, messages: list[dict], system: str, *args, **kwargs) -> tuple[str, Usage]:
+        groq_messages = ([{"role": "system", "content": system}] if system else []) + messages
+        request = {
+            "model": self.config.model or "llama-3.3-70b-versatile",
+            "messages": groq_messages,
+            "max_tokens": int(self.config.extra.get("max_tokens", 2000) or 2000),
+        }
+        if "temperature" in self.config.extra:
+            request["temperature"] = float(self.config.extra["temperature"])
+
+        response = self._client.chat.completions.create(**request)
+        raw = getattr(response, "usage", None)
+        prompt_details = getattr(raw, "prompt_tokens_details", None)
+        usage = Usage(
+            input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
+            cached_input_tokens=int(getattr(prompt_details, "cached_tokens", 0) or 0),
+            output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+        )
+        content = response.choices[0].message.content or ""
+        return content, usage
 
 
 class GeminiAgent(AgentBase):
@@ -505,6 +620,7 @@ class OllamaAgent(AgentBase):
 AGENT_KINDS: dict[str, type[AgentBase]] = {
     "claude": ClaudeAgent,
     "openai": OpenAIAgent,
+    "groq": GroqAgent,
     "gemini": GeminiAgent,
     "cli": CLIAgent,
     "ollama": OllamaAgent,

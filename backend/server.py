@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agents.base import AgentConfig
-from .agents.providers import AGENT_KINDS, create_agent
+from .agents.providers import AGENT_KINDS, create_agent, discover_models
 from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
@@ -321,6 +321,24 @@ def to_agent_config(config: dict, state: AppState = None) -> AgentConfig:
     )
 
 
+def model_pool_for_config(config: dict) -> list[str]:
+    extra = dict(config.get("extra", {}) or {})
+    discovered = [
+        str(model).strip() for model in extra.get("available_models", [])
+        if str(model).strip()
+    ]
+    configured = [str(config.get("model", "")).strip()] if config.get("model") else []
+    return list(dict.fromkeys(configured + discovered))
+
+
+def model_for_virtual_agent(config: dict, role_index: int, provider_count: int) -> str:
+    pool = model_pool_for_config(config)
+    if not pool:
+        return str(config.get("model", "") or "")
+    provider_turn = role_index // max(1, provider_count)
+    return pool[provider_turn % len(pool)]
+
+
 def live_agents_all_sessions(agent_id: str):
     found = []
     for s in app_states.values():
@@ -452,6 +470,18 @@ def test_agent_config(body: AgentConfigIn, state: AppState = Depends(get_state))
         return {"ok": False, "error": str(exc)}
 
 
+@app.post("/agents/models")
+def list_provider_models(body: AgentConfigIn, state: AppState = Depends(get_state)):
+    try:
+        config = to_agent_config(body.model_dump(), state)
+        models = discover_models(config)
+        if not models:
+            raise ValueError("No compatible text-generation models were returned")
+        return {"ok": True, "models": models}
+    except Exception as exc:
+        return {"ok": False, "models": [], "error": str(exc)}
+
+
 class StartBody(BaseModel):
     idea: str = ""
     project_path: str = ""
@@ -496,6 +526,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
         for i, (role, system_prompt) in enumerate(SPECIALIZED_PERSONAS.items()):
             base_config = base_configs[i % len(base_configs)]
             expert = base_config.copy()
+            expert["model"] = model_for_virtual_agent(base_config, i, len(base_configs))
             expert["id"] = f"{base_config.get('id', 'base')}_{role}"
             expert["name"] = role
             expert["role"] = role

@@ -7,9 +7,11 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.agents.base import AgentBase, AgentConfig, Usage
-from backend.agents.providers import CLIAgent
+from backend.agents.providers import CLIAgent, GroqAgent, discover_models
 from backend.orchestrator import Orchestrator
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
@@ -176,6 +178,71 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(agent.total_tokens, 240)
         self.assertEqual(agent.total_cached_input_tokens, 80)
         self.assertGreater(agent.total_cost_usd, 0)
+
+    def test_groq_agent_uses_native_sdk_and_tracks_usage(self):
+        calls = []
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="Groq reply"))],
+                    usage=SimpleNamespace(
+                        prompt_tokens=21,
+                        completion_tokens=8,
+                        prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+                    ),
+                )
+
+        class FakeGroq:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.chat = SimpleNamespace(completions=FakeCompletions())
+                self.models = SimpleNamespace(list=lambda: SimpleNamespace(data=[
+                    SimpleNamespace(id="llama-3.1-8b-instant"),
+                    SimpleNamespace(id="llama-3.3-70b-versatile"),
+                    SimpleNamespace(id="whisper-large-v3"),
+                ]))
+
+        with patch.dict("sys.modules", {"groq": SimpleNamespace(Groq=FakeGroq)}):
+            agent = GroqAgent(AgentConfig(
+                name="groq-agent",
+                kind="groq",
+                model="llama-3.3-70b-versatile",
+                api_key="groq-test-key",
+                system_prompt="Be concise",
+            ))
+            reply = agent.send("Review the design")
+            models = discover_models(agent.config)
+
+        self.assertEqual(reply, "Groq reply")
+        self.assertEqual(calls[0]["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(calls[0]["messages"][0], {"role": "system", "content": "Be concise"})
+        self.assertEqual(agent.total_input_tokens, 21)
+        self.assertEqual(agent.total_cached_input_tokens, 3)
+        self.assertEqual(agent.total_output_tokens, 8)
+        self.assertEqual(models, ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
+
+    def test_virtual_company_rotates_discovered_models(self):
+        from backend.server import model_for_virtual_agent
+
+        config = {
+            "model": "llama-3.3-70b-versatile",
+            "extra": {"available_models": [
+                "llama-3.3-70b-versatile",
+                "qwen-qwq-32b",
+                "llama-3.1-8b-instant",
+            ]},
+        }
+        assigned = [model_for_virtual_agent(config, index, 1) for index in range(6)]
+        self.assertEqual(assigned, [
+            "llama-3.3-70b-versatile",
+            "qwen-qwq-32b",
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "qwen-qwq-32b",
+            "llama-3.1-8b-instant",
+        ])
 
     def test_codex_cli_resumes_exact_thread(self):
         first = "\n".join([

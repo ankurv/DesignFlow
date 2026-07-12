@@ -82,6 +82,7 @@ DEFAULT_PRICING = {
 DEFAULT_MODELS = {
     "claude": "claude-sonnet-4-6",
     "openai": "gpt-4o",
+    "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.5-flash",
     "ollama": "llama3",
 }

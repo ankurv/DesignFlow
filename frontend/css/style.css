@@ -442,6 +442,27 @@
 
   /* ── Agents config panel ── */
   .config-layout { flex: 1; overflow-y: auto; padding: 32px; max-width: 960px; }
+  .agent-config-layout { max-width: none; display: grid; grid-template-columns: minmax(520px, 1.05fr) minmax(380px, .8fr); gap: 28px; overflow: hidden; width: 100%; }
+  .agent-list-pane { min-width: 0; overflow-y: auto; padding-right: 6px; }
+  .agent-scope-banner { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .agent-editor-panel { align-self: start; background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; min-height: 420px; max-height: calc(100vh - 155px); overflow-y: auto; padding: 24px; box-shadow: 0 12px 30px rgba(0,0,0,.18); }
+  .agent-editor-empty { min-height: 370px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }
+  .agent-editor-empty-icon { width: 42px; height: 42px; display: grid; place-items: center; border: 1px dashed var(--border2); border-radius: 50%; color: var(--accent2); font-size: 20px; }
+  .agent-editor-empty h3 { color: var(--text); margin: 14px 0 6px; font-size: 15px; }
+  .agent-editor-empty p { max-width: 260px; margin: 0; font-size: 12.5px; line-height: 1.5; }
+  .agent-editor-header { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 16px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .agent-editor-header h3 { margin: 3px 0 0; font-size: 19px; }
+  .agent-editor-eyebrow { color: var(--accent2); text-transform: uppercase; letter-spacing: .07em; font-size: 10px; font-weight: 700; }
+  .agent-editor-close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 25px; line-height: 1; padding: 0 2px; }
+  .agent-editor-close:hover { color: var(--text); }
+  .agent-editor-form { display: flex; flex-direction: column; gap: 16px; }
+  .agent-field-note { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: -5px 0 0; }
+  .label-optional { text-transform: none; font-weight: 500; opacity: .75; }
+  .agent-coordinator-option { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; text-transform: none; letter-spacing: 0; }
+  .agent-coordinator-option input { width: auto; margin-top: 2px; }
+  .agent-coordinator-option span { display: flex; flex-direction: column; gap: 3px; }
+  .agent-coordinator-option strong { color: var(--text); font-size: 12.5px; }
+  .agent-coordinator-option small { color: var(--muted); font-size: 11px; font-weight: 400; }
   .config-layout h2 { font-family: var(--heading-font); font-size: 19px; font-weight: 700; margin-bottom: 6px; letter-spacing: -0.3px; }
   .agent-cards { display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px; }
   
@@ -510,10 +531,21 @@
   
   .color-claude     { background: #818cf8; }
   .color-openai     { background: #10b981; }
+  .color-groq       { background: #f55036; }
   .color-gemini     { background: #14b8a6; }
   .color-cli        { background: #f97316; }
   .color-ollama     { background: #f59e0b; }
   .color-default    { background: #64748b; }
+  .model-discover-btn {
+    float: right;
+    border: 0;
+    background: transparent;
+    color: var(--accent2);
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .model-discover-btn:hover { color: var(--text); }
 
   /* New Agent Config Card Layout Styles */
   .agent-card {
@@ -532,6 +564,7 @@
     box-shadow: 0 0 14px var(--accent-glow);
     background: var(--bg3);
   }
+  .agent-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-glow); }
   .agent-card-row {
     display: flex;
     align-items: center;

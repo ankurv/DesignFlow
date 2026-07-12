@@ -65,7 +65,7 @@ designflow/
 ├── backend/
 │   ├── agents/
 │   │   ├── base.py         # Abstract AgentBase class with sliding window memory
-│   │   └── providers.py    # OpenAI, Claude, Gemini, CLI (agy, codex), Ollama
+│   │   └── providers.py    # OpenAI, Claude, Groq, Gemini, CLI (agy, codex), Ollama
 │   ├── workspace/
 │   │   └── workspace.py    # Directory management, file writes, and diff state
 │   ├── orchestrator.py     # Main coordinator debate, planning loops, and steering
