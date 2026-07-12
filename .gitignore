@@ -32,8 +32,10 @@ Thumbs.db
 .env
 .env.*
 
-# AgentFlow Data
+# DesignFlow local data
 .agentflow/
+.designflow/
+scratch/
 *.db
 *.db-shm
 *.db-wal

@@ -45,7 +45,7 @@ class Workspace:
         "Discovery Checkpoints",
     ]
     EXCLUDED_PARTS = {
-        ".agentflow", ".git", ".hg", ".svn", "node_modules", "vendor",
+        ".designflow", ".git", ".hg", ".svn", "node_modules", "vendor",
         ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
         "dist", "build",
     }
@@ -56,7 +56,10 @@ class Workspace:
         if not project_path.strip():
             raise ValueError("A project folder is required")
         self.project_root = Path(project_path).expanduser().resolve()
-        self.root = self.project_root / ".agentflow"
+
+        self._migrate_legacy()
+
+        self.root = self.project_root / ".designflow"
         self.brief_path = self.project_root / "DESIGNFLOW.md"
         self.legacy_brief_path = self.project_root / "AGENTFLOW.md"
         self._checksums: dict[str, dict[str, str]] = {}
@@ -65,6 +68,30 @@ class Workspace:
     def path(self) -> str:
         return str(self.project_root)
 
+    def _migrate_legacy(self):
+        legacy_dir = self.project_root / ".agentflow"
+        new_dir = self.project_root / ".designflow"
+        if legacy_dir.exists() and legacy_dir.is_dir() and not new_dir.exists():
+            try:
+                legacy_dir.rename(new_dir)
+            except OSError:
+                pass
+
+        legacy_db = new_dir / "agentflow.db"
+        new_db = new_dir / "designflow.db"
+        if legacy_db.exists() and not new_db.exists():
+            try:
+                legacy_db.rename(new_db)
+            except OSError:
+                pass
+
+        legacy_md = self.project_root / "AGENTFLOW.md"
+        new_md = self.project_root / "DESIGNFLOW.md"
+        if legacy_md.exists() and not new_md.exists():
+            try:
+                legacy_md.rename(new_md)
+            except OSError:
+                pass
 
     def settings(self) -> dict:
         import json
@@ -149,7 +176,7 @@ class Workspace:
         relative = Path(filename.strip().lstrip("/"))
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"Unsafe project path: {filename}")
-        if any(part in {".agentflow", ".git"} for part in relative.parts):
+        if any(part in {".designflow", ".git"} for part in relative.parts):
             raise ValueError(f"Cannot write DesignFlow metadata path: {filename}")
         target = (self.project_root / relative).resolve()
         if target != self.project_root and self.project_root not in target.parents:
@@ -327,7 +354,7 @@ class Workspace:
             relative = Path(raw_name.lstrip("/"))
             if relative.is_absolute() or ".." in relative.parts:
                 continue
-            if any(part in {".agentflow", ".git"} for part in relative.parts):
+            if any(part in {".designflow", ".git"} for part in relative.parts):
                 continue
             content = match.group(2).strip()
             content = re.sub(r"^```\w*\n?", "", content)

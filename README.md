@@ -54,7 +54,7 @@ Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 ### 2. Setup a Project Folder
 
 1. Enter an absolute folder path (e.g. `/Users/you/my-project`) in the **Project Folder** bar and click **Open / Create**.
-2. DesignFlow automatically generates an internal project metadata folder to store agent overrides, debate history, and a local SQLite database (`agentflow.db`).
+2. DesignFlow automatically generates an internal project metadata folder to store agent overrides, debate history, and a local SQLite database (`designflow.db`).
 
 ---
 

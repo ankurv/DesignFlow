@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import uuid
 from backend.auth import auth_manager, Session
 from pydantic import BaseModel
@@ -154,7 +155,7 @@ def change_password(body: ChangePasswordBody, session: Session = Depends(get_ses
     if not success:
         raise HTTPException(404, "User not found")
     return {"ok": True}
-    
+
 @app.get("/users/me")
 def get_me(session: Session = Depends(get_session)):
     return {"username": session.username, "role": session.role}
@@ -168,10 +169,13 @@ def logout(response: Response, session: Session = Depends(get_session)):
     return {"ok": True}
 
 
-GLOBAL_AGENTS_PATH = Path.home() / ".agentflow" / "global_agents.json"
+GLOBAL_AGENTS_PATH = Path.home() / ".designflow" / "global_agents.json"
 
 def load_global_agents() -> list[dict]:
     GLOBAL_AGENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path = Path.home() / ".agentflow" / "global_agents.json"
+    if not GLOBAL_AGENTS_PATH.exists() and legacy_path.exists():
+        shutil.copy2(legacy_path, GLOBAL_AGENTS_PATH)
     if not GLOBAL_AGENTS_PATH.exists():
         return []
     try:
@@ -453,7 +457,7 @@ def update_global_agent(agent_id: str, body: AgentConfigIn, session: Session = D
         if current["id"] == agent_id:
             updated = body.model_dump()
             updated["id"] = agent_id
-            
+
             for s, active in live_agents_all_sessions(agent_id):
                 if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
                     raise HTTPException(
@@ -463,7 +467,7 @@ def update_global_agent(agent_id: str, body: AgentConfigIn, session: Session = D
                     active.reconfigure(to_agent_config(updated, None))
                 except Exception as exc:
                     raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
-                    
+
             configs[index] = updated
             save_global_agents(configs)
             return {"ok": True, "agent": updated}
@@ -532,7 +536,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
     try:
         from .orchestrator import SPECIALIZED_PERSONAS
         base_configs = state.merged_configs
-        
+
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
         for i, (role, system_prompt) in enumerate(SPECIALIZED_PERSONAS.items()):
             base_config = base_configs[i % len(base_configs)]
@@ -543,7 +547,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
             expert["role"] = role
             expert["system_prompt"] = system_prompt
             agents.append(create_agent(to_agent_config(expert, state)))
-            
+
         # 2. Also include any custom agents the user explicitly defined
         for config in state.merged_configs:
             if config["name"] not in SPECIALIZED_PERSONAS:
@@ -569,6 +573,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
         require_approval=True,
         mode=body.mode,
         restore=True,
+        store=state.store,
     )
 
     async def run_and_update():
@@ -604,6 +609,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
                     state.run_id, "error",
                     [agent.state_dict() for agent in state.orchestrator.agents],
                 )
+                state.store.clear_run_state()
 
     state.run_task = asyncio.create_task(run_and_update())
     return {"ok": True, "run_id": state.run_id, "idea_source": "prompt" if body.idea.strip() else "DESIGNFLOW.md"}
@@ -613,6 +619,10 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
 def reset_run(state: AppState = Depends(get_state)):
     if state.status == "running":
         raise HTTPException(400, "Cannot reset while running. Stop first.")
+
+    if state.store:
+        state.store.clear_run_state()
+
     if state.workspace:
         try:
             (state.workspace.root / "run_state.json").unlink(missing_ok=True)
@@ -671,7 +681,7 @@ def retry_failed_turn(state: AppState = Depends(get_state)):
 def stop_run(state: AppState = Depends(get_state)):
     if state.run_task:
         state.run_task.cancel()
-    
+
     if state.orchestrator:
         state.orchestrator.stop()
         state.orchestrator.resume()
@@ -680,6 +690,7 @@ def stop_run(state: AppState = Depends(get_state)):
                 state.run_id, "stopped",
                 [agent.state_dict() for agent in state.orchestrator.agents],
             )
+            state.store.clear_run_state()
     state.status = "idle"
     state.awaiting_input = False
     return {"ok": True}

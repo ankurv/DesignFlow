@@ -244,7 +244,7 @@ class OpenAIAgent(AgentBase):
             "max_output_tokens": self.config.extra.get("max_tokens", 2000),
             "previous_response_id": self._response_id,
             "store": True,
-            "prompt_cache_key": f"agentflow-{self._session_id}",
+            "prompt_cache_key": f"designflow-{self._session_id}",
         }
         compact_threshold = int(self.config.extra.get("compact_threshold", 0) or 0)
         if compact_threshold:
@@ -385,13 +385,13 @@ class CLIAgent(AgentBase):
                 raise ValueError(f"CLI project folder does not exist: {project}")
             self._workspace_cwd = str(project)
             session_key = re.sub(r"[^A-Za-z0-9_.-]", "-", config.id or self._session_id)
-            session = project / ".agentflow" / "sessions" / session_key
+            session = project / ".designflow" / "sessions" / session_key
             session.mkdir(parents=True, exist_ok=True)
             self._session_cwd = str(session)
         else:
             # Direct library users may omit a project root. The server always injects one.
             self._workspace_cwd = ""
-            self._session_cwd = tempfile.mkdtemp(prefix=f"agentflow-{self._session_id}-")
+            self._session_cwd = tempfile.mkdtemp(prefix=f"designflow-{self._session_id}-")
 
     def _configure_command(self, config: AgentConfig):
         previous_mode = getattr(self, "_session_mode", "")

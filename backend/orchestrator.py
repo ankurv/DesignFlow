@@ -23,6 +23,14 @@ from .workspace.workspace import Workspace
 
 # ─── Events ──────────────────────────────────────────────────────────────────
 
+class OrchestratorPhase(str, Enum):
+    DISCOVERY = "discovery"
+    DRAFTING = "drafting"
+    PEER_REVIEW = "peer_review"
+    REFINEMENT = "refinement"
+    APPROVAL = "approval"
+    COMPLETE = "complete"
+
 class EventKind(str, Enum):
     PHASE       = "phase"        # phase change
     TURN_START  = "turn_start"   # agent about to speak
@@ -163,6 +171,18 @@ ROLE_NEEDS = {
     "marketing_beta": ["design", "plan", "decisions"],
 }
 
+SPECIALIST_SIGNALS = {
+    "architecture": ({"architecture", "system", "service", "scale", "performance", "distributed"}, {"architect_alpha", "architect_beta"}),
+    "product": ({"product", "user", "mvp", "feature", "market", "workflow"}, {"product_manager", "product_strategist"}),
+    "ux": ({"ui", "ux", "screen", "dashboard", "website", "mobile", "user", "flow"}, {"ux_simplifier", "ui_designer", "workflow_designer"}),
+    "data": ({"data", "database", "schema", "query", "storage", "migration", "analytics"}, {"data_architect"}),
+    "security": ({"auth", "security", "privacy", "payment", "secret", "permission", "tenant", "compliance"}, {"security_auditor", "red_team"}),
+    "api": ({"api", "rest", "graphql", "webhook", "integration", "client", "backend"}, {"api_designer"}),
+    "operations": ({"cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability"}, {"cloud_architect", "devops_engineer"}),
+    "research": ({"existing", "repository", "codebase", "legacy", "migration", "refactor"}, {"researcher"}),
+    "growth": ({"sales", "marketing", "pricing", "growth", "acquisition", "seo"}, {"sales_alpha", "sales_beta", "marketing_alpha", "marketing_beta"}),
+}
+
 SPECIALIZED_PERSONAS = {
     "architect_alpha": "You are ARCHITECT ALPHA. Propose robust, scalable system designs. Vigorously debate competing designs and highlight their flaws while defending your own.",
     "architect_beta": "You are ARCHITECT BETA. Propose alternative, highly-optimized system designs. Challenge Architect Alpha's assumptions and fight for a superior approach.",
@@ -267,6 +287,8 @@ Respond in this EXACT format:
 <CONTINUE, COMPLETE, or PAUSE_FOR_INPUT>
 (Note: When a coherent planning baseline is ready, set VERDICT to COMPLETE. This means ready to begin iterative implementation, not final specification certainty. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
 
+SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification."""
+
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
@@ -282,9 +304,11 @@ class Orchestrator:
         require_approval: bool = True,
         mode: str = "all",
         restore: bool = False,
+        store: Optional[Any] = None,
     ):
         self.agents = agents
         self.ws = workspace
+        self.store = store
         self._cb = event_cb
         self.max_debate_rounds = max_debate_rounds
         self.max_tokens = max_tokens
@@ -292,7 +316,7 @@ class Orchestrator:
         self.require_approval = require_approval
         self.mode = mode
         self.restore = restore
-        
+
         self.mcp_manager = None
         self.mcp_tools = []
 
@@ -314,9 +338,15 @@ class Orchestrator:
         self._context_full_refresh_every = 4
         self._consulted_specialists: set[str] = set()
         self._user_checkpoint_count = 0
-
-        if self.restore:
-            self.load_state()
+        self.phase = OrchestratorPhase.DISCOVERY
+        self.peer_review_index = 0
+        self.post_approval_phase = None
+        self._selected_peer_names: list[str] = []
+        self._refinement_attempts = 0
+        self._deterministic_feedback = ""
+        self._pending_user_input = ""
+        self.idea = ""
+        self._state_loaded = False
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -400,6 +430,8 @@ class Orchestrator:
     async def run(self, idea: str):
         self._running = True
         self.idea = idea
+        if self.restore and not self._state_loaded:
+            self._state_loaded = self.load_state()
 
         local_response = self._local_command_response(idea)
         if local_response:
@@ -411,62 +443,29 @@ class Orchestrator:
             }))
             self._running = False
             return self.ws.snapshot()
-        
+
         # Load and start MCP servers if present
-        if hasattr(self.ws, "store") and self.ws.store:
-            mcp_configs = self.ws.store.get_mcp_servers()
+        if self.store:
+            mcp_configs = self.store.get_mcp_servers()
             if mcp_configs:
                 self.mcp_manager = MCPManager(mcp_configs)
                 await self.mcp_manager.start()
                 self.mcp_tools = await self.mcp_manager.list_tools()
-        
+
         # Only initialize workspace files if design doesn't exist yet or is empty.
         # We never overwrite existing design/plan docs, so the agents can preserve context across server restarts.
         design_file = self.ws._file("design")
         if not design_file.exists() or design_file.stat().st_size == 0:
             self.ws.init(idea)
-            
+
         n = len(self.agents)
         if n == 0:
             return self.ws.snapshot()
 
-        coordinator = next(
-            (a for a in self.agents if "coordinator" in (a.config.role or "").lower() or "coordinator" in (a.config.name or "").lower() or a.config.extra.get("is_coordinator")),
-            None
-        )
-        self._coordinator_name = coordinator.name if coordinator else ""
-
-        if not coordinator and not os.environ.get("AGENTFLOW_TEST"):
-            # Pick the best model as the coordinator
-            def get_model_score(agent: AgentBase) -> int:
-                kind = (agent.config.kind or "").lower()
-                model = (agent.config.model or "").lower()
-                if kind == "claude":
-                    if "opus" in model:
-                        return 100
-                    if "sonnet" in model:
-                        return 95
-                    return 85
-                elif kind == "openai":
-                    if "o1" in model or "o3" in model:
-                        return 98
-                    if "gpt-4" in model or "o1-mini" in model:
-                        return 90
-                    return 80
-                elif kind == "gemini":
-                    if "pro" in model:
-                        return 88
-                    if "flash" in model:
-                        return 78
-                    return 70
-                elif kind == "ollama":
-                    return 50
-                elif kind == "cli":
-                    return 10
-                return 0
-
-            coordinator = max(self.agents, key=get_model_score)
-            self._coordinator_name = coordinator.name
+        # Python owns routing. The strongest available model is used only for
+        # quality-critical synthesis, regardless of which agent is marked manager.
+        coordinator = max(self.agents, key=self._synthesis_score)
+        self._coordinator_name = coordinator.name
 
         # Parse explicit @mentions first
         target_agent = None
@@ -484,33 +483,33 @@ class Orchestrator:
         debate_terms = ("debate", "discuss", "discussion", "project", "loop", "run debate")
         words = re.findall(r"[a-z]+", idea_lower)
         fuzzy_debate = any(get_close_matches(word, debate_terms[:3], n=1, cutoff=0.84) for word in words)
-        explicit_debate = any(k in idea_lower for k in debate_terms) or fuzzy_debate or os.environ.get("AGENTFLOW_TEST") == "1"
-        
+        explicit_debate = any(k in idea_lower for k in debate_terms) or fuzzy_debate or os.environ.get("DESIGNFLOW_TEST") == "1"
+
         # Default to continuous multi-agent loop if we have a coordinator, UNLESS they @mentioned a specific agent.
         is_direct = target_agent is not None or (not explicit_debate and not coordinator)
 
         if is_direct:
             if not target_agent:
                 target_agent = coordinator or self.agents[0]
-            
+
             self._emit(Event(EventKind.PHASE, data={
                 "phase": "direct_chat", "status": f"Direct chat with {target_agent.name}"
             }))
-            
+
             turn_context = {"step": 1, "phase": "direct_chat", "standing_role": target_agent.config.role}
             turn_id = self._begin_turn(target_agent, turn_context)
-            
+
             snapshot = self.ws.snapshot()
             prompt = (
                 f"Conversational Turn.\n"
                 f"User Prompt: {prompt_text}\n"
                 f"Workspace context (if any):\n{snapshot}\n"
             )
-            
+
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
             self._record_turn_usage(target_agent)
             self.ws.append("logbook", response, target_agent.name, "Turn completed")
-            
+
             self._emit(Event(EventKind.TURN_END, agent=target_agent.name, data={
                 "turn_id": turn_id, "attempt": self._turn_attempts[turn_id],
                 "step": 1, "response": response,
@@ -519,148 +518,292 @@ class Orchestrator:
             }))
             if await self._enforce_token_budget("direct_chat", {"step": 1, "agent": target_agent.name}):
                 return self.ws.snapshot()
-            
+
             self._running = False
             return self.ws.snapshot()
 
+        if not coordinator:
+            coordinator = self.agents[0] if self.agents else None
+
         if coordinator:
-            await self._coordinator_loop(coordinator)
-            return self.ws.snapshot()
-
-        # If mode is "all" or "debate", run debate phase
-        if self.mode in {"all", "debate"}:
-            while self._running:
-                # The first useful turn carries the seed. This avoids one full model
-                # generation per agent whose only purpose used to be "wait".
-                await self._debate_phase(n)
-                if not self._running:
-                    return
-
-                if self.require_approval:
-                    self.pause()
-                    self._emit(Event(EventKind.PHASE, data={"phase": "debate", "status": "waiting_for_approval"}))
-                    await self._wait_if_paused()
-                    if not self._running:
-                        return
-
-                    if not self._steer_queue.empty():
-                        self._emit(Event(EventKind.PHASE, data={"phase": "debate", "status": "continuing_debate"}))
-                        continue
-
-                break
+            self._coordinator_name = coordinator.name
+            await self._run_state_machine(coordinator)
 
         return self.ws.snapshot()
 
-    # ── Debate phase ──────────────────────────────────────────────────────────
+    # ── State Machine ─────────────────────────────────────────────────────────
 
-    async def _debate_phase(self, n: int):
-        self._emit(Event(EventKind.PHASE, data={"phase": "debate"}))
+    def _select_peer_review_agents(self) -> list[AgentBase]:
+        """Choose a small, relevant, domain-diverse review panel without an LLM call."""
+        candidates = [agent for agent in self.agents if agent.name != self._coordinator_name]
+        if not candidates:
+            return []
+        words = set(re.findall(r"[a-z0-9]+", f"{self.idea} {self.ws.brief()}".lower()))
+        scored: list[tuple[int, str, AgentBase]] = []
+        for agent in candidates:
+            identity = f"{agent.name} {agent.config.role}".lower()
+            score = sum(3 for word in words if len(word) > 3 and word in identity)
+            domains = []
+            for domain, (signals, names) in SPECIALIST_SIGNALS.items():
+                if agent.name.lower() in names and words.intersection(signals):
+                    score += 6 + len(words.intersection(signals))
+                    domains.append(domain)
+            if agent.name.lower() == "researcher" and self.ws.read_src():
+                score += 5
+                domains.append("research")
+            if agent.name.lower().startswith("architect_"):
+                score += 2
+                domains.append("architecture")
+            if agent.name.lower() == "product_manager":
+                score += 1
+                domains.append("product")
+            scored.append((score, domains[0] if domains else agent.name.lower(), agent))
 
-        for round_num in range(1, self.max_debate_rounds + 1):
+        selected: list[AgentBase] = []
+        used_domains: set[str] = set()
+        for score, domain, agent in sorted(scored, key=lambda item: (-item[0], item[2].name)):
+            if score <= 0 or domain in used_domains:
+                continue
+            selected.append(agent)
+            used_domains.add(domain)
+            if len(selected) >= 4:
+                break
+        minimum = min(3, len(candidates))
+        if len(selected) < minimum:
+            for _, _, agent in sorted(scored, key=lambda item: (-item[0], item[2].name)):
+                if agent not in selected:
+                    selected.append(agent)
+                if len(selected) >= minimum:
+                    break
+        return selected
+
+    def _deterministic_discovery_question(self) -> str:
+        """Ask one high-value question only when the seed is genuinely underspecified."""
+        words = set(re.findall(r"[a-z0-9]+", self.idea.lower()))
+        if len(words) < 6:
+            return "Who is the primary user, and what outcome must they achieve with this product?"
+        if words.intersection({"enterprise", "team", "tenant", "organization"}) and not words.intersection({"admin", "member", "role", "permission", "sso"}):
+            return "What user roles and access boundaries must the first version support?"
+        if words.intersection({"payment", "health", "medical", "finance", "bank", "identity"}) and not words.intersection({"compliance", "privacy", "region", "retention"}):
+            return "Are there mandatory compliance, data residency, or retention constraints?"
+        return ""
+
+    @staticmethod
+    def _synthesis_score(agent: AgentBase) -> int:
+        """Reserve the strongest configured model for drafting/refinement, not routing."""
+        kind = (agent.config.kind or "").lower()
+        model = (agent.config.model or "").lower()
+        explicit = int(agent.config.extra.get("synthesis_priority", 0) or 0)
+        score = {"claude": 80, "openai": 78, "gemini": 72, "groq": 62, "ollama": 35, "cli": 30}.get(kind, 20)
+        quality_markers = {
+            "opus": 25, "sonnet": 18, "o3": 24, "o1": 20,
+            "gpt-5": 24, "gpt-4.1": 18, "gpt-4o": 15,
+            "pro": 16, "70b": 12, "72b": 12, "large": 8,
+        }
+        cheap_markers = {"flash": -8, "mini": -10, "small": -12, "8b": -14, "7b": -15, "3b": -18}
+        score += max((value for marker, value in quality_markers.items() if marker in model), default=0)
+        score += min((value for marker, value in cheap_markers.items() if marker in model), default=0)
+        return score + explicit
+
+    async def _run_state_machine(self, coordinator):
+        max_steps = 30
+        for step in range(1, max_steps + 1):
             await self._wait_if_paused()
             if not self._running:
-                return
+                break
 
-            votes: dict[str, str] = {}
-            steering_accumulated = ""
+            if self.phase == OrchestratorPhase.DISCOVERY:
+                await self._run_discovery_phase(coordinator, step)
+            elif self.phase == OrchestratorPhase.DRAFTING:
+                await self._run_drafting_phase(coordinator, step)
+            elif self.phase == OrchestratorPhase.PEER_REVIEW:
+                await self._run_peer_review_phase(step)
+            elif self.phase == OrchestratorPhase.REFINEMENT:
+                await self._run_refinement_phase(coordinator, step)
+            elif self.phase == OrchestratorPhase.APPROVAL:
+                await self._run_approval_phase(step)
+            elif self.phase == OrchestratorPhase.COMPLETE:
+                self._emit(Event(EventKind.PHASE, data={"phase": "coordinator", "status": "complete", "step": step}))
+                if self.store:
+                    self.store.clear_run_state()
+                break
+        else:
+            raise RuntimeError("Planning workflow exceeded its deterministic step limit.")
 
-            for agent in self.agents:
-                await self._wait_if_paused()
-                if not self._running:
-                    return
-                new_steering = await self._drain_steer()
-                if new_steering:
-                    if steering_accumulated:
-                        steering_accumulated += "\n" + new_steering
-                    else:
-                        steering_accumulated = new_steering
+    async def _run_discovery_phase(self, coordinator, step):
+        self._emit(Event(EventKind.PHASE, data={"phase": "discovery", "status": "running", "step": step}))
+        question = self._deterministic_discovery_question()
+        if question and self.require_approval:
+            self.ws.write("questions", f"# Clarifying Question\n\n{question}")
+            self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
+            self.post_approval_phase = OrchestratorPhase.DRAFTING
+            self.phase = OrchestratorPhase.APPROVAL
+        else:
+            self.phase = OrchestratorPhase.DRAFTING
+        self.save_state()
 
-                full_ctx = self._agent_context(agent)
-                steer_block = f"\n\n[HUMAN STEERING]\n{steering_accumulated}" if steering_accumulated else ""
-                seed_block = f"\n\nProduct idea: {self.idea}" if round_num == 1 else ""
-                prompt = (
-                    f"{DEBATE_SYSTEM.format(n=len(self.agents))}"
-                    f"{seed_block}\n\n"
-                    f"Debate round {round_num}/{self.max_debate_rounds}.\n\n"
-                    f"{steer_block}\n\n"
-                    "Add your contributions now."
+    async def _run_drafting_phase(self, coordinator, step):
+        self._emit(Event(EventKind.PHASE, data={"phase": "drafting", "status": "running", "step": step}))
+        new_steering = "\n".join(filter(None, (self._pending_user_input, await self._drain_steer())))
+        self._pending_user_input = ""
+        steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
+
+        prompt = (
+            f"Product Idea: {self.idea}\n{steer_block}\n"
+            f"Draft the initial architecture and implementation plan.\n"
+            f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` with your complete initial drafts."
+        )
+        full_ctx = self._agent_context(coordinator)
+        response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
+        self._apply_coordinator_agent_response(coordinator.name, response)
+        self.phase = OrchestratorPhase.PEER_REVIEW
+        self.save_state()
+
+    async def _run_peer_review_phase(self, step):
+        if not self._selected_peer_names:
+            self._selected_peer_names = [agent.name for agent in self._select_peer_review_agents()]
+            self.save_state()
+        by_name = {agent.name: agent for agent in self.agents}
+        other_agents = [by_name[name] for name in self._selected_peer_names if name in by_name]
+        if not other_agents:
+            self.phase = OrchestratorPhase.REFINEMENT
+            self.save_state()
+            return
+
+        if self.peer_review_index >= len(other_agents):
+            self.phase = OrchestratorPhase.REFINEMENT
+            self.peer_review_index = 0
+            self.save_state()
+            return
+
+        agent = other_agents[self.peer_review_index]
+        self._emit(Event(EventKind.PHASE, data={"phase": "peer_review", "status": f"Review by {agent.name}", "step": step}))
+
+        new_steering = await self._drain_steer()
+        steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
+
+        prompt = (
+            f"You are the {agent.config.role or 'Specialist'}.\n"
+            f"Read the current DESIGN.md and PLAN.md from the workspace.\n"
+            f"Provide your specialized critique and alternative suggestions.\n{steer_block}\n"
+            f"Output `## DESIGN_APPEND` or `## PLAN_APPEND` if you want to add notes directly, or just provide text."
+        )
+
+        full_ctx = self._agent_context(agent)
+        response = await self._send_agent_basic(agent, prompt, "peer_review", step, ephemeral=full_ctx)
+        self.ws.append("logbook", response, agent.name, "Peer review critique")
+        self._apply_coordinator_agent_response(agent.name, response)
+        self._consulted_specialists.add(agent.name)
+        self.peer_review_index += 1
+        self.save_state()
+
+    async def _run_refinement_phase(self, coordinator, step):
+        self._emit(Event(EventKind.PHASE, data={"phase": "refinement", "status": "running", "step": step}))
+        new_steering = "\n".join(filter(None, (self._pending_user_input, await self._drain_steer())))
+        self._pending_user_input = ""
+        steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
+
+        prompt = (
+            f"Read the peer critiques from the logbook and update DESIGN.md and PLAN.md.\n{steer_block}\n"
+            f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
+            f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
+        )
+        if self._deterministic_feedback:
+            prompt += f"\n\nDeterministic quality checks that must be fixed:\n{self._deterministic_feedback}"
+        full_ctx = self._agent_context(coordinator)
+        response = await self._send_agent_basic(coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True)
+        self._apply_coordinator_agent_response(coordinator.name, response)
+        self._refinement_attempts += 1
+
+        decision = self.ws.parse_section(response, "DECISION_CHECKPOINT").strip()
+        if self._is_none_text(decision):
+            decision = ""
+
+        if decision:
+            self.ws.write("questions", f"# Decision Checkpoint\n\n{decision}")
+            self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
+            self.post_approval_phase = OrchestratorPhase.COMPLETE
+            self.phase = OrchestratorPhase.APPROVAL
+        else:
+            errors = self._coordinator_completion_errors("PASS")
+            if errors and self._refinement_attempts < 3:
+                self._deterministic_feedback = "\n".join(f"- {error}" for error in errors)
+                self.phase = OrchestratorPhase.REFINEMENT
+            elif errors and self.require_approval and any("user decision" in error for error in errors):
+                checkpoint = (
+                    "Decision: Is this planning baseline ready to hand to a coding agent?\n\n"
+                    "- [A] Approve the baseline and continue with implementation discovery\n"
+                    "- [B] Request another focused refinement pass\n\n"
+                    "Recommendation: A — proceed while treating Known Unknowns and Discovery Checkpoints as required follow-up work."
                 )
-                ephemeral = f"Current Workspace snapshot:\n{full_ctx}"
+                self.ws.write("questions", f"# Decision Checkpoint\n\n{checkpoint}")
+                self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
+                self.post_approval_phase = OrchestratorPhase.COMPLETE
+                self.phase = OrchestratorPhase.APPROVAL
+            else:
+                self.phase = OrchestratorPhase.COMPLETE
+        self.save_state()
 
-                turn_context = {"round": round_num, "phase": "debate",
-                                "standing_role": agent.config.role}
-                turn_id = self._begin_turn(agent, turn_context)
+    async def _run_approval_phase(self, step):
+        if not self.require_approval:
+            self.phase = self.post_approval_phase or OrchestratorPhase.COMPLETE
+            self.post_approval_phase = None
+            self.save_state()
+            return
+        self._emit(Event(EventKind.PHASE, data={"phase": "approval", "status": "waiting_for_approval", "step": step}))
+        self.pause()
+        await self._wait_if_paused()
 
-                response = await self._send_agent(
-                    agent, prompt, turn_id, turn_context, ephemeral_context=ephemeral
-                )
-                self._record_turn_usage(agent)
+        if not self._running:
+            return
 
-                self._apply_debate_response(agent.name, round_num, response)
-                vote = self.ws.parse_vote(response)
-                votes[agent.name] = vote
+        new_steering = await self._drain_steer()
+        if new_steering:
+            self.ws.append("logbook", new_steering, "User", "Provided approval/clarification")
+            self._pending_user_input = new_steering
+        self._user_checkpoint_count += 1
+        self.phase = self.post_approval_phase or OrchestratorPhase.COMPLETE
+        self.post_approval_phase = None
+        self.save_state()
 
-                self.ws.append("logbook", response, agent.name, "Turn completed")
-                self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
-                    "turn_id": turn_id, "attempt": self._turn_attempts[turn_id],
-                    "round": round_num, "response": response,
-                    **self._usage_event(agent),
-                }))
-                if await self._enforce_token_budget("debate", {"round": round_num, "agent": agent.name}):
-                    return
-                self._emit(Event(EventKind.VOTE, agent=agent.name,
-                                 data={"vote": vote, "round": round_num}))
+    async def _send_agent_basic(self, agent, prompt, phase_name, step, ephemeral="", synthesis=False):
+        turn_context = {"step": step, "phase": phase_name, "standing_role": agent.config.role}
+        turn_id = self._begin_turn(agent, turn_context)
 
-            if all(v == "AGREE" for v in votes.values()):
-                self._emit(Event(EventKind.CONSENSUS, data={
-                    "round": round_num, "votes": votes
-                }))
-                return
-
-            disagree = [a for a, v in votes.items() if v == "DISAGREE"]
-            self._emit(Event(EventKind.PHASE, data={
-                "phase": "debate", "round": round_num,
-                "status": f"no consensus — {disagree} disagree"
-            }))
-
-            if self.require_approval and round_num % 2 == 0 and round_num < self.max_debate_rounds:
-                self.pause()
-                self._emit(Event(EventKind.PHASE, data={
-                    "phase": "debate", "round": round_num,
-                    "status": "waiting_for_continuation"
-                }))
-                await self._wait_if_paused()
-                if not self._running:
-                    return
-
-        # Max rounds: proceed anyway
-        self._emit(Event(EventKind.CONSENSUS, data={"forced": True, "votes": {}}))
-
-    def _apply_debate_response(self, agent: str, round_num: int, response: str):
-        design_bit = self.ws.parse_section(response, "DESIGN_APPEND")
-        plan_update = self.ws.parse_section(response, "PLAN_UPDATE")
-        consensus_bit = self.ws.parse_section(response, "CONSENSUS_APPEND")
-
-        if design_bit:
-            self.ws.append("design", design_bit, agent, f"Round {round_num}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=agent,
-                             data={"file": "DESIGN.md", "preview": design_bit[:120]}))
-        if plan_update:
-            self.ws.write("plan", f"# Plan\n\n{plan_update}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=agent,
-                             data={"file": "PLAN.md", "preview": plan_update[:120]}))
-        if consensus_bit:
-            self.ws.append("consensus", consensus_bit, agent, f"Round {round_num}")
-
+        response = await self._send_agent(
+            agent, prompt, turn_id, turn_context, ephemeral_context=ephemeral,
+            system_override=SYNTHESIS_SYSTEM if synthesis else None,
+        )
+        self._record_turn_usage(agent)
+        self.ws.append("logbook", response, agent.name, "Turn completed")
+        self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
+            "turn_id": turn_id, "attempt": self._turn_attempts[turn_id],
+            "step": step, "response": response,
+            **self._event_actor_meta(agent),
+            **self._usage_event(agent),
+        }))
+        if await self._enforce_token_budget(phase_name, {"step": step, "agent": agent.name}):
+            self._running = False
+        return response
 
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def save_state(self):
         state = {
+            "idea": self.idea,
             "mode": self.mode,
             "turn_sequence": self._turn_sequence,
             "run_token_total": self.run_token_total,
+            "phase": self.phase.value,
+            "peer_review_index": self.peer_review_index,
+            "post_approval_phase": self.post_approval_phase.value if self.post_approval_phase else None,
+            "selected_peer_names": self._selected_peer_names,
+            "refinement_attempts": self._refinement_attempts,
+            "deterministic_feedback": self._deterministic_feedback,
+            "pending_user_input": self._pending_user_input,
+            "consulted_specialists": sorted(self._consulted_specialists),
+            "user_checkpoint_count": self._user_checkpoint_count,
             "agents": {
                 a.name: [
                     {
@@ -672,21 +815,66 @@ class Orchestrator:
                 ] for a in self.agents
             }
         }
-        try:
-            (self.ws.root / "run_state.json").write_text(json.dumps(state, indent=2))
-        except Exception:
-            pass
+        if self.store:
+            self.store.save_run_state(state)
+        else:
+            try:
+                (self.ws.root / "run_state.json").write_text(json.dumps(state, indent=2))
+            except Exception:
+                pass
 
     def load_state(self):
+        if self.store:
+            state = self.store.load_run_state()
+            if state:
+                if state.get("idea") and self.idea and state.get("idea") != self.idea:
+                    return False
+                self.mode = state.get("mode", self.mode)
+                self._turn_sequence = state.get("turn_sequence", 0)
+                self.run_token_total = int(state.get("run_token_total", 0) or 0)
+                self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
+                self.peer_review_index = state.get("peer_review_index", 0)
+                pap = state.get("post_approval_phase")
+                self.post_approval_phase = OrchestratorPhase(pap) if pap else None
+                self._selected_peer_names = list(state.get("selected_peer_names", []))
+                self._refinement_attempts = int(state.get("refinement_attempts", 0) or 0)
+                self._deterministic_feedback = str(state.get("deterministic_feedback", ""))
+                self._pending_user_input = str(state.get("pending_user_input", ""))
+                self._consulted_specialists = set(state.get("consulted_specialists", []))
+                self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
+
+                agent_states = state.get("agents", {})
+                for a in self.agents:
+                    if a.name in agent_states:
+                        a.history = []
+                        for m in agent_states[a.name]:
+                            usage = Usage(**m.get("usage", {}))
+                            msg = Message(role=m.get("role", ""), content=m.get("content", ""), timestamp=m.get("timestamp", ""), usage=usage)
+                            a.history.append(msg)
+                return True
+
+        # Fallback to json file
         state_file = self.ws.root / "run_state.json"
         if not state_file.exists():
             return False
         try:
             state = json.loads(state_file.read_text())
+            if state.get("idea") and self.idea and state.get("idea") != self.idea:
+                return False
             self.mode = state.get("mode", self.mode)
             self._turn_sequence = state.get("turn_sequence", 0)
             self.run_token_total = int(state.get("run_token_total", 0) or 0)
-            
+            self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
+            self.peer_review_index = state.get("peer_review_index", 0)
+            pap = state.get("post_approval_phase")
+            self.post_approval_phase = OrchestratorPhase(pap) if pap else None
+            self._selected_peer_names = list(state.get("selected_peer_names", []))
+            self._refinement_attempts = int(state.get("refinement_attempts", 0) or 0)
+            self._deterministic_feedback = str(state.get("deterministic_feedback", ""))
+            self._pending_user_input = str(state.get("pending_user_input", ""))
+            self._consulted_specialists = set(state.get("consulted_specialists", []))
+            self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
+
             agent_states = state.get("agents", {})
             for a in self.agents:
                 if a.name in agent_states:
@@ -706,7 +894,7 @@ class Orchestrator:
                 self._cb(event)
             except Exception:
                 pass
-        
+
         if event.kind in {EventKind.TURN_END, EventKind.STEER, EventKind.FILE_WRITE}:
             self.save_state()
 
@@ -757,6 +945,7 @@ class Orchestrator:
         turn_id: str = "turn-manual",
         turn_context: Optional[dict] = None,
         ephemeral_context: Optional[str] = None,
+        system_override: Optional[str] = None,
     ) -> str:
         attempt = self._turn_attempts.get(turn_id, 1)
         self._turn_attempts[turn_id] = attempt
@@ -775,7 +964,7 @@ class Orchestrator:
                     return future.result()
 
                 response = await asyncio.to_thread(
-                    agent.send, prompt, self._agent_system(agent), ephemeral_context,
+                    agent.send, prompt, system_override or self._agent_system(agent), ephemeral_context,
                     mcp_tools=self.mcp_tools, tool_handler=call_mcp_tool
                 )
                 self._failed_turn = None
@@ -912,7 +1101,7 @@ class Orchestrator:
             await self._wait_if_paused()
             if not self._running:
                 break
-            
+
         self._budget_exhausted = False
         return False
 
@@ -933,7 +1122,7 @@ class Orchestrator:
 
     def _coordinator_context(self) -> str:
         agent_name = self._coordinator_name or "coordinator"
-        roles = ["design", "plan", "decisions", "questions", "src_index"]
+        roles = ["design", "plan", "decisions", "questions", "src_index", "logbook"]
         if self._should_force_full_context(agent_name):
             context = self.ws.scoped_context(roles)
         else:
@@ -942,7 +1131,7 @@ class Orchestrator:
         return context
 
     def _agent_context(self, agent: AgentBase) -> str:
-        roles = self._role_context_needs(agent.name)
+        roles = self._role_context_needs(agent.name) + ["logbook"]
         if self._should_force_full_context(agent.name):
             context = self.ws.scoped_context(roles)
         else:
@@ -976,219 +1165,13 @@ class Orchestrator:
             )
         return errors
 
-    async def _coordinator_loop(self, coordinator: AgentBase):
-        other_agents = [a for a in self.agents if a.name != coordinator.name]
-        agents_list = "\n".join(f"- {a.name}: {a.config.role or 'Contributor'}" for a in other_agents)
-        system_prompt = COORDINATOR_SYSTEM.format(agents_list=agents_list, mode=self.mode, max_debate_rounds=self.max_debate_rounds)
 
-        orig_system = coordinator.config.system_prompt
-        coordinator.config.system_prompt = system_prompt
-
-        max_steps = max(10, self.max_debate_rounds * 2)
-        previous_summon = None
-        consecutive_loops = 0
-        for step in range(1, max_steps + 1):
-            await self._wait_if_paused()
-            if not self._running:
-                break
-
-            # 1. Call Coordinator
-            delta = self._coordinator_context()
-            new_steering = await self._drain_steer()
-            steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
-            seed_block = f"\n\nProduct idea: {self.idea}" if step == 1 else ""
-            agent_feedback_block = f"\n\n[LAST AGENT REPLY]\n{self._last_agent_feedback}" if getattr(self, "_last_agent_feedback", None) else ""
-
-            prompt = (
-                f"Coordinator execution step {step}/{max_steps}.\n"
-                f"{steer_block}{seed_block}{agent_feedback_block}\n\n"
-                "Determine the NEXT_AGENT to run, provide both internal instructions and user-facing summary fields, and state the VERDICT (CONTINUE or COMPLETE)."
-            )
-            ephemeral = f"Current Workspace snapshot:\n{delta}"
-
-            turn_context = {"step": step, "phase": "coordinator", "standing_role": coordinator.config.role}
-            turn_id = self._begin_turn(coordinator, turn_context)
-
-            response = await self._send_agent(
-                coordinator, prompt, turn_id, turn_context, ephemeral_context=ephemeral
-            )
-            self._record_turn_usage(coordinator)
-
-            # Apply coordinator's own plan/design updates or file writes
-            self._apply_coordinator_agent_response(coordinator.name, response)
-            self.ws.append("logbook", response, coordinator.name, "Turn completed")
-            self._emit(Event(EventKind.TURN_END, agent=coordinator.name, data={
-                "turn_id": turn_id, "attempt": self._turn_attempts[turn_id],
-                "step": step, "response": response,
-                **self._event_actor_meta(coordinator),
-                **self._usage_event(coordinator),
-            }))
-            if await self._enforce_token_budget("coordinator", {"step": step, "agent": coordinator.name}):
-                break
-
-            parsed = self._parse_coordinator_response(response)
-            next_agent_name = parsed["next_agent"]
-            instructions = parsed["instructions"]
-            verdict = parsed["verdict"]
-            completion_errors = parsed["completion_errors"]
-            if completion_errors:
-                self._emit(Event(EventKind.PHASE, data={
-                    "phase": "coordinator",
-                    "status": "quality_gate_failed",
-                    "step": step,
-                    "errors": completion_errors,
-                }))
-                self._last_agent_feedback = (
-                    "System validation blocked completion.\n"
-                    + "\n".join(f"- {error}" for error in completion_errors)
-                )
-                continue
-            
-            # Loop detection
-            if verdict == "CONTINUE":
-                summon_hash = f"{next_agent_name}:{instructions}"
-                if summon_hash == previous_summon:
-                    consecutive_loops += 1
-                    if consecutive_loops >= 1: # Tried exact same thing twice
-                        self._emit(Event(EventKind.ERROR, agent=coordinator.name, data={"error": "Loop detected. Terminating debate to prevent stall."}))
-                        break
-                else:
-                    consecutive_loops = 0
-                    previous_summon = summon_hash
-
-            if verdict in {"COMPLETE", "PAUSE", "PAUSE_FOR_INPUT"}:
-                status = "complete" if verdict == "COMPLETE" else "waiting_for_approval"
-                self._emit(Event(EventKind.PHASE, data={
-                    "phase": "coordinator", "status": status, "step": step
-                }))
-                if verdict != "COMPLETE":
-                    self.pause()
-                    await self._wait_if_paused()
-                    if not self._running:
-                        break
-                    continue
-                break
-
-            # Sanitize the name in case the LLM wrapped it in **bold** or `code` tags
-            clean_name = next_agent_name.replace('*', '').replace('`', '').strip().lower()
-            selected_agent = next((a for a in other_agents if a.name.lower() == clean_name), None)
-            if not selected_agent:
-                error_msg = f"Coordinator selected invalid agent: '{next_agent_name}'"
-                self._emit(Event(EventKind.ERROR, agent=coordinator.name, data={"error": error_msg}))
-                if other_agents:
-                    selected_agent = other_agents[0]
-                else:
-                    break
-
-            # 2. Call selected agent
-            agent_full_ctx = self._agent_context(selected_agent)
-            agent_prompt = (
-                f"Coordinator Instructions:\n{instructions}\n\n"
-                f"Current Workspace snapshot:\n{agent_full_ctx}\n\n"
-                f"[OPTIONAL FILE UPDATES]\n"
-                f"You may optionally update workspace files directly by including these exact headers anywhere in your response. DO NOT wrap them in markdown code blocks:\n"
-                f"## DESIGN_UPDATE\n<complete updated design document>\n\n"
-                f"## PLAN_UPDATE\n<complete updated plan document>\n\n"
-                f"## DECISIONS_UPDATE\n<complete updated decision log with rationale and trade-offs>\n\n"
-                f"## DECISION_CHECKPOINT\n<if you need the user to make a critical decision, ask exactly one decision with 2-3 markdown options like - [A] option, - [B] option, plus a Recommendation line and concise trade-offs; never bundle multiple questions>\n\n"
-                f"## QUESTIONS\n<if you need clarification from the user, write your questions here>\n\n"
-                f"## FILE: path/to/file.ext\n<complete file content>\n\n"
-                f"Please execute your turn now."
-            )
-
-            agent_turn_context = {"step": step, "phase": "coordinator_agent", "standing_role": selected_agent.config.role}
-            agent_turn_id = self._begin_turn(selected_agent, agent_turn_context)
-
-            agent_response = await self._send_agent(selected_agent, agent_prompt, agent_turn_id, agent_turn_context)
-            self._record_turn_usage(selected_agent)
-            self._consulted_specialists.add(selected_agent.name)
-            self._last_agent_feedback = f"{selected_agent.name} said:\n{agent_response}"
-
-            agent_decision = self.ws.parse_section(agent_response, "DECISION_CHECKPOINT").strip()
-            agent_questions = self.ws.parse_section(agent_response, "QUESTIONS").strip()
-
-            self._apply_coordinator_agent_response(selected_agent.name, agent_response)
-            
-            if agent_decision:
-                self.ws.write("questions", f"# Decision Checkpoint\n\n{agent_decision}")
-                self._emit(Event(EventKind.FILE_WRITE, agent=selected_agent.name, data={"file": "QUESTIONS.md"}))
-            if agent_questions:
-                self.ws.write("questions", f"# Clarifying Questions\n\n{agent_questions}")
-                self._emit(Event(EventKind.FILE_WRITE, agent=selected_agent.name, data={"file": "QUESTIONS.md"}))
-
-            self.ws.append("logbook", agent_response, selected_agent.name, "Turn completed")
-            self._emit(Event(EventKind.TURN_END, agent=selected_agent.name, data={
-                "turn_id": agent_turn_id, "attempt": self._turn_attempts[agent_turn_id],
-                "step": step, "response": agent_response,
-                **self._event_actor_meta(selected_agent),
-                **self._usage_event(selected_agent),
-            }))
-            if await self._enforce_token_budget("coordinator_agent", {"step": step, "agent": selected_agent.name}):
-                break
-
-            if agent_decision or agent_questions:
-                self._emit(Event(EventKind.PHASE, data={
-                    "phase": "coordinator_agent", "status": "waiting_for_approval", "step": step
-                }))
-                self.pause()
-                await self._wait_if_paused()
-                if not self._running:
-                    break
-
-
-
-        coordinator.config.system_prompt = orig_system
-
-    def _parse_coordinator_response(self, response: str) -> dict[str, Any]:
-        next_agent = self.ws.parse_section(response, "NEXT_AGENT").strip()
-        instructions = self.ws.parse_section(response, "INSTRUCTIONS").strip()
-        verdict = self.ws.parse_section(response, "VERDICT").strip().upper()
-        completion_errors: list[str] = []
-
-        if verdict == "PAUSE":
-            verdict = "PAUSE_FOR_INPUT"
-        if verdict not in {"CONTINUE", "COMPLETE", "PAUSE_FOR_INPUT"}:
-            raise RuntimeError(
-                "Coordinator VERDICT must be CONTINUE, COMPLETE, or PAUSE_FOR_INPUT."
-            )
-
-        if verdict == "COMPLETE":
-            quality_gate = self.ws.parse_section(response, "QUALITY_GATE").strip()
-            completion_errors = self._coordinator_completion_errors(quality_gate)
-                
-        # Decision Checkpoint & Questions Check
-        decision = self.ws.parse_section(response, "DECISION_CHECKPOINT").strip()
-        questions = self.ws.parse_section(response, "QUESTIONS").strip()
-
-        if verdict == "PAUSE_FOR_INPUT" and not decision and not questions:
-            raise RuntimeError("VERDICT was PAUSE_FOR_INPUT, but neither DECISION_CHECKPOINT nor QUESTIONS were provided. You must provide options or questions for the user.")
-
-        if decision:
-            self.ws.write("questions", f"# Decision Checkpoint\n\n{decision}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=self._coordinator_name or "Coordinator", data={"file": "QUESTIONS.md"}))
-            if verdict == "CONTINUE":
-                verdict = "PAUSE_FOR_INPUT"
-        
-        if questions:
-            self.ws.write("questions", f"# Clarifying Questions\n\n{questions}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=self._coordinator_name or "Coordinator", data={"file": "QUESTIONS.md"}))
-            if verdict == "CONTINUE":
-                verdict = "PAUSE_FOR_INPUT"
-
-        if next_agent.upper() == "USER" and verdict == "CONTINUE":
-            verdict = "PAUSE_FOR_INPUT"
-
-        if verdict == "CONTINUE" and not next_agent:
-            raise RuntimeError("Coordinator must provide NEXT_AGENT when continuing.")
-        if verdict == "CONTINUE" and not instructions:
-            raise RuntimeError("Coordinator must provide INSTRUCTIONS when continuing.")
-
-        return {
-            "next_agent": next_agent,
-            "instructions": instructions,
-            "verdict": verdict,
-            "completion_errors": completion_errors,
-        }
+    def _is_none_text(self, text: str) -> bool:
+        t = text.lower().strip()
+        if not t: return True
+        if t in {"none", "n/a", "none.", "not applicable", "no decision needed", "no questions", "none at this time", "*none*", "*n/a*"}: return True
+        if t.startswith("none ") or t.startswith("none-") or t.startswith("*none"): return True
+        return False
 
     def _apply_coordinator_agent_response(self, agent_name: str, response: str):
         for filename, content in self.ws.parse_files(response).items():
@@ -1215,6 +1198,16 @@ class Orchestrator:
         if design_bit:
             self.ws.append("design", design_bit, agent_name, "Coordinator-led Turn")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
+
+        plan_bit = self.ws.parse_section(response, "PLAN_APPEND")
+        if plan_bit:
+            self.ws.append("plan", plan_bit, agent_name, "Peer Review")
+            self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
+
+        decisions_bit = self.ws.parse_section(response, "DECISIONS_APPEND")
+        if decisions_bit:
+            self.ws.append("decisions", decisions_bit, agent_name, "Peer Review")
+            self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
 
         test_bit = self.ws.parse_section(response, "TEST_RESULTS_APPEND")
         if test_bit:

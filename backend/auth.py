@@ -1,11 +1,12 @@
 import json
 import hashlib
 import secrets
+import shutil
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Dict
 
-USERS_PATH = Path.home() / ".agentflow" / "users.json"
+USERS_PATH = Path.home() / ".designflow" / "users.json"
 
 @dataclass
 class User:
@@ -26,6 +27,9 @@ class AuthManager:
 
     def _init_db(self):
         USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        legacy_users = Path.home() / ".agentflow" / "users.json"
+        if not USERS_PATH.exists() and legacy_users.exists():
+            shutil.copy2(legacy_users, USERS_PATH)
         if not USERS_PATH.exists():
             # Create default admin and a default user
             default_users = {
@@ -42,8 +46,12 @@ class AuthManager:
 
     def hash_password(self, password: str) -> str:
         # Simple SHA-256 for lightweight hashing (no heavy passlib needed)
-        salt = "agentflow_salt"
+        salt = "designflow_salt"
         return hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
+
+    @staticmethod
+    def _legacy_hash_password(password: str) -> str:
+        return hashlib.sha256(f"agentflow_salt{password}".encode()).hexdigest()
 
     def _load_users(self) -> Dict[str, dict]:
         try:
@@ -56,10 +64,15 @@ class AuthManager:
         user_data = users.get(username)
         if not user_data:
             return None
-        
-        if user_data["password_hash"] != self.hash_password(password):
+
+        current_hash = self.hash_password(password)
+        legacy_hash = self._legacy_hash_password(password)
+        if user_data["password_hash"] not in {current_hash, legacy_hash}:
             return None
-            
+        if user_data["password_hash"] == legacy_hash:
+            user_data["password_hash"] = current_hash
+            USERS_PATH.write_text(json.dumps(users, indent=2))
+
         session_id = secrets.token_urlsafe(32)
         session = Session(session_id=session_id, username=username, role=user_data["role"])
         self.sessions[session_id] = session
@@ -91,7 +104,7 @@ class AuthManager:
         users[username]["password_hash"] = self.hash_password(new_password)
         USERS_PATH.write_text(json.dumps(users, indent=2))
         return True
-        
+
 
     def delete_user(self, username: str) -> bool:
         users = self._load_users()

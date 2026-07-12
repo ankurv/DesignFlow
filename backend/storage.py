@@ -14,7 +14,7 @@ from .crypto import encrypt_key, decrypt_key
 class ProjectStore:
     def __init__(self, metadata_dir: Path):
         metadata_dir.mkdir(parents=True, exist_ok=True)
-        self.path = metadata_dir / "agentflow.db"
+        self.path = metadata_dir / "designflow.db"
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
@@ -72,6 +72,10 @@ class ProjectStore:
                     command TEXT NOT NULL,
                     args_json TEXT NOT NULL DEFAULT '[]',
                     env_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS key_value (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 );
                 """
             )
@@ -271,6 +275,24 @@ class ProjectStore:
     def delete_mcp_server(self, server_id: str):
         with self._lock, self._db:
             self._db.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
+
+    def save_run_state(self, state: dict):
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
+                ("run_state", json.dumps(state))
+            )
+
+    def load_run_state(self) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM key_value WHERE key = ?", ("run_state",)).fetchone()
+            if row:
+                return json.loads(row["value"])
+            return None
+
+    def clear_run_state(self):
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM key_value WHERE key = ?", ("run_state",))
 
     def close(self):
         with self._lock:

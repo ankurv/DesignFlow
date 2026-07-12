@@ -1,6 +1,6 @@
 import asyncio
 import os
-os.environ["AGENTFLOW_TEST"] = "1"
+os.environ["DESIGNFLOW_TEST"] = "1"
 import json
 import subprocess
 import tempfile
@@ -304,7 +304,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(first_cwd, second_cwd)
         self.assertEqual(Path(first_cwd), Path(project).resolve())
         log_path = Path(first_command[first_command.index("--log-file") + 1])
-        self.assertEqual(log_path.parent.parent, Path(project).resolve() / ".agentflow" / "sessions")
+        self.assertEqual(log_path.parent.parent, Path(project).resolve() / ".designflow" / "sessions")
         self.assertEqual(agent.provider_session_id(), agent.fake_conversation_id)
 
     def test_duplicate_cli_agents_have_independent_sessions(self):
@@ -422,7 +422,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(workspace.brief().strip(), "Build a small service")
             self.assertEqual((workspace.project_root / "src/api/app.py").read_text(), "print('ok')")
             self.assertIn("src/api/app.py", workspace.read_src())
-            self.assertNotIn(".agentflow/DESIGN.md", workspace.read_src())
+            self.assertNotIn(".designflow/DESIGN.md", workspace.read_src())
             self.assertTrue((workspace.root / "DECISIONS.md").exists())
 
     def test_sqlite_store_reuses_agents_and_run_history_without_secrets(self):
@@ -481,66 +481,25 @@ class SessionTests(unittest.TestCase):
             store.close()
 
     def test_coordinator_orchestrated_loop(self):
-        boss_response_1 = f"""## NEXT_AGENT
-worker
-
-## INSTRUCTIONS
-write main script
-
-## VERDICT
-CONTINUE
-
-## PLAN_UPDATE
-{VALID_PLAN}
-
-## DESIGN_UPDATE
-{VALID_DESIGN}
-
-## DECISIONS_UPDATE
-{VALID_DECISIONS}
-"""
-        boss_response_2 = """## NEXT_AGENT
-worker
-
-## INSTRUCTIONS
-finish task
-
-## VERDICT
-COMPLETE
-
-## QUALITY_GATE
-PASS
-"""
-        worker_response = f"""## FILE: src/main.py
-print('hello world')
-## PLAN_UPDATE
-{VALID_PLAN}
-"""
         boss = StatefulFake(
             AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
-            replies=[boss_response_1, boss_response_2]
+            replies=[f"## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}\n", "## DECISION_CHECKPOINT\n"]
         )
         worker = StatefulFake(
             AgentConfig(name="worker", kind="openai", model="gpt-4o"),
-            replies=[worker_response]
+            replies=["## DESIGN_APPEND\nLooks good.\n"]
         )
-
         with tempfile.TemporaryDirectory() as directory:
             orchestrator = Orchestrator(
                 agents=[boss, worker],
                 workspace=Workspace(directory),
                 require_approval=False,
             )
-            
             asyncio.run(orchestrator.run("build tiny product"))
-
-
             self.assertEqual(len(boss.received), 2)
             self.assertEqual(len(worker.received), 1)
-            self.assertIn("write main script", worker.received[0][0]["content"])
-            self.assertEqual(orchestrator.ws.read_src()["src/main.py"], "print('hello world')")
+            self.assertIn("senior architecture synthesizer", boss.received_systems[0])
             self.assertIn("Requirements", orchestrator.ws.read("plan"))
-            self.assertIn("Initial architecture", orchestrator.ws.read("design"))
 
     def test_global_agents_endpoints(self):
         from fastapi.testclient import TestClient
@@ -639,138 +598,67 @@ print('hello world')
         boss = StatefulFake(
             AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
             replies=[
-                "## NEXT_AGENT\nUSER\n## INSTRUCTIONS\nWhich db?\n## DECISION_CHECKPOINT\nsqlite or pg\n## VERDICT\nPAUSE_FOR_INPUT",
-                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nFinished db question\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}\n## VERDICT\nCOMPLETE"
+                f"## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}",
+                "## DECISION_CHECKPOINT\n"
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
             orchestrator = Orchestrator(
                 agents=[boss],
                 workspace=Workspace(directory),
-                require_approval=False,
+                require_approval=True,
                 mode="all",
                 max_debate_rounds=1,
             )
-            
+
             async def run_test():
-                run_task = asyncio.create_task(orchestrator.run("discuss product design"))
+                run_task = asyncio.create_task(orchestrator.run("social app"))
                 await asyncio.sleep(0.05)
                 self.assertTrue(orchestrator._paused)
-                
+
                 # Steer the coordinator with user response
                 await orchestrator.steer("We want SQLite")
                 orchestrator.resume()
-                
+
                 # Wait for task to finish
                 await run_task
-                
-                # Check that step 2 received the steering response!
+
+                # Check that the next prompt received the steering response!
                 self.assertIn("We want SQLite", boss.received[-1][-1]["content"])
-            
             asyncio.run(run_test())
 
-    def test_quality_gate_validation_retries_until_plan_is_complete(self):
-        boss = StatefulFake(
-            AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
-            replies=[
-                "## NEXT_AGENT\nboss\n## INSTRUCTIONS\nfinalize now\n## QUALITY_GATE\nPASS\n## VERDICT\nCOMPLETE",
-                f"## NEXT_AGENT\nboss\n## INSTRUCTIONS\nfinalize after fixing validation feedback\n## QUALITY_GATE\nPASS\n## PLAN_UPDATE\n{VALID_PLAN}\n## DESIGN_UPDATE\n{VALID_DESIGN}\n## DECISIONS_UPDATE\n{VALID_DECISIONS}\n## VERDICT\nCOMPLETE",
-            ]
-        )
-        events = []
-
-        with tempfile.TemporaryDirectory() as directory:
-            orchestrator = Orchestrator(
-                agents=[boss],
-                workspace=Workspace(directory),
-                require_approval=False,
-                mode="debate",
-                event_cb=events.append,
-            )
-
-            asyncio.run(orchestrator.run("debate product design"))
-
-            self.assertEqual(len(boss.received), 2)
-            self.assertTrue(any(
-                event.kind.value == "phase" and event.data.get("status") == "quality_gate_failed"
-                for event in events
-            ))
-            self.assertIn("Requirements", orchestrator.ws.read("plan"))
-            self.assertIn("```mermaid", orchestrator.ws.read("design"))
-
-    def test_completion_requires_specialist_coverage_and_user_checkpoint(self):
+    def test_need_based_review_selects_small_relevant_panel(self):
         agents = [
-            StatefulFake(AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True})),
-            StatefulFake(AgentConfig(name="architect", kind="openai", model="gpt-4o")),
-            StatefulFake(AgentConfig(name="security", kind="openai", model="gpt-4o")),
-            StatefulFake(AgentConfig(name="product", kind="openai", model="gpt-4o")),
+            StatefulFake(AgentConfig(name=name, kind="openai", model="gpt-4o"))
+            for name in (
+                "boss", "security_auditor", "data_architect", "api_designer",
+                "ui_designer", "marketing_alpha", "sales_alpha", "devops_engineer",
+            )
         ]
         with tempfile.TemporaryDirectory() as directory:
-            orchestrator = Orchestrator(
-                agents=agents,
-                workspace=Workspace(directory),
-                require_approval=True,
-            )
+            orchestrator = Orchestrator(agents, Workspace(directory), require_approval=False)
+            orchestrator.idea = "Secure multi-tenant payment API with a relational database schema"
             orchestrator._coordinator_name = "boss"
-            orchestrator.ws.ensure()
-            orchestrator.ws.write("plan", f"# Plan\n\n{VALID_PLAN}")
-            orchestrator.ws.write("design", f"# Architecture Design\n\n{VALID_DESIGN}")
-            orchestrator.ws.write("decisions", f"# Key Decisions\n\n{VALID_DECISIONS}")
+            selected = orchestrator._select_peer_review_agents()
+            names = {agent.name for agent in selected}
+            self.assertLessEqual(len(selected), 4)
+            self.assertIn("security_auditor", names)
+            self.assertIn("data_architect", names)
+            self.assertIn("api_designer", names)
+            self.assertNotIn("marketing_alpha", names)
 
-            errors = orchestrator._coordinator_completion_errors("PASS")
-            self.assertTrue(any("3 more distinct" in error for error in errors))
-            self.assertTrue(any("material user decision" in error for error in errors))
-
-            orchestrator._consulted_specialists.update({"architect", "security", "product"})
-            orchestrator._user_checkpoint_count = 1
-            self.assertEqual(orchestrator._coordinator_completion_errors("PASS"), [])
-
-    def test_run_token_budget_stops_after_budget_is_hit(self):
-        debate = """## DESIGN_APPEND
-design
-## PLAN_UPDATE
-- [ ] build
-## CONSENSUS_APPEND
-not ready yet
-VOTE: DISAGREE
-"""
-        agent = StatefulFake(
-            AgentConfig(name="solo", kind="openai", model="gpt-4o"),
-            replies=[debate, debate],
+    def test_strong_model_is_reserved_for_synthesis(self):
+        cheap_manager = StatefulFake(AgentConfig(
+            name="manager", kind="gemini", model="gemini-2.5-flash",
+            extra={"is_coordinator": True},
+        ))
+        strong_model = StatefulFake(AgentConfig(
+            name="architect", kind="claude", model="claude-opus-4",
+        ))
+        self.assertGreater(
+            Orchestrator._synthesis_score(strong_model),
+            Orchestrator._synthesis_score(cheap_manager),
         )
-        events = []
-
-        with tempfile.TemporaryDirectory() as directory:
-            orchestrator = Orchestrator(
-                agents=[agent],
-                workspace=Workspace(directory),
-                max_debate_rounds=2,
-                max_tokens=120,
-                require_approval=False,
-                event_cb=events.append,
-            )
-
-            async def test_run():
-                task = asyncio.create_task(orchestrator.run("debate product design"))
-                
-                # Wait for budget exhaustion event
-                for _ in range(100):
-                    if any(e.kind.value == "phase" and e.data.get("status") == "budget_exhausted" for e in events):
-                        break
-                    await asyncio.sleep(0.01)
-
-                self.assertTrue(any(
-                    event.kind.value == "phase" and event.data.get("status") == "budget_exhausted"
-                    for event in events
-                ))
-                self.assertEqual(len(agent.received), 1)
-                self.assertEqual(orchestrator.run_token_total, 120)
-                
-                # Stop the orchestrator so the task can exit
-                orchestrator.stop()
-                await task
-                
-            asyncio.run(test_run())
 
     def test_global_plus_project_configs(self):
         from fastapi.testclient import TestClient
@@ -914,17 +802,17 @@ VOTE: DISAGREE
         with tempfile.TemporaryDirectory() as td:
             res = client.post("/project/open", json={"path": td})
             self.assertEqual(res.status_code, 200)
-            
+
             # Save settings
             res = client.put("/project/settings", json={"max_tokens": 123456})
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["settings"]["max_tokens"], 123456)
-            
+
             # Ensure it persists by re-opening the project
             res = client.post("/project/open", json={"path": td})
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["settings"]["max_tokens"], 123456)
-            
+
     def test_workspace_scoped_context_and_reset_tracking(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -966,20 +854,20 @@ VOTE: DISAGREE
         with tempfile.TemporaryDirectory() as td:
             res = client.post("/project/open", json={"path": td})
             self.assertEqual(res.status_code, 200)
-            
+
             # Create a file via POST empty content
             res = client.post("/workspace/src/new_test_file.txt", json={"content": ""})
             self.assertEqual(res.status_code, 200)
-            
+
             # Read the file via GET
             res = client.get("/workspace/src/new_test_file.txt")
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["content"], "")
-            
+
             # Write some content
             res = client.post("/workspace/src/new_test_file.txt", json={"content": "hello world"})
             self.assertEqual(res.status_code, 200)
-            
+
             # Read the file again
             res = client.get("/workspace/src/new_test_file.txt")
             self.assertEqual(res.status_code, 200)
@@ -991,7 +879,7 @@ VOTE: DISAGREE
             res = client.get("/workspace/file/decisions")
             self.assertEqual(res.status_code, 200)
             self.assertIn("Use FastAPI", res.json()["content"])
-            
+
     def test_global_agent_inheritance_exclusive(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -1032,7 +920,7 @@ VOTE: DISAGREE
                 self.assertEqual(len(data["project"]), 0)
                 self.assertEqual(len(data["merged"]), 1)
                 self.assertEqual(data["merged"][0]["name"], "GlobalAgent")
-                
+
                 # Create a local agent
                 local_agent = {
                     "name": "LocalAgent",
@@ -1046,7 +934,7 @@ VOTE: DISAGREE
                 }
                 res = client.post("/agents", json=local_agent)
                 self.assertEqual(res.status_code, 200)
-                
+
                 # Fetch agents again. Local agents exist, so global agent should NOT be inherited!
                 res = client.get("/agents")
                 self.assertEqual(res.status_code, 200)
@@ -1054,7 +942,7 @@ VOTE: DISAGREE
                 self.assertEqual(len(data["project"]), 1)
                 self.assertEqual(len(data["merged"]), 1)
                 self.assertEqual(data["merged"][0]["name"], "LocalAgent")
-                
+
             finally:
                 backend.server.GLOBAL_AGENTS_PATH = orig_path
 
@@ -1109,7 +997,7 @@ class DeterministicRoutingTests(unittest.TestCase):
 
     def test_project_usage_survives_store_restart(self):
         with tempfile.TemporaryDirectory() as directory:
-            metadata = Path(directory) / ".agentflow"
+            metadata = Path(directory) / ".designflow"
             store = ProjectStore(metadata)
             store.start_run("run-1", "first")
             store.finish_run("run-1", "done", [{
