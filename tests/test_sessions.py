@@ -1049,5 +1049,13 @@ VOTE: DISAGREE
             finally:
                 backend.server.GLOBAL_AGENTS_PATH = orig_path
 
+
+class FrontendPrivacyTests(unittest.TestCase):
+    def test_project_picker_does_not_ship_a_personal_path(self):
+        html = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
+        self.assertNotIn("/Users/", html)
+        self.assertNotIn("/home/", html)
+        self.assertIn('placeholder="/path/to/your/project"', html)
+
 if __name__ == "__main__":
     unittest.main()
