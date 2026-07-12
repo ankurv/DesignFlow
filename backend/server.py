@@ -173,9 +173,6 @@ GLOBAL_AGENTS_PATH = Path.home() / ".designflow" / "global_agents.json"
 
 def load_global_agents() -> list[dict]:
     GLOBAL_AGENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    legacy_path = Path.home() / ".agentflow" / "global_agents.json"
-    if not GLOBAL_AGENTS_PATH.exists() and legacy_path.exists():
-        shutil.copy2(legacy_path, GLOBAL_AGENTS_PATH)
     if not GLOBAL_AGENTS_PATH.exists():
         return []
     try:
@@ -391,6 +388,10 @@ def update_agent(agent_id: str, body: AgentConfigIn, state: AppState = Depends(g
         if current["id"] == agent_id:
             updated = body.model_dump()
             updated["id"] = agent_id
+
+            if not updated.get("api_key") or updated.get("api_key") == "****":
+                updated["api_key"] = current.get("api_key", "")
+
             for s, active in live_agents_all_sessions(agent_id):
                 if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
                     raise HTTPException(
@@ -457,6 +458,9 @@ def update_global_agent(agent_id: str, body: AgentConfigIn, session: Session = D
         if current["id"] == agent_id:
             updated = body.model_dump()
             updated["id"] = agent_id
+            
+            if not updated.get("api_key") or updated.get("api_key") == "****":
+                updated["api_key"] = current.get("api_key", "")
 
             for s, active in live_agents_all_sessions(agent_id):
                 if updated["kind"] != current["kind"] or updated["name"] != current["name"]:

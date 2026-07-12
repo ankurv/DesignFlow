@@ -57,4 +57,4 @@ def classify_provider_error(exc: Exception) -> PublicProviderError:
         return PublicProviderError("provider_unavailable", "Could not connect to the model provider.", status, True)
     if any(token in signal for token in ("content filter", "safety", "policy violation")):
         return PublicProviderError("safety_blocked", "Request was blocked by the provider safety policy.", status, False)
-    return PublicProviderError("agent_failed", "Agent request failed.", status, False)
+    return PublicProviderError("agent_failed", f"Agent request failed: {signal}", status, False)

@@ -27,9 +27,6 @@ class AuthManager:
 
     def _init_db(self):
         USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        legacy_users = Path.home() / ".agentflow" / "users.json"
-        if not USERS_PATH.exists() and legacy_users.exists():
-            shutil.copy2(legacy_users, USERS_PATH)
         if not USERS_PATH.exists():
             # Create default admin and a default user
             default_users = {
