@@ -927,7 +927,7 @@ class Orchestrator:
                     if a.name in agent_states:
                         a.history = []
                         for m in agent_states[a.name]:
-                            usage = Usage(**m.get("usage", {}))
+                            usage = Usage.from_dict(m.get("usage", {}))
                             msg = Message(role=m.get("role", ""), content=m.get("content", ""), timestamp=m.get("timestamp", ""), usage=usage)
                             a.history.append(msg)
                 return True
@@ -966,7 +966,7 @@ class Orchestrator:
                 if a.name in agent_states:
                     a.history = []
                     for m in agent_states[a.name]:
-                        usage = Usage(**m.get("usage", {}))
+                        usage = Usage.from_dict(m.get("usage", {}))
                         msg = Message(role=m.get("role", ""), content=m.get("content", ""), timestamp=m.get("timestamp", ""), usage=usage)
                         a.history.append(msg)
             return True

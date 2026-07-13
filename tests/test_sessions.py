@@ -37,6 +37,23 @@ class StatefulFake(AgentBase):
         )
 
 
+class UsageSerializationTests(unittest.TestCase):
+    def test_usage_round_trip_ignores_derived_total_tokens(self):
+        original = Usage(input_tokens=120, cached_input_tokens=40, output_tokens=30, estimated=True)
+
+        restored = Usage.from_dict(original.to_dict())
+
+        self.assertEqual(restored.input_tokens, 120)
+        self.assertEqual(restored.cached_input_tokens, 40)
+        self.assertEqual(restored.output_tokens, 30)
+        self.assertEqual(restored.total_tokens, 150)
+        self.assertTrue(restored.estimated)
+
+    def test_usage_deserialization_ignores_unknown_future_fields(self):
+        restored = Usage.from_dict({"input_tokens": 5, "output_tokens": 2, "provider_detail": "ignored"})
+        self.assertEqual(restored.total_tokens, 7)
+
+
 class FakeCLI(CLIAgent):
     def __init__(self, config, outputs):
         self.outputs = iter(outputs)

@@ -437,6 +437,11 @@ async function loadWsFile(key) {
 
 async function refreshWorkspace() {
   const ws = await fetch('/workspace').then(r=>r.json());
+
+  const briefButton = document.getElementById('wsbtn-brief');
+  if (briefButton) {
+    briefButton.style.display = (ws.src_files || []).includes('DESIGNFLOW.md') ? 'flex' : 'none';
+  }
   
   // Update sidebar buttons based on whether core files exist
   const coreFiles = ['context', 'design', 'plan', 'decisions', 'questions', 'logbook'];
@@ -452,7 +457,7 @@ async function refreshWorkspace() {
   });
   
   const srcList = document.getElementById('srcFileList');
-  srcList.innerHTML = (ws.src_files||[]).map(f =>
+  srcList.innerHTML = (ws.src_files||[]).filter(f => f !== 'DESIGNFLOW.md').map(f =>
     `<button class="ws-file-btn" onclick="loadWsFile(decodeURIComponent('${encodeURIComponent(f)}'))">${getFileIcon(f)} ${escHtml(f)}</button>`
   ).join('');
   

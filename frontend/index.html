@@ -215,7 +215,7 @@
         <div class="sidebar-label" style="margin-bottom:10px">Architect Dashboard</div>
         <button class="ws-file-btn active" onclick="loadWsFile('cockpit')" id="wsbtn-cockpit">🧭 Design</button>
         <button class="ws-file-btn" onclick="loadWsFile('dashboard')" id="wsbtn-dashboard">📐 Dashboard</button>
-        <div class="sidebar-label" style="margin:16px 0 8px">DesignFlow state</div>
+        <div class="sidebar-label" style="margin:16px 0 8px">DesignFlow documents</div>
         <button class="ws-file-btn" onclick="loadWsFile('context')" id="wsbtn-context">🧭 CONTEXT.md</button>
         <button class="ws-file-btn" onclick="loadWsFile('design')" id="wsbtn-design">🎨 DESIGN.md</button>
         <button class="ws-file-btn" onclick="loadWsFile('plan')" id="wsbtn-plan">📋 PLAN.md</button>
@@ -226,6 +226,7 @@
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Project files</div>
           <button class="btn btn-secondary" onclick="createNewFile()" style="padding:5px 9px; font-size:10.5px">+ New File</button>
         </div>
+        <button class="ws-file-btn" onclick="loadWsFile('DESIGNFLOW.md')" id="wsbtn-brief">🎯 DESIGNFLOW.md</button>
         <div id="srcFileList" style="display:flex;flex-direction:column;gap:3px"></div>
       </div>
       <div class="ws-content">

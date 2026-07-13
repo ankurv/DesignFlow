@@ -40,6 +40,17 @@ class Usage:
             "estimated": self.estimated,
         }
 
+    @classmethod
+    def from_dict(cls, value: Optional[dict]) -> "Usage":
+        """Deserialize provider/storage usage while ignoring derived or future fields."""
+        raw = value or {}
+        return cls(
+            input_tokens=int(raw.get("input_tokens", 0) or 0),
+            cached_input_tokens=int(raw.get("cached_input_tokens", 0) or 0),
+            output_tokens=int(raw.get("output_tokens", 0) or 0),
+            estimated=bool(raw.get("estimated", False)),
+        )
+
 
 @dataclass
 class Message:
