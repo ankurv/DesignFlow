@@ -227,7 +227,7 @@ function cancelFileEdit(filename) {
 
 async function saveFileEdit(filename) {
   const newContent = monacoEditorInstance ? monacoEditorInstance.getValue() : currentFileContent;
-  const isRootFile = ['design', 'plan', 'decisions', 'consensus', 'tests', 'questions', 'logbook'].includes(filename);
+  const isRootFile = ['context', 'design', 'plan', 'decisions', 'questions', 'logbook'].includes(filename);
   
   const encodedName = filename.split('/').map(encodeURIComponent).join('/');
   const url = isRootFile ? `/workspace/file/${filename}` : `/workspace/src/${encodedName}`;
@@ -419,7 +419,7 @@ async function loadWsFile(key) {
 
     let content = '';
     try {
-      if (['design','plan','decisions','consensus','tests','questions','logbook'].includes(key)) {
+      if (['context','design','plan','decisions','questions','logbook'].includes(key)) {
         const res = await fetch(`/workspace/file/${key}`).then(r=>r.json());
         content = res.content;
       } else {
@@ -439,7 +439,7 @@ async function refreshWorkspace() {
   const ws = await fetch('/workspace').then(r=>r.json());
   
   // Update sidebar buttons based on whether core files exist
-  const coreFiles = ['design', 'plan', 'decisions', 'consensus', 'questions', 'tests', 'logbook'];
+  const coreFiles = ['context', 'design', 'plan', 'decisions', 'questions', 'logbook'];
   coreFiles.forEach(key => {
     const btn = document.getElementById(`wsbtn-${key}`);
     if (btn) {

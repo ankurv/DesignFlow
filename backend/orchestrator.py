@@ -35,9 +35,7 @@ class EventKind(str, Enum):
     PHASE       = "phase"        # phase change
     TURN_START  = "turn_start"   # agent about to speak
     TURN_END    = "turn_end"     # agent finished, includes response
-    VOTE        = "vote"         # consensus vote cast
     VERDICT     = "verdict"      # reviewer/tester verdict
-    CONSENSUS   = "consensus"    # all agreed
     FILE_WRITE  = "file_write"   # workspace file updated
     STEER       = "steer"        # human injected a message
     DONE        = "done"         # entire run finished
@@ -89,14 +87,7 @@ Respond in this exact format:
 ## PLAN_UPDATE
 <complete updated content of PLAN.md — use nested tree-structures (e.g. nested lists) for sub-tasks>
 
-## CONSENSUS_APPEND
-<your reasoning this round>
-VOTE: AGREE
-or
-VOTE: DISAGREE
-<one sentence reason>
-
-Only VOTE: AGREE when you genuinely believe the design is solid and complete."""
+Only finalize when you genuinely believe the design is solid and complete."""
 
 BUILD_SYSTEMS = {
     "developer": """You are the DEVELOPER this iteration.
@@ -131,23 +122,6 @@ or
 CHANGES NEEDED
 <specific issues that must be fixed>""",
 
-    "tester": """You are the TESTER this iteration.
-Read the code and evaluate it against the plan. Write test cases, describe expected
-vs actual behavior, and record results.
-
-Respond in this exact format:
-
-## TEST_RESULTS_APPEND
-<your test run: list test cases, results, failures>
-
-## PLAN_UPDATE
-<updated PLAN.md — check off tested items, add bug tasks if needed>
-
-## VERDICT
-PASS
-or
-FAIL
-<specific failures and what needs to change>""",
 }
 
 ROLE_NEEDS = {
@@ -331,6 +305,7 @@ class Orchestrator:
         self._failed_turn: dict[str, Any] | None = None
         self._recovery_event = asyncio.Event()
         self.run_token_total = 0
+        self.phase_usage: dict[str, dict[str, float]] = {}
         self._budget_exhausted = False
         self._coordinator_name = ""
         self._context_invocations: dict[str, int] = {}
@@ -361,6 +336,8 @@ class Orchestrator:
     async def steer(self, message: str):
         """Inject a human message that all agents will see next turn."""
         pending_question = self.ws.read("questions").strip()
+        event_kind = "user_decision" if pending_question and pending_question != "(empty)" else "user_steering"
+        self.ws.add_context_event(event_kind, message, self.phase.value, "user")
         if pending_question and pending_question != "(empty)":
             self._user_checkpoint_count += 1
         await self._steer_queue.put(message)
@@ -432,6 +409,10 @@ class Orchestrator:
         self.idea = idea
         if self.restore and not self._state_loaded:
             self._state_loaded = self.load_state()
+            if not self._state_loaded:
+                # A new goal must not inherit an unresolved checkpoint from an
+                # older or legacy run in the same project.
+                self.ws.clear_questions()
 
         local_response = self._local_command_response(idea)
         if local_response:
@@ -466,6 +447,7 @@ class Orchestrator:
         # quality-critical synthesis, regardless of which agent is marked manager.
         coordinator = max(self.agents, key=self._synthesis_score)
         self._coordinator_name = coordinator.name
+        coordinator.config.max_history_turns = min(coordinator.config.max_history_turns, 6)
 
         # Parse explicit @mentions first
         target_agent = None
@@ -507,7 +489,7 @@ class Orchestrator:
             )
 
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
-            self._record_turn_usage(target_agent)
+            self._record_turn_usage(target_agent, "direct")
             self.ws.append("logbook", response, target_agent.name, "Turn completed")
 
             self._emit(Event(EventKind.TURN_END, agent=target_agent.name, data={
@@ -579,8 +561,20 @@ class Orchestrator:
 
     def _deterministic_discovery_question(self) -> str:
         """Ask one high-value question only when the seed is genuinely underspecified."""
-        words = set(re.findall(r"[a-z0-9]+", self.idea.lower()))
-        if len(words) < 6:
+        existing_design = self.ws.read("design")
+        existing_plan = self.ws.read("plan")
+        brief = self.ws.brief()
+        context = "\n".join((self.idea, brief, existing_design, existing_plan))
+        seed_words = set(re.findall(r"[a-z0-9]+", self.idea.lower()))
+        words = set(re.findall(r"[a-z0-9]+", context.lower()))
+        # Existing substantive artifacts already establish the product context;
+        # discovery should refine them instead of asking a generic seed question.
+        has_product_context = (
+            len(brief.strip()) >= 80
+            or len(existing_design.replace("(empty)", "").strip()) >= 300
+            or len(existing_plan.replace("(empty)", "").strip()) >= 200
+        )
+        if len(seed_words) < 6 and not has_product_context:
             return "Who is the primary user, and what outcome must they achieve with this product?"
         if words.intersection({"enterprise", "team", "tenant", "organization"}) and not words.intersection({"admin", "member", "role", "permission", "sso"}):
             return "What user roles and access boundaries must the first version support?"
@@ -692,6 +686,7 @@ class Orchestrator:
         full_ctx = self._agent_context(agent)
         response = await self._send_agent_basic(agent, prompt, "peer_review", step, ephemeral=full_ctx)
         self.ws.append("logbook", response, agent.name, "Peer review critique")
+        self.ws.add_context_event("peer_critique", response, "refinement", agent.name)
         self._apply_coordinator_agent_response(agent.name, response)
         self._consulted_specialists.add(agent.name)
         self.peer_review_index += 1
@@ -704,7 +699,7 @@ class Orchestrator:
         steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
 
         prompt = (
-            f"Read the peer critiques from the logbook and update DESIGN.md and PLAN.md.\n{steer_block}\n"
+            f"Use the complete unresolved peer critiques in CONTEXT.md and update DESIGN.md and PLAN.md.\n{steer_block}\n"
             f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
             f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
         )
@@ -713,6 +708,7 @@ class Orchestrator:
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True)
         self._apply_coordinator_agent_response(coordinator.name, response)
+        self.ws.resolve_context_events({"peer_critique", "user_steering", "user_decision", "quality_failure"})
         self._refinement_attempts += 1
 
         decision = self.ws.parse_section(response, "DECISION_CHECKPOINT").strip()
@@ -728,6 +724,9 @@ class Orchestrator:
             errors = self._coordinator_completion_errors("PASS")
             if errors and self._refinement_attempts < 3:
                 self._deterministic_feedback = "\n".join(f"- {error}" for error in errors)
+                self.ws.add_context_event(
+                    "quality_failure", self._deterministic_feedback, "refinement", "deterministic_quality_gate"
+                )
                 self.phase = OrchestratorPhase.REFINEMENT
             elif errors and self.require_approval and any("user decision" in error for error in errors):
                 checkpoint = (
@@ -774,7 +773,7 @@ class Orchestrator:
             agent, prompt, turn_id, turn_context, ephemeral_context=ephemeral,
             system_override=SYNTHESIS_SYSTEM if synthesis else None,
         )
-        self._record_turn_usage(agent)
+        self._record_turn_usage(agent, phase_name)
         self.ws.append("logbook", response, agent.name, "Turn completed")
         self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
             "turn_id": turn_id, "attempt": self._turn_attempts[turn_id],
@@ -790,11 +789,18 @@ class Orchestrator:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def save_state(self):
+        self.ws.refresh_context(
+            goal=self.idea,
+            phase=self.phase.value,
+            consulted_specialists=sorted(self._consulted_specialists),
+            next_action=self._context_next_action(),
+        )
         state = {
             "idea": self.idea,
             "mode": self.mode,
             "turn_sequence": self._turn_sequence,
             "run_token_total": self.run_token_total,
+            "phase_usage": self.phase_usage,
             "phase": self.phase.value,
             "peer_review_index": self.peer_review_index,
             "post_approval_phase": self.post_approval_phase.value if self.post_approval_phase else None,
@@ -804,6 +810,7 @@ class Orchestrator:
             "pending_user_input": self._pending_user_input,
             "consulted_specialists": sorted(self._consulted_specialists),
             "user_checkpoint_count": self._user_checkpoint_count,
+            "artifact_fingerprints": self.ws.artifact_fingerprints(),
             "agents": {
                 a.name: [
                     {
@@ -827,11 +834,15 @@ class Orchestrator:
         if self.store:
             state = self.store.load_run_state()
             if state:
-                if state.get("idea") and self.idea and state.get("idea") != self.idea:
+                if self.idea and state.get("idea") != self.idea:
+                    return False
+                saved_fingerprints = state.get("artifact_fingerprints")
+                if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
                     return False
                 self.mode = state.get("mode", self.mode)
                 self._turn_sequence = state.get("turn_sequence", 0)
                 self.run_token_total = int(state.get("run_token_total", 0) or 0)
+                self.phase_usage = dict(state.get("phase_usage", {}))
                 self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
                 self.peer_review_index = state.get("peer_review_index", 0)
                 pap = state.get("post_approval_phase")
@@ -859,11 +870,15 @@ class Orchestrator:
             return False
         try:
             state = json.loads(state_file.read_text())
-            if state.get("idea") and self.idea and state.get("idea") != self.idea:
+            if self.idea and state.get("idea") != self.idea:
+                return False
+            saved_fingerprints = state.get("artifact_fingerprints")
+            if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
                 return False
             self.mode = state.get("mode", self.mode)
             self._turn_sequence = state.get("turn_sequence", 0)
             self.run_token_total = int(state.get("run_token_total", 0) or 0)
+            self.phase_usage = dict(state.get("phase_usage", {}))
             self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
             self.peer_review_index = state.get("peer_review_index", 0)
             pap = state.get("post_approval_phase")
@@ -1089,8 +1104,12 @@ class Orchestrator:
             msgs.append(await self._steer_queue.get())
         return "\n".join(msgs)
 
-    def _record_turn_usage(self, agent: AgentBase):
+    def _record_turn_usage(self, agent: AgentBase, phase: str = "unknown"):
         self.run_token_total += agent.last_usage.total_tokens
+        bucket = self.phase_usage.setdefault(phase, {"tokens": 0, "cost_usd": 0.0, "turns": 0})
+        bucket["tokens"] += agent.last_usage.total_tokens
+        bucket["cost_usd"] += agent._cost(agent.last_usage)
+        bucket["turns"] += 1
 
     async def _enforce_token_budget(self, phase: str, context: Optional[dict] = None) -> bool:
         while self.max_tokens > 0 and self.run_token_total >= self.max_tokens:
@@ -1116,6 +1135,17 @@ class Orchestrator:
     def _role_context_needs(agent_name: str) -> list[str]:
         return ROLE_NEEDS.get((agent_name or "").lower(), ["design", "plan", "decisions", "questions"])
 
+    def _context_next_action(self) -> str:
+        actions = {
+            OrchestratorPhase.DISCOVERY: "Confirm whether any essential product context is missing.",
+            OrchestratorPhase.DRAFTING: "Draft the architecture and implementation plan.",
+            OrchestratorPhase.PEER_REVIEW: "Collect the next relevant specialist critique.",
+            OrchestratorPhase.REFINEMENT: "Resolve critiques and update the canonical artifacts.",
+            OrchestratorPhase.APPROVAL: "Wait for the user's answer to the active question.",
+            OrchestratorPhase.COMPLETE: "Planning baseline is ready for implementation discovery.",
+        }
+        return actions.get(self.phase, "Continue the planning workflow.")
+
     def _should_force_full_context(self, agent_name: str) -> bool:
         count = self._context_invocations.get(agent_name, 0)
         if count == 0:
@@ -1129,7 +1159,7 @@ class Orchestrator:
 
     def _coordinator_context(self) -> str:
         agent_name = self._coordinator_name or "coordinator"
-        roles = ["design", "plan", "decisions", "questions", "src_index", "logbook"]
+        roles = ["context", "design", "plan", "decisions", "questions", "src_index"]
         if self._should_force_full_context(agent_name):
             context = self.ws.scoped_context(roles)
         else:
@@ -1138,7 +1168,10 @@ class Orchestrator:
         return context
 
     def _agent_context(self, agent: AgentBase) -> str:
-        roles = self._role_context_needs(agent.name) + ["logbook"]
+        # CONTEXT.md carries cross-domain memory. Specialists receive at most two
+        # authoritative domain artifacts to avoid repeating the whole workspace.
+        domain_roles = [role for role in self._role_context_needs(agent.name) if role != "questions"][:2]
+        roles = ["context"] + domain_roles
         if self._should_force_full_context(agent.name):
             context = self.ws.scoped_context(roles)
         else:
@@ -1215,7 +1248,3 @@ class Orchestrator:
         if decisions_bit:
             self.ws.append("decisions", decisions_bit, agent_name, "Peer Review")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
-
-        test_bit = self.ws.parse_section(response, "TEST_RESULTS_APPEND")
-        if test_bit:
-            self.ws.append("tests", test_bit, agent_name, "Coordinator-led Turn")

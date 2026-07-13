@@ -16,6 +16,7 @@ class ProjectStore:
         metadata_dir.mkdir(parents=True, exist_ok=True)
         self.path = metadata_dir / "designflow.db"
         self._lock = threading.RLock()
+        self._closed = False
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._init_schema()
@@ -296,4 +297,18 @@ class ProjectStore:
 
     def close(self):
         with self._lock:
-            self._db.close()
+            if not self._closed:
+                self._db.close()
+                self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

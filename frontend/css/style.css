@@ -305,7 +305,6 @@
   .feed-item.phase  { border-color: var(--accent); background: rgba(79, 70, 229, 0.04); }
   .feed-item.vote   { border-color: var(--teal); background: rgba(20,184,166,0.03); }
   .feed-item.verdict { border-color: var(--orange); background: rgba(249,115,22,0.03); }
-  .feed-item.consensus { border-color: var(--green); background: rgba(16, 185, 129, 0.04); }
   .feed-item.file_write { border-color: var(--border2); }
   .feed-item.error  { border-color: var(--red); background: rgba(239,68,68,0.04); }
   .feed-item.steer  { border-color: var(--yellow); background: rgba(245,158,11,0.03); }

@@ -639,6 +639,7 @@ class SessionTests(unittest.TestCase):
             # Assert loading decrypts correctly
             loaded = store.load_agents()
             self.assertEqual(loaded[0]["api_key"], "my-secret-key-abc")
+            store.close()
 
     def test_coordinator_pause_for_input(self):
         boss = StatefulFake(
@@ -879,6 +880,100 @@ class SessionTests(unittest.TestCase):
             third = workspace.changed_context("architect", ["design", "decisions"])
             self.assertIn("DESIGN.md", third)
 
+    def test_legacy_run_state_without_goal_is_not_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            (workspace.root / "run_state.json").write_text(json.dumps({
+                "mode": "debate",
+                "turn_sequence": 99,
+                "agents": {},
+            }))
+            orchestrator = Orchestrator([], workspace, restore=True)
+            orchestrator.idea = "Design a friend meetup planning application"
+
+            self.assertFalse(orchestrator.load_state())
+            self.assertEqual(orchestrator._turn_sequence, 0)
+
+    def test_existing_project_context_suppresses_generic_discovery_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief(
+                "Design an application where groups of friends choose a fair meeting point, "
+                "coordinate arrival using live location, chat, and archive completed events."
+            )
+            workspace.init("short")
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.idea = "continue"
+
+            self.assertEqual(orchestrator._deterministic_discovery_question(), "")
+
+    def test_context_memory_is_generated_without_model_and_tracks_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("Build a collaborative meeting-point planner for groups of friends.")
+            workspace.init("meeting planner")
+            workspace.write("decisions", "# Key Decisions\n\n- Use explicit consent for live location sharing.")
+
+            context = workspace.refresh_context(
+                phase="peer_review",
+                consulted_specialists=["security_auditor", "ux_simplifier"],
+                next_action="Review location privacy boundaries.",
+            )
+
+            self.assertIn("Build a collaborative meeting-point planner", context)
+            self.assertIn("peer_review", context)
+            self.assertIn("security_auditor", context)
+            self.assertIn("Use explicit consent", context)
+            self.assertIn("Artifact Fingerprints", context)
+            self.assertEqual(workspace.read("context"), context)
+
+    def test_changed_context_uses_compact_memory_without_logbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.init("meeting planner")
+            workspace.append("logbook", "A very large audit entry", "agent")
+
+            context = workspace.changed_context("reviewer", ["context", "design"])
+
+            self.assertIn("CONTEXT.md", context)
+            self.assertNotIn("A very large audit entry", context)
+
+    def test_context_events_keep_complete_boundaries_and_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.init("meeting planner")
+            critique = "The location-sharing consent boundary must be explicit and revocable."
+            workspace.add_context_event("peer_critique", critique, "refinement", "security_auditor")
+            workspace.add_context_event("user_steering", "Prioritize mobile usability.", "drafting", "user")
+
+            context = workspace.refresh_context(phase="refinement")
+
+            self.assertIn(critique, context)
+            self.assertIn("Prioritize mobile usability.", context)
+            self.assertNotIn(critique[:20] + "…", context)
+            workspace.resolve_context_events({"peer_critique"})
+            refreshed = workspace.refresh_context(phase="refinement")
+            self.assertNotIn(critique, refreshed)
+            self.assertEqual(workspace.context_events(statuses=("incorporated",))[0]["status"], "incorporated")
+
+    def test_phase_context_excludes_irrelevant_open_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.init("meeting planner")
+            workspace.add_context_event("peer_critique", "Database critique", "refinement", "data_architect")
+            workspace.add_context_event("user_decision", "Use invite-only groups", "approval", "user")
+
+            drafting_context = workspace.refresh_context(phase="drafting")
+
+            self.assertNotIn("Database critique", drafting_context)
+            self.assertIn("Use invite-only groups", drafting_context)
+
     def test_workspace_changed_context_can_send_src_index_without_file_contents(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -889,6 +984,28 @@ class SessionTests(unittest.TestCase):
             context = workspace.changed_context("researcher", ["design", "plan", "src_index"])
             self.assertIn("src/api/app.py", context)
             self.assertNotIn("print('ok')", context)
+
+    def test_source_index_skips_binary_and_irrelevant_generated_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_src("src/app.py", "print('ok')")
+            workspace.write_src("assets/raw.dat", "large irrelevant payload")
+
+            index = workspace.src_index()
+
+            self.assertIn("src/app.py", index)
+            self.assertNotIn("assets/raw.dat", index)
+
+    def test_usage_is_accounted_by_workflow_phase(self):
+        agent = StatefulFake(AgentConfig(name="reviewer", kind="openai"), replies=["review"])
+        orchestrator = Orchestrator([agent], Workspace(tempfile.mkdtemp()), require_approval=False)
+        agent.send("review this")
+
+        orchestrator._record_turn_usage(agent, "peer_review")
+
+        self.assertEqual(orchestrator.phase_usage["peer_review"]["tokens"], 120)
+        self.assertEqual(orchestrator.phase_usage["peer_review"]["turns"], 1)
 
     def test_workspace_create_file(self):
         from fastapi.testclient import TestClient

@@ -7,12 +7,13 @@ import json
 import logging
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from backend.auth import auth_manager, Session
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,8 +27,27 @@ from .workspace.workspace import Workspace
 from .crypto import encrypt_key, decrypt_key
 from .errors import classify_provider_error
 
-app = FastAPI(title="DesignFlow", version="1.1.0")
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    tasks = []
+    for state in list(app_states.values()):
+        if state.orchestrator:
+            state.orchestrator.stop()
+        if state.run_task and not state.run_task.done():
+            state.run_task.cancel()
+            tasks.append(state.run_task)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for state in list(app_states.values()):
+        state.close()
+    app_states.clear()
+
+
+app = FastAPI(title="DesignFlow", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -71,6 +91,13 @@ class AppState:
         if not self.workspace or not self.store:
             raise ValueError("Open a project first")
         self.store.save_agents(self.configs)
+
+    def close(self):
+        if self.orchestrator:
+            self.orchestrator.stop()
+        if self.store:
+            self.store.close()
+            self.store = None
 
     @property
     def merged_configs(self) -> list[dict]:
@@ -163,8 +190,9 @@ def get_me(session: Session = Depends(get_session)):
 @app.post("/auth/logout")
 def logout(response: Response, session: Session = Depends(get_session)):
     auth_manager.logout(session.session_id)
-    if session.session_id in app_states:
-        del app_states[session.session_id]
+    state = app_states.pop(session.session_id, None)
+    if state:
+        state.close()
     response.delete_cookie("session_id")
     return {"ok": True}
 
@@ -766,6 +794,7 @@ def run_status(state: AppState = Depends(get_state)):
             "estimated_cost_usd": 0, "pricing_complete": True, "run_count": 0,
         },
         "failed_turn": state.orchestrator.failed_turn if state.orchestrator else None,
+        "phase_usage": state.orchestrator.phase_usage if state.orchestrator else {},
     }
 
 
@@ -817,7 +846,7 @@ def get_workspace(state: AppState = Depends(get_state)):
 def get_file(key: str, state: AppState = Depends(get_state)):
     if not state.workspace:
         raise HTTPException(404, "No active workspace")
-    allowed = ["design", "plan", "decisions", "consensus", "tests", "questions", "logbook"]
+    allowed = ["context", "design", "plan", "decisions", "questions", "logbook"]
     if key not in allowed:
         raise HTTPException(400, f"key must be one of {allowed}")
     return {"key": key, "content": state.workspace.read(key)}
@@ -830,7 +859,7 @@ class FileUpdateBody(BaseModel):
 def update_file(key: str, body: FileUpdateBody, state: AppState = Depends(get_state)):
     if not state.workspace:
         raise HTTPException(404, "No active workspace")
-    allowed = ["design", "plan", "decisions", "consensus", "tests", "questions"]
+    allowed = ["design", "plan", "decisions", "questions"]
     if key not in allowed:
         raise HTTPException(400, f"key must be one of {allowed}")
     state.workspace.write(key, body.content)
@@ -862,12 +891,6 @@ def update_src_file(filename: str, body: FileUpdateBody, state: AppState = Depen
 def event_history(state: AppState = Depends(get_state)):
     return {"events": state.event_log}
 
-
-@app.on_event("shutdown")
-def shutdown_event():
-    for state in app_states.values():
-        if state.orchestrator:
-            state.orchestrator.stop()
 
 @app.post("/admin/shutdown")
 def admin_shutdown(session: Session = Depends(get_session)):

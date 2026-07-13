@@ -500,9 +500,6 @@ function appendFeed(ev) {
     case 'verdict':
       summary = `${ev.data.role?.toUpperCase()} verdict: ${ev.data.verdict}`;
       break;
-    case 'consensus':
-      summary = ev.data.forced ? '⚠ Forced consensus (max rounds)' : `✓ Consensus reached in round ${ev.data.round}`;
-      break;
     case 'file_write':
       summary = `Wrote ${ev.data.file}`;
       detail = ev.data.preview || '';
@@ -594,7 +591,7 @@ function friendlyProviderError(rawError) {
 }
 
 function conversationalAgentSummary(response, agent) {
-  const preferredSections = ['USER_SUMMARY', 'CONSENSUS_APPEND', 'DECISION_CHECKPOINT'];
+  const preferredSections = ['USER_SUMMARY', 'DECISION_CHECKPOINT'];
   for (const section of preferredSections) {
     const value = parseProtocolSection(response || '', section);
     if (value) return summarizeConversationText(value);
@@ -1048,12 +1045,10 @@ function extractLiveInsights(ev) {
   if (ev.kind !== 'turn_end' || !ev.data.response) return;
   const text = ev.data.response;
   
-  const consensusMatch = text.match(/## CONSENSUS_APPEND\s*\n([\s\S]*?)(?=##|$)/);
   const decisionMatch = text.match(/## DECISION_CHECKPOINT\s*\n([\s\S]*?)(?=##|$)/);
   
   let insightText = '';
-  if (consensusMatch) insightText = consensusMatch[1].trim();
-  else if (decisionMatch) insightText = decisionMatch[1].trim();
+  if (decisionMatch) insightText = decisionMatch[1].trim();
   
   if (insightText && !insightText.includes('VOTE: DISAGREE')) {
     const container = document.getElementById('liveInsightsContainer');
