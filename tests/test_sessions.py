@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from backend.agents.base import AgentBase, AgentConfig, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
-from backend.orchestrator import Orchestrator
+from backend.orchestrator import Orchestrator, OrchestratorPhase
 from backend.errors import classify_provider_error
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
@@ -345,6 +345,8 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("--continue", second_command)
         self.assertIn("--conversation", second_command)
         self.assertIn(agent.fake_conversation_id, second_command)
+        self.assertIn("--add-dir", first_command)
+        self.assertEqual(first_command[first_command.index("--add-dir") + 1], str(Path(project).resolve()))
         self.assertEqual(first_cwd, second_cwd)
         self.assertEqual(Path(first_cwd), Path(project).resolve())
         log_path = Path(first_command[first_command.index("--log-file") + 1])
@@ -412,7 +414,8 @@ class SessionTests(unittest.TestCase):
         reply = asyncio.run(orchestrator._send_agent(agent, "try"))
         self.assertEqual(reply, "recovered")
         self.assertEqual(agent.attempts, 2)
-        self.assertEqual(retry_events[0].kind.value, "retry")
+        self.assertEqual(retry_events[0].kind.value, "turn_start")
+        self.assertTrue(any(event.kind.value == "retry" for event in retry_events))
 
     def test_failed_turn_can_be_fixed_and_resumed_without_advancing(self):
         events = []
@@ -629,7 +632,55 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(len(boss.received), 2)
             self.assertEqual(len(worker.received), 1)
             self.assertIn("senior architecture synthesizer", boss.received_systems[0])
+            self.assertIn("DECISIONS_UPDATE", boss.received[0][-1]["content"])
             self.assertIn("Requirements", orchestrator.ws.read("plan"))
+
+    def test_user_checkpoint_answer_is_recorded_as_confirmed_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.write(
+                "questions",
+                "# Decision Checkpoint\n\nShould tenant isolation use separate schemas or tenant-scoped rows?",
+            )
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.phase = OrchestratorPhase.APPROVAL
+
+            asyncio.run(orchestrator.steer("Use tenant-scoped rows with mandatory tenant_id and database RLS."))
+
+            decisions = workspace.read("decisions")
+            self.assertIn("Should tenant isolation", decisions)
+            self.assertIn("tenant-scoped rows", decisions)
+            self.assertIn("Confirmed by user", decisions)
+            self.assertEqual(workspace.read("questions"), "(empty)")
+
+    def test_explicit_user_reversal_is_recorded_without_ai_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("enterprise logging framework")
+            orchestrator = Orchestrator([], workspace, require_approval=False)
+
+            asyncio.run(orchestrator.run(
+                "enterprise logging framework",
+                task="I don't want to do multi-tenancy in the first version.",
+            ))
+
+            decisions = workspace.read("decisions")
+            self.assertIn("I don't want to do multi-tenancy", decisions)
+            self.assertIn("Confirmed by user", decisions)
+            self.assertIn("Supersedes any conflicting earlier decision", decisions)
+            self.assertTrue(any(
+                event.get("kind") == "user_decision" and "multi-tenancy" in event.get("content", "")
+                for event in workspace.context_events()
+            ))
+
+    def test_ordinary_work_request_is_not_misclassified_as_decision(self):
+        self.assertFalse(Orchestrator._is_explicit_user_correction(
+            "Review the architecture and ask specialists to improve the plan."
+        ))
+        self.assertTrue(Orchestrator._is_explicit_user_correction(
+            "We no longer want to support multi tenancy."
+        ))
 
     def test_global_agents_endpoints(self):
         from fastapi.testclient import TestClient
@@ -772,11 +823,53 @@ class SessionTests(unittest.TestCase):
             orchestrator._coordinator_name = "boss"
             selected = orchestrator._select_peer_review_agents()
             names = {agent.name for agent in selected}
-            self.assertLessEqual(len(selected), 4)
+            self.assertLessEqual(len(selected), 3)
             self.assertIn("security_auditor", names)
             self.assertIn("data_architect", names)
             self.assertIn("api_designer", names)
             self.assertNotIn("marketing_alpha", names)
+
+    def test_backend_logging_project_avoids_ui_and_scratch_research_roles(self):
+        agents = [
+            StatefulFake(AgentConfig(name=name, kind="openai", model="gpt-4o"))
+            for name in ("boss", "architect_beta", "api_designer", "devops_engineer", "ui_designer", "researcher")
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief(
+                "Build an enterprise logging framework for multiple services and languages "
+                "with runtime log-level configuration."
+            )
+            orchestrator = Orchestrator(agents, workspace, require_approval=False)
+            orchestrator.idea = workspace.brief()
+            orchestrator._coordinator_name = "boss"
+
+            names = {agent.name for agent in orchestrator._select_peer_review_agents()}
+
+            self.assertEqual(len(names), 3)
+            self.assertIn("api_designer", names)
+            self.assertIn("devops_engineer", names)
+            self.assertNotIn("ui_designer", names)
+            self.assertNotIn("researcher", names)
+
+    def test_current_task_influences_specialist_selection(self):
+        agents = [
+            StatefulFake(AgentConfig(name=name, kind="openai"))
+            for name in ("boss", "product_manager", "architect_beta", "data_architect", "security_auditor", "api_designer")
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief("Build a useful product with user-configurable features.")
+            orchestrator = Orchestrator(agents, workspace, require_approval=False)
+            orchestrator.idea = workspace.brief()
+            orchestrator.task = "Challenge storage concurrency, API contracts, security boundaries, and failure recovery."
+            orchestrator._coordinator_name = "boss"
+
+            names = {agent.name for agent in orchestrator._select_peer_review_agents()}
+
+            self.assertIn("architect_beta", names)
+            self.assertIn("api_designer", names)
+            self.assertNotIn("product_manager", names)
 
     def test_strong_model_is_reserved_for_synthesis(self):
         cheap_manager = StatefulFake(AgentConfig(
@@ -1101,6 +1194,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(agent.retry_at, "")
         self.assertEqual(state.event_log[-1]["data"]["status"], "stopped")
         self.assertIn("retries were cancelled", state.event_log[-1]["data"]["message"])
+        self.assertEqual(state.event_log[-1]["event_id"], 1)
 
     def test_expired_last_tab_lease_releases_project_runtime(self):
         import backend.server
@@ -1152,6 +1246,95 @@ class SessionTests(unittest.TestCase):
             third = workspace.changed_context("architect", ["design", "decisions"])
             self.assertIn("DESIGN.md", third)
 
+    def test_workspace_snapshot_exposes_logbook_and_questions_for_sidebar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.write("questions", "# Decision Checkpoint\n\nChoose a storage model.")
+            workspace.append("logbook", "Architecture reviewed", "architect")
+
+            snapshot = workspace.snapshot()
+
+            self.assertIn("Architecture reviewed", snapshot["logbook"])
+            self.assertIn("Choose a storage model", snapshot["questions"])
+
+    def test_designflow_brief_has_a_dedicated_sidebar_entry(self):
+        html = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
+        workspace_js = (Path(__file__).parents[1] / "frontend" / "js" / "workspace.js").read_text()
+        self.assertIn('id="wsbtn-brief"', html)
+        self.assertIn("loadWsFile('DESIGNFLOW.md')", html)
+        self.assertIn("f !== 'DESIGNFLOW.md'", workspace_js)
+        project_files_label = html.index("Project files")
+        brief_button = html.index('id="wsbtn-brief"')
+        self.assertGreater(brief_button, project_files_label)
+        self.assertIn("DesignFlow documents", html)
+        self.assertNotIn(">DesignFlow state<", html)
+
+    def test_specialist_context_is_bounded_and_section_specific(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write("context", "# Context\n\nBackend logging framework.")
+            workspace.write("decisions", "# Key Decisions\n\nUse versioned protocols.")
+            workspace.write(
+                "design",
+                "# Design\n\n## API Protocols & Formats\n" + "contract detail " * 500
+                + "\n\n## Visual Interface Design\n" + "irrelevant visual detail " * 1000,
+            )
+            workspace.write(
+                "plan",
+                "# Plan\n\n## SDK Protocol Work\n" + "sdk task " * 400
+                + "\n\n## Marketing Launch\n" + "campaign task " * 1000,
+            )
+
+            context = workspace.specialist_context(
+                ["api", "protocol", "format"], ["sdk", "protocol"], max_chars=9000,
+            )
+
+            self.assertLessEqual(len(context), 9000)
+            self.assertIn("API Protocols & Formats", context)
+            self.assertIn("SDK Protocol Work", context)
+            self.assertNotIn("Visual Interface Design", context)
+            self.assertNotIn("Marketing Launch", context)
+
+    def test_logbook_rotates_legacy_content_and_indexes_per_run_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.append("logbook", "legacy verbose response", "old-agent", "Turn completed")
+
+            workspace.begin_logbook_run("run-123", "Review logging architecture")
+            workspace.append("logbook", "new specialist critique", "api-designer", "Peer review")
+            workspace.finish_logbook_run(
+                "run-123", "done", [{"name": "api-designer", "total_tokens": 1250}],
+            )
+
+            index = workspace.read("logbook")
+            transcript = (workspace.root / "logbook" / "run-123.md").read_text()
+            legacy_files = list((workspace.root / "logbook").glob("legacy-*.md"))
+            self.assertEqual(len(legacy_files), 1)
+            self.assertIn("legacy verbose response", legacy_files[0].read_text())
+            self.assertIn("status: done", index)
+            self.assertIn("1,250 tokens", index)
+            self.assertNotIn("new specialist critique", index)
+            self.assertIn("new specialist critique", transcript)
+            self.assertIn("api-designer", transcript)
+            self.assertLess(len(index), 1000)
+
+    def test_logbook_reconciles_run_left_open_by_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.begin_logbook_run("crashed-run", "Draft architecture")
+            workspace._active_logbook_run_id = ""  # simulate a fresh process after a hard exit
+
+            interrupted = workspace.reconcile_interrupted_logbook_runs()
+
+            self.assertEqual(interrupted, ["crashed-run"])
+            self.assertIn("status: interrupted", workspace.read("logbook"))
+            transcript = (workspace.root / "logbook" / "crashed-run.md").read_text()
+            self.assertIn("**Status:** interrupted", transcript)
+
     def test_legacy_run_state_without_goal_is_not_restored(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -1180,6 +1363,51 @@ class SessionTests(unittest.TestCase):
             orchestrator.idea = "continue"
 
             self.assertEqual(orchestrator._deterministic_discovery_question(), "")
+
+    def test_enterprise_brief_reaches_specialists_before_role_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief(
+                "Build an enterprise logging framework used by multiple services and languages "
+                "with runtime log-level configuration by feature and destination."
+            )
+            workspace.init(workspace.brief())
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.idea = workspace.brief()
+
+            self.assertEqual(orchestrator._deterministic_discovery_question(), "")
+
+    def test_inline_questions_are_not_announced_as_workspace_artifact_writes(self):
+        source = (Path(__file__).parents[1] / "backend" / "orchestrator.py").read_text()
+        self.assertNotIn('EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}', source)
+
+    def test_task_instruction_does_not_replace_product_goal_in_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            goal = "Build a multi-language enterprise logging framework."
+            workspace.write_brief(goal)
+            workspace.init(goal)
+            orchestrator = Orchestrator([], workspace, store=ProjectStore(workspace.root))
+            orchestrator.idea = goal
+            orchestrator.task = "Review the requirements and drive a rigorous debate."
+
+            orchestrator.save_state()
+
+            context = workspace.read("context")
+            self.assertIn(goal, context)
+            self.assertNotIn("## Product Goal\nReview the requirements", context)
+
+    def test_generated_design_goal_header_is_repaired_without_replacing_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Review the requirements and drive a debate")
+            workspace.append("design", "Keep this architecture section", "author")
+
+            workspace.align_generated_goal_header("Build an enterprise logging framework")
+
+            design = workspace.read("design")
+            self.assertIn("**Idea:** Build an enterprise logging framework", design)
+            self.assertIn("Keep this architecture section", design)
 
     def test_context_memory_is_generated_without_model_and_tracks_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1321,6 +1549,57 @@ class SessionTests(unittest.TestCase):
 
             self.assertEqual(agent.received, [])
 
+    def test_observed_cli_turn_size_pauses_before_budget_overshoot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            agent = StatefulFake(AgentConfig(name="architect", kind="cli", id="virtual", base_id="codex-base"))
+            events = []
+            orchestrator = Orchestrator([agent], workspace, event_cb=events.append, max_tokens=1000)
+            orchestrator._running = True
+            orchestrator.run_token_total = 700
+            orchestrator._provider_turn_peak["codex-base"] = 600
+
+            async def exercise():
+                task = asyncio.create_task(orchestrator._send_agent(agent, "Review this design"))
+                await asyncio.sleep(0.02)
+                self.assertTrue(orchestrator._paused)
+                self.assertEqual(agent.received, [])
+                self.assertFalse(any(event.kind.value == "turn_start" for event in events))
+                orchestrator.max_tokens = 5000
+                orchestrator.resume()
+                return await task
+
+            self.assertEqual(asyncio.run(exercise()), "ok")
+            self.assertTrue(any(event.data.get("status") == "budget_exhausted" for event in events))
+
+    def test_provider_turn_peak_survives_run_state_cleanup_and_store_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory)
+            store = ProjectStore(metadata)
+            store.record_provider_turn_peak("codex-base", 62575)
+            store.save_run_state({"provider_turn_peak": {"codex-base": 62575}})
+            store.clear_run_state()
+            store.close()
+
+            reopened = ProjectStore(metadata)
+            self.assertEqual(reopened.load_provider_turn_peaks()["codex-base"], 62575)
+            reopened.close()
+
+    def test_provider_turn_peak_is_derived_from_legacy_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.append_event("run-1", {
+                "timestamp": "now", "kind": "turn_end", "agent": "architect",
+                "data": {
+                    "turn_id": "turn-1", "provider_id": "gemini-base",
+                    "usage": {"total_tokens": 11035}, "response": "review",
+                },
+            })
+
+            self.assertEqual(store.load_provider_turn_peaks()["gemini-base"], 11035)
+            store.close()
+
     def test_workspace_create_file(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -1435,11 +1714,15 @@ class FrontendPrivacyTests(unittest.TestCase):
         state_js = (Path(__file__).parents[1] / "frontend" / "js" / "state.js").read_text()
         api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
         main_js = (Path(__file__).parents[1] / "frontend" / "js" / "main.js").read_text()
-        self.assertIn("if (typeof connectSSE === 'function') connectSSE();", state_js)
+        self.assertIn("if (typeof connectSSE === 'function') connectSSE(true);", state_js)
         self.assertIn("activeEventSource.close()", api_js)
         self.assertIn("activeEventSource = es", api_js)
-        self.assertIn("loadCurrentProject().finally(() => connectSSE());", main_js)
+        self.assertIn("loadCurrentProject().finally(() => connectSSE(true));", main_js)
         self.assertNotIn("connectSSE();\nloadCurrentProject();", main_js)
+        self.assertIn("seenEventIds.has(eventId)", api_js)
+        self.assertIn("ev.data.status === 'stopped'", api_js)
+        self.assertIn("Still waiting for the model", api_js)
+        self.assertIn("Agent turn cancelled when the run was stopped", api_js)
 
     def test_agent_capacity_uses_runtime_failure_not_only_health_probe(self):
         api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()

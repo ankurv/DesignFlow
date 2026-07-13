@@ -547,6 +547,13 @@ class CLIAgent(AgentBase):
 
     def _send_antigravity(self, message: str, system: str) -> tuple[str, Usage]:
         args = self._antigravity_base_args()
+        configured_dirs = {
+            args[index + 1] for index, value in enumerate(args[:-1]) if value == "--add-dir"
+        }
+        if self._workspace_cwd and self._workspace_cwd not in configured_dirs:
+            # Antigravity keeps its own active project and can otherwise inspect
+            # a global scratch workspace even when the subprocess cwd is correct.
+            args += ["--add-dir", self._workspace_cwd]
         prompt = self._initial_prompt(message, system) if not self._provider_session_id else message
         log_path = Path(self._session_cwd) / "agy.log"
         try:

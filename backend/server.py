@@ -53,6 +53,8 @@ async def lifespan(app: FastAPI):
             agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
             state.store.finish_run(state.run_id, "stopped", agents)
             state.store.clear_run_state()
+            if state.workspace:
+                state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
         state.status = "idle"
         state.awaiting_input = False
         state.close()
@@ -78,6 +80,7 @@ class AppState:
         self.workspace: Optional[Workspace] = None
         self.store: Optional[ProjectStore] = None
         self.event_log: list[Event] = []
+        self.next_event_id = 1
         self.sse_clients: list[asyncio.Queue] = []
         self.run_id: Optional[str] = None
         self.run_task: Optional[asyncio.Task] = None
@@ -91,6 +94,7 @@ class AppState:
             raise ValueError("Stop the active run before changing projects")
         workspace = Workspace(path)
         workspace.ensure()
+        workspace.reconcile_interrupted_logbook_runs()
         if self.store:
             self.store.close()
         self.workspace = workspace
@@ -176,6 +180,8 @@ async def release_project_binding(session_id: str) -> None:
         agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
         state.store.finish_run(state.run_id, "stopped", agents)
         state.store.clear_run_state()
+        if state.workspace:
+            state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
     state.status = "idle"
     state.awaiting_input = False
     state.close()
@@ -325,6 +331,8 @@ def save_global_agents(configs: list[dict]):
 
 def broadcast(event: Event, state):
     data = event.to_dict()
+    data["event_id"] = state.next_event_id
+    state.next_event_id += 1
     if event.kind == EventKind.ERROR and event.data.get("recoverable"):
         state.status = "needs_attention"
         state.awaiting_input = False
@@ -364,14 +372,20 @@ async def sse_stream(request: Request, state: AppState = Depends(get_state)):
 
     async def generator():
         try:
+            try:
+                last_event_id = int(request.headers.get("last-event-id", "0") or 0)
+            except ValueError:
+                last_event_id = 0
             for past in state.event_log:
-                yield f"data: {json.dumps(past)}\n\n"
+                if int(past.get("event_id", 0) or 0) <= last_event_id:
+                    continue
+                yield f"id: {past.get('event_id', '')}\ndata: {json.dumps(past)}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=5)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield f"id: {event.get('event_id', '')}\ndata: {json.dumps(event)}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
@@ -755,8 +769,10 @@ async def start_run(
     if any(not name for name in names) or len(names) != len(set(names)):
         raise HTTPException(400, "Every agent needs a unique non-empty name")
 
-    idea = body.idea.strip() or state.workspace.brief().strip()
-    if not idea:
+    brief = state.workspace.brief().strip()
+    product_goal = brief or body.idea.strip()
+    task = body.idea.strip() if brief else ""
+    if not product_goal:
         raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
     if body.save_brief and body.idea.strip():
         state.workspace.write_brief(body.idea)
@@ -790,12 +806,13 @@ async def start_run(
 
     state.event_log.clear()
     state.run_id = str(uuid.uuid4())[:8]
-    state.current_idea = idea
+    state.current_idea = product_goal
     state.status = "running"
     state.last_transition = "run_started"
     state.awaiting_input = False
     if state.store:
-        state.store.start_run(state.run_id, idea)
+        state.store.start_run(state.run_id, task or product_goal)
+    state.workspace.begin_logbook_run(state.run_id, task or product_goal)
 
     state.orchestrator = Orchestrator(
         agents=agents,
@@ -812,15 +829,17 @@ async def start_run(
 
     async def run_and_update():
         try:
-            snapshot = await state.orchestrator.run(idea)
+            snapshot = await state.orchestrator.run(product_goal, task=task)
             if state.status != "idle":
                 state.status = "done"
                 state.awaiting_input = False
                 if state.store and state.run_id:
+                    agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
                     state.store.finish_run(
                         state.run_id, "done",
-                        [agent.state_dict() for agent in state.orchestrator.agents],
+                        agent_states,
                     )
+                    state.workspace.finish_logbook_run(state.run_id, "done", agent_states)
                 if state.workspace and snapshot:
                     try:
                         proj_name = state.workspace.project_root.name or "project"
@@ -839,10 +858,12 @@ async def start_run(
             public_error, error_code = Orchestrator._public_error(exc)
             broadcast(Event(kind=EventKind.ERROR, data={"error": public_error, "error_code": error_code}), state)
             if state.store and state.run_id:
+                agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
                 state.store.finish_run(
                     state.run_id, "error",
-                    [agent.state_dict() for agent in state.orchestrator.agents],
+                    agent_states,
                 )
+                state.workspace.finish_logbook_run(state.run_id, "error", agent_states)
                 state.store.clear_run_state()
 
     state.run_task = asyncio.create_task(run_and_update())
@@ -936,10 +957,13 @@ async def stop_run(state: AppState = Depends(get_state)):
                 agent.retry_at = ""
                 agent.retry_reason = ""
         if state.store and state.run_id:
+            agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
             state.store.finish_run(
                 state.run_id, "stopped",
-                [agent.state_dict() for agent in state.orchestrator.agents],
+                agent_states,
             )
+            if state.workspace:
+                state.workspace.finish_logbook_run(state.run_id, "stopped", agent_states)
             state.store.clear_run_state()
     state.status = "idle"
     state.last_transition = "stopped_by_user"

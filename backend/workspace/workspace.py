@@ -67,6 +67,7 @@ class Workspace:
         self.brief_path = self.project_root / "DESIGNFLOW.md"
         self.legacy_brief_path = self.project_root / "AGENTFLOW.md"
         self._checksums: dict[str, dict[str, str]] = {}
+        self._active_logbook_run_id = ""
 
     @property
     def path(self) -> str:
@@ -109,6 +110,18 @@ class Workspace:
         self.ensure()
         self.brief_path.write_text(content.rstrip() + "\n")
 
+    def align_generated_goal_header(self, goal: str) -> None:
+        """Repair only DesignFlow's generated Idea header; preserve authored design content."""
+        design_path = self._file("design")
+        if not goal.strip() or not design_path.exists():
+            return
+        content = design_path.read_text(errors="replace")
+        if not content.startswith("# Design Document\n") or not re.search(r"^\*\*Idea:\*\*", content, re.MULTILINE):
+            return
+        updated = re.sub(r"^\*\*Idea:\*\*.*$", f"**Idea:** {goal.strip()}", content, count=1, flags=re.MULTILINE)
+        if updated != content:
+            design_path.write_text(updated)
+
     def init(self, idea: str):
         self.ensure()
         ts = datetime.now(timezone.utc).isoformat()
@@ -147,6 +160,44 @@ class Workspace:
         if path.exists():
             path.unlink()
             self.refresh_context()
+
+    def record_user_decision(self, question: str, answer: str) -> None:
+        """Append a durable, explicitly confirmed decision without an LLM call."""
+        clean_question = re.sub(r"^#.*$", "", question, flags=re.MULTILINE).strip()
+        clean_answer = answer.strip()
+        if not clean_question or not clean_answer:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entry = (
+            f"### User-confirmed decision — {timestamp}\n"
+            f"- **Question:** {clean_question}\n"
+            f"- **Decision:** {clean_answer}\n"
+            f"- **Status:** Confirmed by user\n"
+        )
+        decisions = self.read("decisions")
+        if decisions == "(empty)":
+            decisions = "# Key Decisions\n\n"
+        self.write("decisions", decisions.rstrip() + "\n\n" + entry)
+
+    def record_user_directive(self, directive: str) -> None:
+        """Record an unsolicited, explicit user correction while preserving decision history."""
+        clean = directive.strip()
+        if not clean:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entry = (
+            f"### User-directed correction — {timestamp}\n"
+            f"- **Directive:** {clean}\n"
+            f"- **Status:** Confirmed by user\n"
+            f"- **Reconciliation:** Supersedes any conflicting earlier decision or assumption; "
+            f"the next synthesis pass must mark conflicts as Superseded and update DESIGN.md and PLAN.md.\n"
+        )
+        decisions = self.read("decisions")
+        if decisions == "(empty)":
+            decisions = "# Key Decisions\n\n"
+        if clean in decisions:
+            return
+        self.write("decisions", decisions.rstrip() + "\n\n" + entry)
 
     @staticmethod
     def _section_excerpt(text: str, headings: list[str], limit: int = 1800) -> str:
@@ -292,7 +343,121 @@ class Workspace:
     def append(self, key: str, section: str, agent: str, label: str = ""):
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         header = f"\n### [{agent.upper()}{' — ' + label if label else ''} @ {ts}]\n"
+        if key == "logbook" and self._active_logbook_run_id:
+            target = self.root / "logbook" / f"{self._active_logbook_run_id}.md"
+            existing = target.read_text(errors="replace") if target.exists() else ""
+            target.write_text(existing + header + section + "\n")
+            return
         self.write(key, self.read(key) + header + section + "\n")
+
+    @staticmethod
+    def _safe_run_id(run_id: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id or "")
+        if not safe:
+            raise ValueError("A run id is required for logbook rotation")
+        return safe
+
+    def _rotate_legacy_logbook(self) -> None:
+        index = self._file("logbook")
+        existing = index.read_text(errors="replace") if index.exists() else ""
+        body = existing.replace("# Workflow Log Book", "", 1).strip()
+        if not body or "<!-- run:" in existing:
+            if not index.exists():
+                index.write_text("# Workflow Log Book\n\n## Runs\n")
+            return
+        archive_dir = self.root / "logbook"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        legacy_name = f"legacy-{timestamp}.md"
+        (archive_dir / legacy_name).write_text(existing)
+        index.write_text(
+            "# Workflow Log Book\n\n## Runs\n"
+            f"- Legacy transcript: [logbook/{legacy_name}](logbook/{legacy_name})\n"
+        )
+
+    def begin_logbook_run(self, run_id: str, task: str) -> None:
+        """Start a deterministic per-run transcript and keep LOGBOOK.md as a compact index."""
+        self.ensure()
+        safe_id = self._safe_run_id(run_id)
+        self._rotate_legacy_logbook()
+        archive_dir = self.root / "logbook"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        started = datetime.now(timezone.utc).isoformat()
+        transcript = archive_dir / f"{safe_id}.md"
+        transcript.write_text(
+            f"# DesignFlow Run {safe_id}\n\n"
+            f"- **Started:** {started}\n"
+            f"- **Status:** running\n"
+            f"- **Task:** {task.strip()}\n\n"
+            "## Transcript\n"
+        )
+        index = self._file("logbook")
+        content = index.read_text(errors="replace") if index.exists() else "# Workflow Log Book\n\n## Runs\n"
+        if "## Runs" not in content:
+            content = content.rstrip() + "\n\n## Runs\n"
+        marker = f"<!-- run:{safe_id} -->"
+        if marker not in content:
+            content = content.rstrip() + (
+                f"\n- {marker} [{safe_id}](logbook/{safe_id}.md) · {started} · status: running\n"
+            )
+            index.write_text(content)
+        self._active_logbook_run_id = safe_id
+
+    def reconcile_interrupted_logbook_runs(self) -> list[str]:
+        """Mark transcripts left running by an ungraceful process exit."""
+        index = self._file("logbook")
+        if not index.exists() or self._active_logbook_run_id:
+            return []
+        content = index.read_text(errors="replace")
+        run_ids = re.findall(r"<!-- run:([A-Za-z0-9_.-]+) -->[^\n]*status: running", content)
+        for run_id in run_ids:
+            content = re.sub(
+                rf"(<!-- run:{re.escape(run_id)} -->[^\n]*status:) running",
+                rf"\1 interrupted",
+                content,
+                count=1,
+            )
+            transcript = self.root / "logbook" / f"{run_id}.md"
+            if transcript.exists():
+                transcript_content = transcript.read_text(errors="replace")
+                transcript.write_text(re.sub(
+                    r"^- \*\*Status:\*\* running$",
+                    "- **Status:** interrupted",
+                    transcript_content,
+                    count=1,
+                    flags=re.MULTILINE,
+                ))
+        if run_ids:
+            index.write_text(content)
+        return run_ids
+
+    def finish_logbook_run(self, run_id: str, status: str, agents: Optional[list[dict]] = None) -> None:
+        safe_id = self._safe_run_id(run_id)
+        completed = datetime.now(timezone.utc).isoformat()
+        agents = agents or []
+        total_tokens = sum(int(agent.get("total_tokens", 0) or 0) for agent in agents)
+        names = sorted({str(agent.get("name", "")).strip() for agent in agents if agent.get("name")})
+        transcript = self.root / "logbook" / f"{safe_id}.md"
+        if transcript.exists():
+            content = transcript.read_text(errors="replace")
+            content = re.sub(r"^- \*\*Status:\*\* .*$", f"- **Status:** {status}", content, count=1, flags=re.MULTILINE)
+            content += (
+                f"\n## Run Result\n\n- **Completed:** {completed}\n- **Status:** {status}\n"
+                f"- **Tokens:** {total_tokens}\n- **Agents:** {', '.join(names) or 'None'}\n"
+            )
+            transcript.write_text(content)
+        index = self._file("logbook")
+        if index.exists():
+            content = index.read_text(errors="replace")
+            pattern = rf"^- <!-- run:{re.escape(safe_id)} --> .*?$"
+            replacement = (
+                f"- <!-- run:{safe_id} --> [{safe_id}](logbook/{safe_id}.md) · {completed} · "
+                f"status: {status} · {total_tokens:,} tokens"
+            )
+            updated = re.sub(pattern, replacement, content, count=1, flags=re.MULTILINE)
+            index.write_text(updated)
+        if self._active_logbook_run_id == safe_id:
+            self._active_logbook_run_id = ""
 
     def _safe_project_path(self, filename: str) -> Path:
         relative = Path(filename.strip().lstrip("/"))
@@ -371,6 +536,52 @@ class Workspace:
             )
 
         return "\n\n".join(out) if out else "(empty context)"
+
+    @staticmethod
+    def _focused_h2_sections(text: str, keywords: list[str], limit: int) -> str:
+        sections = re.findall(r"^##\s+(.+?)\s*$([\s\S]*?)(?=^##\s|\Z)", text or "", re.MULTILINE)
+        if not sections:
+            return (text or "")[:limit].rstrip()
+        lowered = [keyword.lower() for keyword in keywords]
+        ranked = []
+        for index, (heading, body) in enumerate(sections):
+            heading_lower = heading.lower()
+            score = sum(1 for keyword in lowered if keyword in heading_lower)
+            if score:
+                ranked.append((-score, index, heading, body))
+        if not ranked:
+            ranked = [(0, 0, *sections[0])]
+        chunks = []
+        used = 0
+        for _, _, heading, body in sorted(ranked):
+            chunk = f"## {heading.strip()}\n{body.strip()}".strip()
+            remaining = limit - used
+            if remaining <= 0:
+                break
+            chunks.append(chunk[:remaining].rstrip())
+            used += min(len(chunk), remaining)
+        return "\n\n".join(chunks)
+
+    def specialist_context(
+        self,
+        design_keywords: list[str],
+        plan_keywords: list[str],
+        max_chars: int = 12000,
+    ) -> str:
+        """Return bounded authoritative excerpts rather than complete planning documents."""
+        context = self.read("context")
+        decisions = self.read("decisions")
+        questions = self.read("questions")
+        design = self._focused_h2_sections(self.read("design"), design_keywords, 4200)
+        plan = self._focused_h2_sections(self.read("plan"), plan_keywords, 2800)
+        blocks = [
+            f"=== CONTEXT.md ===\n{context[:3200]}",
+            f"=== DECISIONS.md ===\n{decisions[:1800]}",
+            f"=== ACTIVE_QUESTION.md ===\n{questions[:800]}",
+            f"=== DESIGN.md RELEVANT EXCERPTS ===\n{design}",
+            f"=== PLAN.md RELEVANT EXCERPTS ===\n{plan}",
+        ]
+        return "\n\n".join(blocks)[:max_chars].rstrip()
 
     def reset_context_tracking(self, agent: Optional[str] = None):
         if agent is None:
@@ -505,6 +716,8 @@ class Workspace:
             "design": self.read("design"),
             "plan": self.read("plan"),
             "decisions": self.read("decisions"),
+            "questions": self.read("questions"),
+            "logbook": self.read("logbook"),
             "src": src,
             "src_files": list(src.keys()),
         }

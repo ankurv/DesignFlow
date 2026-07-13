@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import json
+from pathlib import Path
 from typing import Any, Callable, Optional
 from backend.mcp_client import MCPManager
 
@@ -145,14 +146,31 @@ ROLE_NEEDS = {
     "marketing_beta": ["design", "plan", "decisions"],
 }
 
+SPECIALIST_SECTION_KEYWORDS = {
+    "product_manager": (["summary", "goal", "requirements", "scope", "unknown"], ["requirements", "goals", "phases", "discovery"]),
+    "product_strategist": (["summary", "goal", "requirements", "scope"], ["requirements", "goals", "discovery"]),
+    "architect_alpha": (["architecture", "challenge", "reliability", "scalability"], ["requirements", "phases", "testing"]),
+    "architect_beta": (["architecture", "challenge", "reliability", "scalability"], ["requirements", "phases", "testing"]),
+    "api_designer": (["protocol", "api", "format", "configuration"], ["api", "sdk", "protocol", "phases"]),
+    "data_architect": (["schema", "data", "storage", "configuration"], ["database", "storage", "migration", "phases"]),
+    "security_auditor": (["security", "access", "tenant", "reliability"], ["security", "testing", "phases"]),
+    "red_team": (["security", "failure", "reliability", "challenge"], ["testing", "security", "phases"]),
+    "cloud_architect": (["architecture", "scalability", "reliability", "deployment"], ["deployment", "operations", "testing", "phases"]),
+    "devops_engineer": (["architecture", "reliability", "deployment", "observability"], ["deployment", "operations", "testing", "phases"]),
+    "ui_designer": (["interface", "interaction", "workflow", "feedback"], ["frontend", "interface", "phases"]),
+    "ux_simplifier": (["interface", "interaction", "workflow", "user"], ["frontend", "workflow", "phases"]),
+    "workflow_designer": (["workflow", "interaction", "failure", "recovery"], ["workflow", "testing", "phases"]),
+    "researcher": (["unknown", "validation", "architecture", "challenge"], ["discovery", "testing", "phases"]),
+}
+
 SPECIALIST_SIGNALS = {
-    "architecture": ({"architecture", "system", "service", "scale", "performance", "distributed"}, {"architect_alpha", "architect_beta"}),
+    "architecture": ({"architecture", "system", "service", "scale", "performance", "distributed", "concurrency", "recovery", "failure"}, {"architect_alpha", "architect_beta"}),
     "product": ({"product", "user", "mvp", "feature", "market", "workflow"}, {"product_manager", "product_strategist"}),
-    "ux": ({"ui", "ux", "screen", "dashboard", "website", "mobile", "user", "flow"}, {"ux_simplifier", "ui_designer", "workflow_designer"}),
+    "ux": ({"ui", "ux", "screen", "dashboard", "website", "mobile", "frontend", "visual"}, {"ux_simplifier", "ui_designer", "workflow_designer"}),
     "data": ({"data", "database", "schema", "query", "storage", "migration", "analytics"}, {"data_architect"}),
     "security": ({"auth", "security", "privacy", "payment", "secret", "permission", "tenant", "compliance"}, {"security_auditor", "red_team"}),
-    "api": ({"api", "rest", "graphql", "webhook", "integration", "client", "backend"}, {"api_designer"}),
-    "operations": ({"cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability"}, {"cloud_architect", "devops_engineer"}),
+    "api": ({"api", "rest", "graphql", "webhook", "integration", "client", "backend", "framework", "language", "sdk"}, {"api_designer"}),
+    "operations": ({"cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability", "logging", "log", "runtime"}, {"cloud_architect", "devops_engineer"}),
     "research": ({"existing", "repository", "codebase", "legacy", "migration", "refactor"}, {"researcher"}),
     "growth": ({"sales", "marketing", "pricing", "growth", "acquisition", "seo"}, {"sales_alpha", "sales_beta", "marketing_alpha", "marketing_beta"}),
 }
@@ -309,6 +327,9 @@ class Orchestrator:
         self._budget_exhausted = False
         self._coordinator_name = ""
         self._context_invocations: dict[str, int] = {}
+        self._provider_turn_peak: dict[str, int] = (
+            store.load_provider_turn_peaks() if store and hasattr(store, "load_provider_turn_peaks") else {}
+        )
         self._context_full_refresh_gap = 8
         self._context_full_refresh_every = 4
         self._consulted_specialists: set[str] = set()
@@ -321,6 +342,7 @@ class Orchestrator:
         self._deterministic_feedback = ""
         self._pending_user_input = ""
         self.idea = ""
+        self.task = ""
         self._state_loaded = False
 
     # ── Public controls ───────────────────────────────────────────────────────
@@ -340,6 +362,7 @@ class Orchestrator:
         self.ws.add_context_event(event_kind, message, self.phase.value, "user")
         if pending_question and pending_question != "(empty)":
             self._user_checkpoint_count += 1
+            self.ws.record_user_decision(pending_question, message)
         await self._steer_queue.put(message)
         self.ws.clear_questions()
         self.ws.reset_context_tracking()
@@ -404,9 +427,13 @@ class Orchestrator:
             return f"Project status: {artifacts}. Run usage is {self.run_token_total:,} of {self.max_tokens:,} configured tokens."
         return ""
 
-    async def run(self, idea: str):
+    async def run(self, idea: str, task: str = ""):
         self._running = True
         self.idea = idea
+        self.task = task.strip()
+        if self.task and self._is_explicit_user_correction(self.task):
+            self.ws.add_context_event("user_decision", self.task, "discovery", "user")
+            self.ws.record_user_directive(self.task)
         if self.restore and not self._state_loaded:
             self._state_loaded = self.load_state()
             if not self._state_loaded:
@@ -438,6 +465,8 @@ class Orchestrator:
         design_file = self.ws._file("design")
         if not design_file.exists() or design_file.stat().st_size == 0:
             self.ws.init(idea)
+        else:
+            self.ws.align_generated_goal_header(idea)
 
         n = len(self.agents)
         if n == 0:
@@ -525,7 +554,8 @@ class Orchestrator:
         candidates = [agent for agent in self.agents if agent.name != self._coordinator_name]
         if not candidates:
             return []
-        words = set(re.findall(r"[a-z0-9]+", f"{self.idea} {self.ws.brief()}".lower()))
+        words = set(re.findall(r"[a-z0-9]+", f"{self.idea} {self.task} {self.ws.brief()}".lower()))
+        task_words = set(re.findall(r"[a-z0-9]+", self.task.lower()))
         scored: list[tuple[int, str, AgentBase]] = []
         for agent in candidates:
             identity = f"{agent.name} {agent.config.role}".lower()
@@ -534,8 +564,14 @@ class Orchestrator:
             for domain, (signals, names) in SPECIALIST_SIGNALS.items():
                 if agent.name.lower() in names and words.intersection(signals):
                     score += 6 + len(words.intersection(signals))
+                    if task_words.intersection(signals):
+                        score += 8 + len(task_words.intersection(signals))
                     domains.append(domain)
-            if agent.name.lower() == "researcher" and self.ws.read_src():
+            meaningful_source = any(
+                name != "DESIGNFLOW.md" and Path(name).suffix.lower() in {".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".cs"}
+                for name in self.ws.read_src()
+            )
+            if agent.name.lower() == "researcher" and meaningful_source:
                 score += 5
                 domains.append("research")
             if agent.name.lower().startswith("architect_"):
@@ -553,7 +589,7 @@ class Orchestrator:
                 continue
             selected.append(agent)
             used_domains.add(domain)
-            if len(selected) >= 4:
+            if len(selected) >= 3:
                 break
         minimum = min(3, len(candidates))
         if len(selected) < minimum:
@@ -581,11 +617,26 @@ class Orchestrator:
         )
         if len(seed_words) < 6 and not has_product_context:
             return "Who is the primary user, and what outcome must they achieve with this product?"
-        if words.intersection({"enterprise", "team", "tenant", "organization"}) and not words.intersection({"admin", "member", "role", "permission", "sso"}):
-            return "What user roles and access boundaries must the first version support?"
+        # Do not interrupt a substantive brief with a generic checklist question.
+        # Material ambiguities should first be challenged by relevant specialists,
+        # then surfaced as a focused decision checkpoint with trade-offs.
         if words.intersection({"payment", "health", "medical", "finance", "bank", "identity"}) and not words.intersection({"compliance", "privacy", "region", "retention"}):
             return "Are there mandatory compliance, data residency, or retention constraints?"
         return ""
+
+    @staticmethod
+    def _is_explicit_user_correction(text: str) -> bool:
+        normalized = " ".join((text or "").lower().replace("’", "'").split())
+        negative = re.search(
+            r"\b(?:i|we)\s+(?:don't|do not|dont|no longer|won't|will not|can't|cannot)\s+"
+            r"(?:want|need|support|use|build|include|implement|do|keep|require)\b",
+            normalized,
+        )
+        explicit_choice = re.search(
+            r"\b(?:i|we)\s+(?:have decided to|decided to|choose|must use|will use|are switching to)\b",
+            normalized,
+        )
+        return bool(negative or explicit_choice)
 
     @staticmethod
     def _synthesis_score(agent: AgentBase) -> int:
@@ -634,7 +685,6 @@ class Orchestrator:
         question = self._deterministic_discovery_question()
         if question and self.require_approval:
             self.ws.write("questions", f"# Clarifying Question\n\n{question}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
             self.post_approval_phase = OrchestratorPhase.DRAFTING
             self.phase = OrchestratorPhase.APPROVAL
         else:
@@ -649,8 +699,14 @@ class Orchestrator:
 
         prompt = (
             f"Product Idea: {self.idea}\n{steer_block}\n"
+            f"Current user request: {self.task or 'Develop the product goal into a credible planning baseline.'}\n"
             f"Draft the initial architecture and implementation plan.\n"
-            f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` with your complete initial drafts."
+            f"Output `## DESIGN_UPDATE`, `## PLAN_UPDATE`, and `## DECISIONS_UPDATE` with complete initial drafts.\n"
+            f"DECISIONS_UPDATE must record every material choice already adopted in the design, including status "
+            f"(Proposed or Confirmed), chosen option, alternatives considered, trade-offs, rationale, and what would "
+            f"cause the team to revisit it. Do not present an unconfirmed assumption as user-approved. "
+            f"A current user directive overrides conflicting older artifacts: preserve the old ledger entry as "
+            f"Superseded, record the replacement as Confirmed, and reconcile DESIGN.md and PLAN.md."
         )
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
@@ -683,9 +739,11 @@ class Orchestrator:
 
         prompt = (
             f"You are the {agent.config.role or 'Specialist'}.\n"
-            f"Read the current DESIGN.md and PLAN.md from the workspace.\n"
+            f"Use the authoritative scoped excerpts from DESIGN.md and PLAN.md supplied in this turn's context.\n"
+            f"Do not inspect or reference any scratch directory or unrelated workspace.\n"
             f"Provide your specialized critique and alternative suggestions.\n{steer_block}\n"
-            f"Output `## DESIGN_APPEND` or `## PLAN_APPEND` if you want to add notes directly, or just provide text."
+            f"Keep the response below 1,200 words. Output only bounded `## DESIGN_APPEND`, `## PLAN_APPEND`, "
+            f"or `## DECISIONS_APPEND` deltas; never repeat or rewrite complete artifacts."
         )
 
         full_ctx = self._agent_context(agent)
@@ -706,6 +764,8 @@ class Orchestrator:
         prompt = (
             f"Use the complete unresolved peer critiques in CONTEXT.md and update DESIGN.md and PLAN.md.\n{steer_block}\n"
             f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
+            f"Treat explicit current user directives as authoritative. Mark conflicting older decisions Superseded "
+            f"instead of silently deleting history, and remove their consequences from DESIGN.md and PLAN.md.\n"
             f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
         )
         if self._deterministic_feedback:
@@ -722,7 +782,6 @@ class Orchestrator:
 
         if decision:
             self.ws.write("questions", f"# Decision Checkpoint\n\n{decision}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
             self.post_approval_phase = OrchestratorPhase.COMPLETE
             self.phase = OrchestratorPhase.APPROVAL
         else:
@@ -741,7 +800,6 @@ class Orchestrator:
                     "Recommendation: A — proceed while treating Known Unknowns and Discovery Checkpoints as required follow-up work."
                 )
                 self.ws.write("questions", f"# Decision Checkpoint\n\n{checkpoint}")
-                self._emit(Event(EventKind.FILE_WRITE, agent=coordinator.name, data={"file": "QUESTIONS.md"}))
                 self.post_approval_phase = OrchestratorPhase.COMPLETE
                 self.phase = OrchestratorPhase.APPROVAL
             else:
@@ -802,10 +860,12 @@ class Orchestrator:
         )
         state = {
             "idea": self.idea,
+            "task": self.task,
             "mode": self.mode,
             "turn_sequence": self._turn_sequence,
             "run_token_total": self.run_token_total,
             "phase_usage": self.phase_usage,
+            "provider_turn_peak": self._provider_turn_peak,
             "phase": self.phase.value,
             "peer_review_index": self.peer_review_index,
             "post_approval_phase": self.post_approval_phase.value if self.post_approval_phase else None,
@@ -844,10 +904,13 @@ class Orchestrator:
                 saved_fingerprints = state.get("artifact_fingerprints")
                 if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
                     return False
+                self.task = state.get("task", self.task)
                 self.mode = state.get("mode", self.mode)
                 self._turn_sequence = state.get("turn_sequence", 0)
                 self.run_token_total = int(state.get("run_token_total", 0) or 0)
                 self.phase_usage = dict(state.get("phase_usage", {}))
+                for key, value in state.get("provider_turn_peak", {}).items():
+                    self._provider_turn_peak[str(key)] = max(self._provider_turn_peak.get(str(key), 0), int(value))
                 self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
                 self.peer_review_index = state.get("peer_review_index", 0)
                 pap = state.get("post_approval_phase")
@@ -880,10 +943,13 @@ class Orchestrator:
             saved_fingerprints = state.get("artifact_fingerprints")
             if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
                 return False
+            self.task = state.get("task", self.task)
             self.mode = state.get("mode", self.mode)
             self._turn_sequence = state.get("turn_sequence", 0)
             self.run_token_total = int(state.get("run_token_total", 0) or 0)
             self.phase_usage = dict(state.get("phase_usage", {}))
+            for key, value in state.get("provider_turn_peak", {}).items():
+                self._provider_turn_peak[str(key)] = max(self._provider_turn_peak.get(str(key), 0), int(value))
             self.phase = OrchestratorPhase(state.get("phase", OrchestratorPhase.DISCOVERY.value))
             self.peer_review_index = state.get("peer_review_index", 0)
             pap = state.get("post_approval_phase")
@@ -934,9 +1000,6 @@ class Orchestrator:
         self._turn_sequence += 1
         turn_id = f"turn-{self._turn_sequence:04d}"
         self._turn_attempts[turn_id] = 1
-        self._emit(Event(EventKind.TURN_START, agent=agent.name, data={
-            "turn_id": turn_id, "attempt": 1, **self._event_actor_meta(agent), **context,
-        }))
         return turn_id
 
     def _usage_event(self, agent: AgentBase) -> dict:
@@ -960,6 +1023,12 @@ class Orchestrator:
             identity += f" Your standing role and perspective is: {agent.config.role}."
         if agent.config.system_prompt:
             identity += f"\n\nBehavior instructions:\n{agent.config.system_prompt}"
+        if agent.config.working_directory:
+            identity += (
+                f"\n\nWorkspace invariant: the active project root is {agent.config.working_directory}. "
+                "The DesignFlow context supplied with this turn is authoritative. Do not use a CLI scratch "
+                "workspace, global conversation, or unrelated files, and do not claim supplied artifacts are missing."
+            )
         return identity
 
     async def _send_agent(
@@ -978,10 +1047,13 @@ class Orchestrator:
         effective_system = system_override or self._agent_system(agent)
         estimated_input = agent.estimate_input_tokens(prompt, effective_system, ephemeral_context or "")
         output_reserve = int(agent.config.extra.get("max_tokens", 2000) or 2000)
+        provider_key = agent.config.base_id or agent.config.id or agent.name
+        observed_turn_reserve = self._provider_turn_peak.get(provider_key, 0)
+        projected_turn_reserve = max(output_reserve, observed_turn_reserve)
         per_turn_cap = int(agent.config.extra.get("max_input_tokens_per_turn", 32000) or 32000)
-        remaining = max(0, self.max_tokens - self.run_token_total) if self.max_tokens > 0 else per_turn_cap + output_reserve
+        remaining = max(0, self.max_tokens - self.run_token_total) if self.max_tokens > 0 else per_turn_cap + projected_turn_reserve
 
-        if estimated_input > per_turn_cap or estimated_input + output_reserve > remaining:
+        if estimated_input > per_turn_cap or estimated_input + projected_turn_reserve > remaining:
             compact = self.ws.read("context")
             compact_estimate = agent.estimate_input_tokens(prompt, effective_system, compact)
             if compact_estimate < estimated_input:
@@ -999,11 +1071,29 @@ class Orchestrator:
                 f"Preflight blocked an oversized prompt estimated at {estimated_input} input tokens "
                 f"(per-turn limit {per_turn_cap})."
             )
-        if self.max_tokens > 0 and estimated_input + output_reserve > remaining:
-            raise RuntimeError(
-                f"Preflight blocked this turn: approximately {estimated_input + output_reserve} tokens "
-                f"are required but only {remaining} remain in the run budget."
-            )
+        while self.max_tokens > 0 and estimated_input + projected_turn_reserve > remaining:
+            self._budget_exhausted = True
+            self._emit(Event(EventKind.PHASE, agent=agent.name, data={
+                "phase": context.get("phase", "turn"),
+                "status": "budget_exhausted",
+                "run_total_tokens": self.run_token_total,
+                "run_max_tokens": self.max_tokens,
+                "estimated_input_tokens": estimated_input,
+                "projected_turn_tokens": projected_turn_reserve,
+                "message": "The next agent turn was paused before contacting the provider because it may exceed the project budget.",
+            }))
+            self.pause()
+            await self._wait_if_paused()
+            if not self._running:
+                raise asyncio.CancelledError()
+            remaining = max(0, self.max_tokens - self.run_token_total)
+        self._budget_exhausted = False
+        self._emit(Event(EventKind.TURN_START, agent=agent.name, data={
+            "turn_id": turn_id,
+            "attempt": self._turn_attempts.get(turn_id, 1),
+            **self._event_actor_meta(agent),
+            **context,
+        }))
         while self._running:
             try:
                 def call_mcp_tool(name: str, args: dict) -> str:
@@ -1149,6 +1239,13 @@ class Orchestrator:
 
     def _record_turn_usage(self, agent: AgentBase, phase: str = "unknown"):
         self.run_token_total += agent.last_usage.total_tokens
+        provider_key = agent.config.base_id or agent.config.id or agent.name
+        self._provider_turn_peak[provider_key] = max(
+            self._provider_turn_peak.get(provider_key, 0),
+            agent.last_usage.total_tokens,
+        )
+        if self.store and hasattr(self.store, "record_provider_turn_peak"):
+            self.store.record_provider_turn_peak(provider_key, agent.last_usage.total_tokens)
         bucket = self.phase_usage.setdefault(phase, {"tokens": 0, "cost_usd": 0.0, "turns": 0})
         bucket["tokens"] += agent.last_usage.total_tokens
         bucket["cost_usd"] += agent._cost(agent.last_usage)
@@ -1211,14 +1308,12 @@ class Orchestrator:
         return context
 
     def _agent_context(self, agent: AgentBase) -> str:
-        # CONTEXT.md carries cross-domain memory. Specialists receive at most two
-        # authoritative domain artifacts to avoid repeating the whole workspace.
-        domain_roles = [role for role in self._role_context_needs(agent.name) if role != "questions"][:2]
-        roles = ["context"] + domain_roles
-        if self._should_force_full_context(agent.name):
-            context = self.ws.scoped_context(roles)
-        else:
-            context = self.ws.changed_context(agent.name, roles)
+        design_keywords, plan_keywords = SPECIALIST_SECTION_KEYWORDS.get(
+            agent.name.lower(),
+            (["architecture", "requirements", "reliability"], ["requirements", "phases", "testing"]),
+        )
+        max_chars = int(agent.config.extra.get("specialist_context_max_chars", 12000) or 12000)
+        context = self.ws.specialist_context(design_keywords, plan_keywords, max_chars=max_chars)
         self._remember_context_delivery(agent.name)
         return context
 

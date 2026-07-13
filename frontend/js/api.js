@@ -389,8 +389,10 @@ async function updateDesignCockpit() {
 }
 
 let activeEventSource = null;
+let seenEventIds = new Set();
 
-function connectSSE() {
+function connectSSE(resetHistory = false) {
+  if (resetHistory) seenEventIds = new Set();
   if (activeEventSource) {
     activeEventSource.close();
     activeEventSource = null;
@@ -401,6 +403,9 @@ function connectSSE() {
   activeEventSource = es;
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
+    const eventId = String(ev.event_id || e.lastEventId || '');
+    if (eventId && seenEventIds.has(eventId)) return;
+    if (eventId) seenEventIds.add(eventId);
     handleEvent(ev);
   };
   // EventSource reconnects itself. Creating another instance here multiplies
@@ -414,7 +419,10 @@ function handleEvent(ev) {
 
   // Update status
   if (ev.kind === 'phase') {
-    if (ev.data.status === 'waiting_for_continuation' || ev.data.status === 'waiting_for_approval' || ev.data.status === 'budget_exhausted') {
+    if (ev.data.status === 'stopped') {
+      awaitingDecisionInput = false;
+      updateStatus('idle');
+    } else if (ev.data.status === 'waiting_for_continuation' || ev.data.status === 'waiting_for_approval' || ev.data.status === 'budget_exhausted') {
       awaitingDecisionInput = ev.data.status === 'waiting_for_approval';
       updateStatus('paused');
       if (ev.data.status === 'waiting_for_approval') {
@@ -489,12 +497,19 @@ function appendFeed(ev) {
     case 'phase':
       if (ev.data.status === 'stopped') {
         document.querySelectorAll('.feed-item.retry').forEach(item => item.classList.add('cancelled'));
+        document.querySelectorAll('.feed-item.turn_start:not(.completed)').forEach(item => {
+          item.classList.add('completed', 'cancelled');
+          const pendingSummary = item.querySelector('.feed-summary');
+          if (pendingSummary) pendingSummary.textContent = 'Agent turn cancelled when the run was stopped.';
+        });
         summary = ev.data.message || 'Run stopped. Scheduled retries were cancelled.';
         kindLabel = 'stopped';
         break;
       }
       if (ev.data.status === 'budget_exhausted') {
-        summary = `Run token budget reached (${Number(ev.data.run_total_tokens || 0).toLocaleString()} of ${Number(ev.data.run_max_tokens || 0).toLocaleString()}). Increase the limit or stop the run.`;
+        summary = ev.data.projected_turn_tokens
+          ? `Paused before the next model call. It may need about ${Number(ev.data.projected_turn_tokens || 0).toLocaleString()} tokens, with ${Math.max(0, Number(ev.data.run_max_tokens || 0) - Number(ev.data.run_total_tokens || 0)).toLocaleString()} remaining. Increase the project limit or stop the run.`
+          : `Run token budget reached (${Number(ev.data.run_total_tokens || 0).toLocaleString()} of ${Number(ev.data.run_max_tokens || 0).toLocaleString()}). Increase the limit or stop the run.`;
         kindLabel = 'token limit';
         break;
       }
@@ -508,6 +523,16 @@ function appendFeed(ev) {
       break;
     }
     case 'turn_end': {
+      const pendingTurn = ev.data.turn_id
+        ? feed.querySelector(`.feed-item.turn_start[data-turn-id="${CSS.escape(String(ev.data.turn_id))}"]`)
+        : null;
+      if (pendingTurn) {
+        pendingTurn.classList.add('completed');
+        const startedAt = Number(pendingTurn.dataset.startedAt || 0);
+        const elapsed = startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000)) : 0;
+        const pendingSummary = pendingTurn.querySelector('.feed-summary');
+        if (pendingSummary) pendingSummary.textContent = elapsed ? `Model responded in ${formatDuration(elapsed)}.` : 'Model responded.';
+      }
       const u = ev.data.usage || {};
       detail = ev.data.response || '';
       summary = conversationalAgentSummary(detail, ev.agent);
@@ -577,7 +602,7 @@ function appendFeed(ev) {
           <span class="feed-ts">${ts}</span>
         </div>
         <div class="feed-text" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
-          <span style="flex: 1">${escHtml(summary)}</span>
+          <span class="feed-summary" style="flex: 1">${escHtml(summary)}</span>
           ${detail ? `<button class="btn btn-secondary" style="padding: 2px 7px; font-size: 11px; font-weight: bold; line-height: 1; border-radius: 4px;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
         </div>
         ${detail ? `<div class="feed-detail markdown-body" style="display: ${ev.data.verdict === 'PAUSE_FOR_INPUT' ? 'block' : 'none'}; margin-top: 8px;">${parseMarkdown(detail)}</div>` : ''}
@@ -585,11 +610,27 @@ function appendFeed(ev) {
     </div>
   `;
 
+  if (ev.kind === 'turn_start') {
+    div.dataset.turnId = String(ev.data.turn_id || '');
+    div.dataset.startedAt = String(ev.timestamp ? new Date(ev.timestamp).getTime() : Date.now());
+  }
+
   const wasNearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   feed.appendChild(div);
   if (wasNearBottom) feed.scrollTop = feed.scrollHeight;
   if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
 }
+
+setInterval(() => {
+  document.querySelectorAll('.feed-item.turn_start:not(.completed)').forEach(item => {
+    const startedAt = Number(item.dataset.startedAt || 0);
+    if (!startedAt) return;
+    const elapsed = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    if (elapsed < 15) return;
+    const summary = item.querySelector('.feed-summary');
+    if (summary) summary.textContent = `Still waiting for the model · ${formatDuration(elapsed)} elapsed. You can stop the run if it appears stuck.`;
+  });
+}, 1000);
 
 function friendlyProviderError(rawError) {
   const error = String(rawError || '').toLowerCase();

@@ -295,6 +295,49 @@ class ProjectStore:
         with self._lock, self._db:
             self._db.execute("DELETE FROM key_value WHERE key = ?", ("run_state",))
 
+    def load_provider_turn_peaks(self) -> dict[str, int]:
+        """Load durable per-provider turn sizes, deriving legacy values from stored events once."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM key_value WHERE key = ?", ("provider_turn_peaks",)
+            ).fetchone()
+            if row:
+                return {str(key): int(value) for key, value in json.loads(row["value"]).items()}
+            event_rows = self._db.execute(
+                "SELECT data_json FROM events WHERE kind = 'turn_end'"
+            ).fetchall()
+        peaks: dict[str, int] = {}
+        for event_row in event_rows:
+            try:
+                data = json.loads(event_row["data_json"])
+                provider = str(data.get("provider_id") or "")
+                usage = data.get("usage", {})
+                total = int(usage.get("total_tokens", 0) or 0)
+                if provider and total > 0:
+                    peaks[provider] = max(peaks.get(provider, 0), total)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        if peaks:
+            with self._lock, self._db:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
+                    ("provider_turn_peaks", json.dumps(peaks)),
+                )
+        return peaks
+
+    def record_provider_turn_peak(self, provider_id: str, total_tokens: int) -> None:
+        if not provider_id or total_tokens <= 0:
+            return
+        peaks = self.load_provider_turn_peaks()
+        if total_tokens <= peaks.get(provider_id, 0):
+            return
+        peaks[provider_id] = int(total_tokens)
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
+                ("provider_turn_peaks", json.dumps(peaks)),
+            )
+
     def close(self):
         with self._lock:
             if not self._closed:
