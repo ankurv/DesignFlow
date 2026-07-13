@@ -480,6 +480,12 @@ function appendFeed(ev) {
 
   switch(ev.kind) {
     case 'phase':
+      if (ev.data.status === 'stopped') {
+        document.querySelectorAll('.feed-item.retry').forEach(item => item.classList.add('cancelled'));
+        summary = ev.data.message || 'Run stopped. Scheduled retries were cancelled.';
+        kindLabel = 'stopped';
+        break;
+      }
       if (ev.data.status === 'budget_exhausted') {
         summary = `Run token budget reached (${Number(ev.data.run_total_tokens || 0).toLocaleString()} of ${Number(ev.data.run_max_tokens || 0).toLocaleString()}). Increase the limit or stop the run.`;
         kindLabel = 'token limit';
@@ -806,7 +812,12 @@ async function resetRun() {
 }
 
 async function stopRun() {
-  await fetch('/run/stop', {method:'POST'});
+  const response = await fetch('/run/stop', {method:'POST'});
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    notify(error.detail || 'Could not stop the run.', true);
+    return;
+  }
   paused = false;
   updateStatus('idle');
 }

@@ -1050,6 +1050,56 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(state.orchestrator)
         self.assertFalse(state.awaiting_input)
 
+    def test_runtime_diagnostics_expose_invariants_without_secrets(self):
+        import backend.server
+
+        state = backend.server.AppState()
+        state.status = "running"
+        state.awaiting_input = True
+        diagnostic = backend.server.runtime_diagnostic(state, "/tmp/example")
+
+        self.assertIn("active runtime has no run id", diagnostic["invariant_errors"])
+        self.assertIn("active runtime has no orchestrator", diagnostic["invariant_errors"])
+        self.assertIn("active runtime has no live task", diagnostic["invariant_errors"])
+        self.assertIn("awaiting input outside paused state", diagnostic["invariant_errors"])
+        self.assertNotIn("api_key", json.dumps(diagnostic))
+
+    def test_invalid_pause_and_resume_return_clear_conflicts(self):
+        import backend.server
+
+        state = backend.server.AppState()
+        with self.assertRaises(backend.server.HTTPException) as pause_error:
+            backend.server.pause_run(state)
+        self.assertEqual(pause_error.exception.status_code, 409)
+        with self.assertRaises(backend.server.HTTPException) as resume_error:
+            backend.server.resume_run(None, state)
+        self.assertEqual(resume_error.exception.status_code, 409)
+
+    def test_stop_cancels_retry_and_emits_terminal_event(self):
+        import backend.server
+
+        state = backend.server.AppState()
+        agent = StatefulFake(AgentConfig(name="waiting", kind="openai"))
+        agent.mark_waiting("2099-01-01T00:00:00Z", "rate limited")
+        state.orchestrator = SimpleNamespace(
+            agents=[agent], stop=lambda: None, resume=lambda: None,
+        )
+        state.status = "running"
+        state.run_id = "run-1"
+
+        async def exercise():
+            state.run_task = asyncio.create_task(asyncio.sleep(3600))
+            return await backend.server.stop_run(state)
+
+        response = asyncio.run(exercise())
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(state.status, "idle")
+        self.assertEqual(agent.status.value, "idle")
+        self.assertEqual(agent.retry_at, "")
+        self.assertEqual(state.event_log[-1]["data"]["status"], "stopped")
+        self.assertIn("retries were cancelled", state.event_log[-1]["data"]["message"])
+
     def test_expired_last_tab_lease_releases_project_runtime(self):
         import backend.server
 

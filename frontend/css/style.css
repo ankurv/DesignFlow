@@ -309,6 +309,7 @@
   .feed-item.error  { border-color: var(--red); background: rgba(239,68,68,0.04); }
   .feed-item.steer  { border-color: var(--yellow); background: rgba(245,158,11,0.03); }
   .feed-item.retry  { border-color: var(--yellow); background: rgba(245,158,11,0.04); }
+  .feed-item.retry.cancelled { opacity: 0.55; border-color: var(--border); background: rgba(255,255,255,0.02); text-decoration: line-through; }
   
   .feed-row { display: flex; align-items: flex-start; gap: 12px; }
   .feed-avatar {

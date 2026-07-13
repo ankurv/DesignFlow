@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agents.base import AgentConfig
+from .agents.base import AgentConfig, AgentStatus
 from .agents.providers import AGENT_KINDS, create_agent, discover_models
 from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
@@ -84,6 +84,7 @@ class AppState:
         self.status = "idle"
         self.awaiting_input = False
         self.current_idea = ""
+        self.last_transition = "initialized"
 
     def open_project(self, path: str) -> Workspace:
         if self.status in {"running", "paused", "needs_attention"}:
@@ -102,6 +103,7 @@ class AppState:
         self.status = "idle"
         self.awaiting_input = False
         self.current_idea = workspace.brief()
+        self.last_transition = "project_opened"
         return workspace
 
     def persist_agents(self):
@@ -413,7 +415,45 @@ def reconcile_runtime_status(state: AppState) -> str:
         state.run_task = None
         state.orchestrator = None
         state.run_id = None
+        state.last_transition = "reconciled_stale_runtime_to_idle"
     return state.status
+
+
+def runtime_invariant_errors(state: AppState) -> list[str]:
+    errors = []
+    active = state.status in {"running", "paused", "needs_attention"}
+    live_task = bool(state.run_task and not state.run_task.done())
+    if active and not state.run_id:
+        errors.append("active runtime has no run id")
+    if active and not state.orchestrator:
+        errors.append("active runtime has no orchestrator")
+    if active and not live_task:
+        errors.append("active runtime has no live task")
+    if state.awaiting_input and state.status != "paused":
+        errors.append("awaiting input outside paused state")
+    if state.status == "idle" and live_task:
+        errors.append("idle runtime still has a live task")
+    return errors
+
+
+def runtime_diagnostic(state: AppState, project_path: str = "") -> dict:
+    task_state = "none"
+    if state.run_task:
+        task_state = "done" if state.run_task.done() else "live"
+    failed = state.orchestrator.failed_turn if state.orchestrator else None
+    return {
+        "project_path": project_path or (state.workspace.path if state.workspace else ""),
+        "status": state.status,
+        "run_id": state.run_id,
+        "task": task_state,
+        "orchestrator": bool(state.orchestrator),
+        "phase": state.orchestrator.phase.value if state.orchestrator else "",
+        "awaiting_input": state.awaiting_input,
+        "attached_sessions": sum(1 for path in session_projects.values() if path == project_path),
+        "failed_agent": (failed or {}).get("agent", ""),
+        "last_transition": state.last_transition,
+        "invariant_errors": runtime_invariant_errors(state),
+    }
 
 
 @app.get("/project")
@@ -752,6 +792,7 @@ async def start_run(
     state.run_id = str(uuid.uuid4())[:8]
     state.current_idea = idea
     state.status = "running"
+    state.last_transition = "run_started"
     state.awaiting_input = False
     if state.store:
         state.store.start_run(state.run_id, idea)
@@ -832,10 +873,13 @@ def reset_run(state: AppState = Depends(get_state)):
 def pause_run(state: AppState = Depends(get_state)):
     if state.status == "needs_attention":
         raise HTTPException(409, "Fix the failed agent and retry its turn")
-    if state.orchestrator:
-        state.orchestrator.pause()
-        state.status = "paused"
-        state.awaiting_input = False
+    reconcile_runtime_status(state)
+    if state.status != "running" or not state.orchestrator:
+        raise HTTPException(409, "There is no running workflow to pause")
+    state.orchestrator.pause()
+    state.status = "paused"
+    state.last_transition = "paused_by_user"
+    state.awaiting_input = False
     return {"ok": True, "status": state.status}
 
 
@@ -844,14 +888,20 @@ class ResumeBody(BaseModel):
 
 @app.post("/run/resume")
 def resume_run(body: Optional[ResumeBody] = None, state: AppState = Depends(get_state)):
+    reconcile_runtime_status(state)
     if state.orchestrator and state.orchestrator.failed_turn:
         raise HTTPException(409, "Use Retry failed turn after fixing the agent")
-    if state.orchestrator:
-        if body and body.max_tokens is not None:
-            state.orchestrator.max_tokens = body.max_tokens
-        state.orchestrator.resume()
-        state.status = "running"
-        state.awaiting_input = False
+    if state.status == "running" and state.orchestrator and body and body.max_tokens is not None:
+        state.orchestrator.max_tokens = body.max_tokens
+        return {"ok": True, "status": state.status}
+    if state.status != "paused" or not state.orchestrator:
+        raise HTTPException(409, "There is no paused workflow to resume")
+    if body and body.max_tokens is not None:
+        state.orchestrator.max_tokens = body.max_tokens
+    state.orchestrator.resume()
+    state.status = "running"
+    state.last_transition = "resumed_by_user"
+    state.awaiting_input = False
     return {"ok": True, "status": state.status}
 
 
@@ -861,6 +911,7 @@ def retry_failed_turn(state: AppState = Depends(get_state)):
         raise HTTPException(400, "There is no failed turn to retry")
     state.orchestrator.retry_failed_turn()
     state.status = "running"
+    state.last_transition = "failed_turn_retry_requested"
     state.awaiting_input = False
     failed = state.orchestrator.failed_turn or {}
     return {"ok": True, "status": state.status, "turn": {
@@ -871,13 +922,19 @@ def retry_failed_turn(state: AppState = Depends(get_state)):
 
 
 @app.post("/run/stop")
-def stop_run(state: AppState = Depends(get_state)):
-    if state.run_task:
+async def stop_run(state: AppState = Depends(get_state)):
+    if state.run_task and not state.run_task.done():
         state.run_task.cancel()
+        await asyncio.gather(state.run_task, return_exceptions=True)
 
     if state.orchestrator:
         state.orchestrator.stop()
         state.orchestrator.resume()
+        for agent in state.orchestrator.agents:
+            if agent.status == AgentStatus.WAITING:
+                agent.status = AgentStatus.IDLE
+                agent.retry_at = ""
+                agent.retry_reason = ""
         if state.store and state.run_id:
             state.store.finish_run(
                 state.run_id, "stopped",
@@ -885,7 +942,11 @@ def stop_run(state: AppState = Depends(get_state)):
             )
             state.store.clear_run_state()
     state.status = "idle"
+    state.last_transition = "stopped_by_user"
     state.awaiting_input = False
+    broadcast(Event(kind=EventKind.PHASE, data={
+        "phase": "run", "status": "stopped", "message": "Run stopped. Scheduled retries were cancelled."
+    }), state)
     return {"ok": True}
 
 
@@ -895,10 +956,23 @@ class SteerBody(BaseModel):
 
 @app.post("/run/steer")
 async def steer_run(body: SteerBody, state: AppState = Depends(get_state)):
-    if not state.orchestrator:
-        raise HTTPException(400, "No active run")
+    reconcile_runtime_status(state)
+    if state.status not in {"running", "paused", "needs_attention"} or not state.orchestrator:
+        raise HTTPException(409, "There is no active workflow to steer")
     await state.orchestrator.steer(body.message)
     return {"ok": True}
+
+
+@app.get("/admin/runtime-diagnostics")
+def runtime_diagnostics(session: Session = Depends(get_session)):
+    if session.role != "admin":
+        raise HTTPException(403, "Admins only")
+    with runtime_registry_lock:
+        diagnostics = []
+        for project_path, state in app_states.items():
+            reconcile_runtime_status(state)
+            diagnostics.append(runtime_diagnostic(state, project_path))
+    return {"runtimes": diagnostics}
 
 
 @app.get("/run/status")
