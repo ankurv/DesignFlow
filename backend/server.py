@@ -317,12 +317,13 @@ class AgentConfigIn(BaseModel):
     cli_command: str = ""
     system_prompt: str = ""
     max_history_turns: int = 20
+    is_paused: bool = False
     extra: dict = Field(default_factory=dict)
 
 
 def to_agent_config(config: dict, state: AppState = None) -> AgentConfig:
     return AgentConfig(
-        id=config.get("id", ""), name=config["name"], kind=config["kind"],
+        id=config.get("id", ""), base_id=config.get("base_id", ""), name=config["name"], kind=config["kind"],
         role=config.get("role", ""), model=config.get("model", ""),
         api_key=config.get("api_key", ""),
         base_url=config.get("base_url", ""), cli_command=config.get("cli_command", ""),
@@ -356,7 +357,7 @@ def live_agents_all_sessions(agent_id: str):
     for s in app_states.values():
         if s.orchestrator and s.status in {"running", "paused", "needs_attention"}:
             for agent in s.orchestrator.agents:
-                if agent.config.id == agent_id:
+                if agent.config.id == agent_id or agent.config.base_id == agent_id:
                     found.append((s, agent))
     return found
 
@@ -382,6 +383,33 @@ def add_agent(body: AgentConfigIn, state: AppState = Depends(get_state)):
     return {"ok": True, "agent": config}
 
 
+def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
+    available = [c for c in s.merged_configs if not c.get("is_paused") and c["id"] != agent_id]
+    if not available:
+        raise HTTPException(400, "Cannot pause the only active agent. Please unpause another agent first.")
+    # Prefer the least-used remaining provider so several affected specialists do
+    # not all collapse onto the same fallback model.
+    assignments = {config["id"]: 0 for config in available}
+    for runtime_agent in s.orchestrator.agents:
+        base_id = runtime_agent.config.base_id or runtime_agent.config.id
+        if base_id in assignments and runtime_agent is not active:
+            assignments[base_id] += 1
+    new_base = min(available, key=lambda config: (assignments[config["id"]], config["id"]))
+    expert = new_base.copy()
+    expert["id"] = active.config.id
+    expert["base_id"] = new_base.get("id", "")
+    expert["name"] = active.name
+    expert["role"] = active.role
+    expert["system_prompt"] = active.config.system_prompt
+
+    new_agent = create_agent(to_agent_config(expert, s))
+    active.transfer_runtime_state_to(new_agent)
+
+    for i, a in enumerate(s.orchestrator.agents):
+        if a is active:
+            s.orchestrator.agents[i] = new_agent
+            break
+
 @app.put("/agents/{agent_id}")
 def update_agent(agent_id: str, body: AgentConfigIn, state: AppState = Depends(get_state)):
     for index, current in enumerate(state.configs):
@@ -392,15 +420,19 @@ def update_agent(agent_id: str, body: AgentConfigIn, state: AppState = Depends(g
             if not updated.get("api_key") or updated.get("api_key") == "****":
                 updated["api_key"] = current.get("api_key", "")
 
-            for s, active in live_agents_all_sessions(agent_id):
-                if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
-                    raise HTTPException(
-                        400, "An active agent's name and kind cannot change; stop the run first"
-                    )
-                try:
-                    active.reconfigure(to_agent_config(updated, None))
-                except Exception as exc:
-                    raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
+            if updated.get("is_paused") and not current.get("is_paused"):
+                for s, active in live_agents_all_sessions(agent_id):
+                    _reassign_agent_if_paused(s, active, agent_id)
+            else:
+                for s, active in live_agents_all_sessions(agent_id):
+                    if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
+                        raise HTTPException(
+                            400, "An active agent's name and kind cannot change; stop the run first"
+                        )
+                    try:
+                        active.reconfigure(to_agent_config(updated, None))
+                    except Exception as exc:
+                        raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
             state.configs[index] = updated
             state.persist_agents()
             return {"ok": True, "agent": updated}
@@ -462,15 +494,19 @@ def update_global_agent(agent_id: str, body: AgentConfigIn, session: Session = D
             if not updated.get("api_key") or updated.get("api_key") == "****":
                 updated["api_key"] = current.get("api_key", "")
 
-            for s, active in live_agents_all_sessions(agent_id):
-                if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
-                    raise HTTPException(
-                        400, "An active agent's name and kind cannot change; stop the run first"
-                    )
-                try:
-                    active.reconfigure(to_agent_config(updated, None))
-                except Exception as exc:
-                    raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
+            if updated.get("is_paused") and not current.get("is_paused"):
+                for s, active in live_agents_all_sessions(agent_id):
+                    _reassign_agent_if_paused(s, active, agent_id)
+            else:
+                for s, active in live_agents_all_sessions(agent_id):
+                    if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
+                        raise HTTPException(
+                            400, "An active agent's name and kind cannot change; stop the run first"
+                        )
+                    try:
+                        active.reconfigure(to_agent_config(updated, None))
+                    except Exception as exc:
+                        raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
 
             configs[index] = updated
             save_global_agents(configs)
@@ -539,7 +575,9 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
     agents = []
     try:
         from .orchestrator import SPECIALIZED_PERSONAS
-        base_configs = state.merged_configs
+        base_configs = [c for c in state.merged_configs if not c.get("is_paused")]
+        if not base_configs:
+            raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
 
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
         for i, (role, system_prompt) in enumerate(SPECIALIZED_PERSONAS.items()):
@@ -547,6 +585,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
             expert = base_config.copy()
             expert["model"] = model_for_virtual_agent(base_config, i, len(base_configs))
             expert["id"] = f"{base_config.get('id', 'base')}_{role}"
+            expert["base_id"] = base_config.get("id", "")
             expert["name"] = role
             expert["role"] = role
             expert["system_prompt"] = system_prompt
@@ -554,7 +593,7 @@ async def start_run(body: StartBody, state: AppState = Depends(get_state)):
 
         # 2. Also include any custom agents the user explicitly defined
         for config in state.merged_configs:
-            if config["name"] not in SPECIALIZED_PERSONAS:
+            if config["name"] not in SPECIALIZED_PERSONAS and not config.get("is_paused"):
                 agents.append(create_agent(to_agent_config(config, state)))
     except Exception as exc:
         raise HTTPException(400, f"Could not initialize agent team: {exc}") from exc

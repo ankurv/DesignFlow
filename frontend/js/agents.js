@@ -77,6 +77,9 @@ function renderSingleCard(cfg, idx, isGlobal) {
     
     let actionButtons = '';
     actionButtons += `<button class="agent-health-refresh" onclick="refreshAgentHealth('${uid}', ${isGlobal}, ${idx})" title="Check health" aria-label="Check ${escAttr(cfg.name || 'agent')} health">↻</button>`;
+    const isPaused = cfg.is_paused;
+    const pauseBadge = isPaused ? '<span class="agent-scope-badge danger" style="background:var(--red);color:white;border-color:var(--red);">Paused</span>' : '';
+
     if (isGlobal) {
       if (projectOpen) {
         actionButtons += `
@@ -89,11 +92,13 @@ function renderSingleCard(cfg, idx, isGlobal) {
         `;
       }
       actionButtons += `
+        <button class="btn ${isPaused ? 'btn-primary' : 'btn-secondary'}" onclick="togglePauseAgent('${cfg.id}', true, ${idx})" style="padding:4px 10px;font-size:11px">${isPaused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}', true)" style="padding:4px 10px;font-size:11px">Delete</button>
       `;
     } else {
       actionButtons += `
         <button class="btn btn-secondary" onclick="startEditAgent('${uid}', false, ${idx})" style="padding:4px 10px;font-size:11px">Edit</button>
+        <button class="btn ${isPaused ? 'btn-primary' : 'btn-secondary'}" onclick="togglePauseAgent('${cfg.id}', false, ${idx})" style="padding:4px 10px;font-size:11px">${isPaused ? 'Resume' : 'Pause'}</button>
         <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}', false)" style="padding:4px 10px;font-size:11px">Delete</button>
       `;
     }
@@ -101,9 +106,10 @@ function renderSingleCard(cfg, idx, isGlobal) {
     const badge = isGlobal 
       ? '<span class="agent-scope-badge global">Global Team</span>'
       : '<span class="agent-scope-badge project">Project Override</span>';
+    const badgeHTML = pauseBadge + badge;
 
-    const statusInfo = agentHealthStatus[uid] || { status: 'testing', error: '' };
-    if (!agentHealthStatus[uid]) {
+    const statusInfo = agentHealthStatus[uid] || { status: isPaused ? 'paused' : 'testing', error: '' };
+    if (!agentHealthStatus[uid] && !isPaused) {
       agentHealthStatus[uid] = { status: 'testing', error: '' };
       setTimeout(() => checkAgentHealth(cfg, uid), 50);
     }
@@ -127,7 +133,7 @@ function renderSingleCard(cfg, idx, isGlobal) {
             <div class="agent-card-title-row">
               <span class="agent-card-title">${escHtml(cfg.name || '(New Agent)')}</span>
               <span class="health-dot ${statusInfo.status}" title="${escAttr(hoverTitle)}" style="width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle;margin-left:4px"></span>
-              ${badge}
+              ${badgeHTML}
               ${isCoordinator ? '<span style="font-size:11px;color:var(--yellow);font-weight:600">👑 Coordinator</span>' : ''}
             </div>
             <div class="agent-card-subtitle">
@@ -510,12 +516,12 @@ async function deleteAgent(agentId, isGlobal) {
 function overrideForProject(agentId) {
   const source = globalAgentConfigs.find(a => a.id === agentId);
   if (!source) return;
-  
+
   const tempId = 'new-' + Date.now();
   const clone = JSON.parse(JSON.stringify(source));
   clone.id = tempId;
   if (!clone.extra) clone.extra = {};
-  
+
   projectAgentConfigs.push(clone);
   editingAgentId = `project-${tempId}`;
   editingAgentData = clone;
@@ -553,7 +559,7 @@ function addNewAgentCard() {
     notify('Please save or cancel the current new agent form first.', true);
     return;
   }
-  
+
   const tempId = 'new-' + Date.now();
   const newAgent = {
     id: tempId,
@@ -667,4 +673,34 @@ async function deleteMCPServer(id) {
   } else {
     notify('Failed to delete MCP server', true);
   }
+}
+
+async function togglePauseAgent(id, isGlobal, idx) {
+  const configs = isGlobal ? globalAgentConfigs : projectAgentConfigs;
+  const cfg = configs[idx];
+  if (!cfg || cfg.id !== id) return;
+
+  const originalPause = cfg.is_paused || false;
+  cfg.is_paused = !originalPause;
+
+  try {
+    const url = isGlobal ? `/agents/global/${id}` : `/agents/${id}`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      cfg.is_paused = originalPause; // revert
+      notify(data.detail || "Failed to toggle agent pause state", true);
+    } else {
+      notify(cfg.is_paused ? 'Agent paused; its active specialists will use available fallback models' : 'Agent resumed');
+    }
+  } catch (err) {
+    cfg.is_paused = originalPause;
+    notify("Error: " + err.message, true);
+  }
+
+  loadAgentConfig();
 }

@@ -411,6 +411,52 @@ class SessionTests(unittest.TestCase):
             for event in events
         ))
 
+    def test_failed_turn_uses_user_substituted_agent_on_retry(self):
+        failed = RepairableFake(
+            AgentConfig(id="specialist-1", base_id="provider-a", name="security", kind="openai", model="broken"),
+        )
+        replacement = RepairableFake(
+            AgentConfig(id="specialist-1", base_id="provider-b", name="security", kind="groq", model="fixed"),
+            replies=["fallback response"],
+        )
+        orchestrator = Orchestrator([failed], Workspace(tempfile.mkdtemp()), require_approval=False)
+        orchestrator._running = True
+
+        async def exercise():
+            task = asyncio.create_task(orchestrator._send_agent(
+                failed, "same failed turn", "turn-0001", {"phase": "peer_review"},
+            ))
+            while not orchestrator.failed_turn:
+                await asyncio.sleep(0)
+            failed.transfer_runtime_state_to(replacement)
+            orchestrator.agents[0] = replacement
+            orchestrator.retry_failed_turn()
+            return await task
+
+        self.assertEqual(asyncio.run(exercise()), "fallback response")
+        self.assertEqual(replacement.config.base_id, "provider-b")
+        self.assertEqual(len(replacement.history), 2)
+        self.assertEqual(orchestrator._turn_attempts["turn-0001"], 2)
+
+    def test_provider_substitution_preserves_usage_and_history(self):
+        original = StatefulFake(
+            AgentConfig(id="specialist-1", base_id="provider-a", name="architect", kind="openai"),
+            replies=["first response"],
+        )
+        original.send("first prompt")
+        original.mark_error("quota exhausted")
+        replacement = StatefulFake(
+            AgentConfig(id="specialist-1", base_id="provider-b", name="architect", kind="groq"),
+        )
+
+        original.transfer_runtime_state_to(replacement)
+
+        self.assertEqual(replacement.history, original.history)
+        self.assertEqual(replacement.total_tokens, original.total_tokens)
+        self.assertEqual(replacement.total_cost_usd, original.total_cost_usd)
+        self.assertEqual(replacement.error_message, "quota exhausted")
+        self.assertEqual(replacement.state_dict()["base_id"], "provider-b")
+
     def test_workspace_writes_into_project_and_reads_designflow_brief(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)

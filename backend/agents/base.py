@@ -58,6 +58,7 @@ class AgentConfig:
     name: str
     kind: str
     id: str = ""
+    base_id: str = ""
     role: str = ""
     model: str = ""
     api_key: str = ""
@@ -246,6 +247,7 @@ class AgentBase(ABC):
     def state_dict(self) -> dict:
         return {
             "id": self.config.id,
+            "base_id": self.config.base_id,
             "name": self.name,
             "kind": self.config.kind,
             "role": self.config.role,
@@ -259,6 +261,19 @@ class AgentBase(ABC):
             "error_message": self.error_message,
             **self.usage_dict(),
         }
+
+    def transfer_runtime_state_to(self, replacement: "AgentBase") -> None:
+        """Move logical specialist state to a replacement provider instance."""
+        replacement.history = list(self.history)
+        replacement.total_input_tokens = self.total_input_tokens
+        replacement.total_cached_input_tokens = self.total_cached_input_tokens
+        replacement.total_output_tokens = self.total_output_tokens
+        replacement.total_cost_usd = self.total_cost_usd
+        replacement.last_usage = self.last_usage
+        replacement.status = self.status
+        replacement.retry_at = self.retry_at
+        replacement.retry_reason = self.retry_reason
+        replacement.error_message = self.error_message
 
     def provider_session_id(self) -> str:
         return ""

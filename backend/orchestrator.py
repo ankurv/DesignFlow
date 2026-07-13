@@ -997,6 +997,13 @@ class Orchestrator:
                     await self._recovery_event.wait()
                     if not self._running:
                         raise asyncio.CancelledError()
+                    # A user may have paused the failed provider and substituted
+                    # this logical specialist with another model. Resolve it only
+                    # after explicit recovery, at this safe turn boundary.
+                    agent = next(
+                        (candidate for candidate in self.agents if candidate.config.id == self._failed_turn["agent_id"]),
+                        agent,
+                    )
                     attempt += 1
                     self._turn_attempts[turn_id] = attempt
                     agent.error_message = ""
