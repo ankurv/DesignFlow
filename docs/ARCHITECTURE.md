@@ -47,30 +47,24 @@ Browser sessions identify people and select a project. They do not own the orche
 ## Planning workflow
 
 ```mermaid
-stateDiagram-v2
-    direction TB
-    
+flowchart TD
     %% Entry Point
-    [*] --> Init: run()
-    Init --> DiscoveryPhase: Start Loop (max 30 steps)
+    Init([run]) --> DiscoveryPhase
 
-    %% Discovery
-    state "Discovery Phase" as DiscoveryPhase {
+    subgraph DiscoveryPhase["Discovery Phase"]
         direction LR
         D1[Check Context] --> D2{Context Missing?}
         D2 -->|Yes| D3[Write Clarifying Question to QUESTIONS.md]
         D2 -->|No| D4[Skip to Drafting]
-    }
+    end
     
-    %% Drafting
-    state "Drafting Phase" as DraftingPhase {
+    subgraph DraftingPhase["Drafting Phase"]
         direction LR
         Dr1[Find Strongest Model] --> Dr2[Coordinator Drafts Plan & Design]
         Dr2 --> Dr3[Update DESIGN.md & PLAN.md]
-    }
+    end
 
-    %% Peer Review
-    state "Peer Review Phase" as PeerReviewPhase {
+    subgraph PeerReviewPhase["Peer Review Phase"]
         direction LR
         P1[select_peer_review_agents] --> P2[Select Relevant Specialists by Keywords]
         P2 --> P3{More Peers?}
@@ -78,42 +72,38 @@ stateDiagram-v2
         P4 --> P5[Log to LOGBOOK & Add Context Event]
         P5 --> P3
         P3 -->|No| P6[Done with reviews]
-    }
+    end
 
-    %% Refinement
-    state "Refinement Phase" as RefinementPhase {
+    subgraph RefinementPhase["Refinement Phase"]
         direction LR
         R1[Coordinator Resolves Critiques] --> R2[Update Artifacts]
-        R2 --> R3{coordinator_completion_errors()}
-        R3 -->|Errors found < 3 times| R4[Inject deterministic quality_failure event]
+        R2 --> R3{coordinator_completion_errors}
+        R3 -->|Errors < 3 times| R4[Inject deterministic quality_failure event]
         R3 -->|Material Decision Needed| R5[Write Checkpoint to QUESTIONS.md]
         R3 -->|Pass| R6[Done]
-    }
+    end
 
-    %% Approval
-    state "Approval Phase" as ApprovalPhase {
+    subgraph ApprovalPhase["Approval Phase"]
         direction LR
         A1[Pause Run & Wait for UI] --> A2[User Input Received]
         A2 --> A3[Log User Steering Event]
         A3 --> A4[Resume Target Phase]
-    }
+    end
 
     %% Transitions
-    DiscoveryPhase --> DraftingPhase: No questions
-    DiscoveryPhase --> ApprovalPhase: Needs User Input
+    D4 --> DraftingPhase
+    D3 --> ApprovalPhase
     
     DraftingPhase --> PeerReviewPhase
     
     PeerReviewPhase --> RefinementPhase
     
-    RefinementPhase --> RefinementPhase: Retry due to quality errors
-    RefinementPhase --> ApprovalPhase: Decision Checkpoint needed
-    RefinementPhase --> Complete: Clean pass
+    R4 --> RefinementPhase
+    R5 --> ApprovalPhase
+    R6 --> Complete([Baseline Finished])
     
-    ApprovalPhase --> DraftingPhase: (from Discovery)
-    ApprovalPhase --> Complete: (from Refinement)
-    
-    Complete --> [*]: Baseline Finished
+    ApprovalPhase -.->|from Discovery| DraftingPhase
+    ApprovalPhase -.->|from Refinement| Complete
 ```
 
 ### Deeper Dive into the Mechanisms
