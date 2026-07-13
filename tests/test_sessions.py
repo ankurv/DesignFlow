@@ -63,7 +63,7 @@ class RateLimitedFake(StatefulFake):
     def _raw_send(self, messages, system, *args, **kwargs):
         self.attempts += 1
         if self.attempts == 1:
-            raise RuntimeError("429 usage limit reached; retry after 1 second")
+            raise RuntimeError("429 rate limit reached; retry after 1 second")
         return super()._raw_send(messages, system, *args, **kwargs)
 
 
@@ -78,6 +78,11 @@ class RepairableFake(StatefulFake):
         if self.config.model != "fixed":
             raise RuntimeError("invalid model configuration")
         return super()._raw_send(messages, system)
+
+
+class QuotaExhaustedFake(StatefulFake):
+    def _raw_send(self, messages, system, *args, **kwargs):
+        raise RuntimeError("429 insufficient_quota: quota exhausted; retry after 9 hours")
 
 
 VALID_PLAN = """## Requirements
@@ -149,6 +154,8 @@ class SessionTests(unittest.TestCase):
         backend.auth.auth_manager = test_auth_manager
         backend.server.auth_manager = test_auth_manager
         backend.server.app_states.clear()
+        backend.server.session_projects.clear()
+        backend.server.unbound_states.clear()
 
     def tearDown(self):
         for state in self._backend_server.app_states.values():
@@ -156,10 +163,15 @@ class SessionTests(unittest.TestCase):
                 state.orchestrator.stop()
             if getattr(state, "store", None):
                 state.store.close()
+        for state in self._backend_server.unbound_states.values():
+            if getattr(state, "store", None):
+                state.store.close()
         self._backend_auth.USERS_PATH = self._orig_users_path
         self._backend_auth.auth_manager = self._orig_auth_manager
         self._backend_server.auth_manager = self._orig_server_auth_manager
         self._backend_server.app_states.clear()
+        self._backend_server.session_projects.clear()
+        self._backend_server.unbound_states.clear()
         self._auth_tmpdir.cleanup()
 
     def test_stateful_agent_sends_only_new_turn_and_tracks_cost(self):
@@ -284,6 +296,36 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(agent.total_cached_input_tokens, 10)
         self.assertEqual(Path(agent.commands[0][1]), Path(project).resolve())
         self.assertEqual(Path(agent.commands[1][1]), Path(project).resolve())
+
+    def test_codex_cli_normalizes_explicit_cumulative_usage(self):
+        first = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "cumulative-1"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "one"}}),
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10,
+            }}),
+        ])
+        second = "\n".join([
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "two"}}),
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": 160, "cached_input_tokens": 50, "output_tokens": 18,
+            }}),
+        ])
+        agent = FakeCLI(
+            AgentConfig(
+                name="codex", kind="cli", working_directory=tempfile.mkdtemp(),
+                cli_command="codex exec", extra={"cli_usage_mode": "cumulative"},
+            ),
+            [first, second],
+        )
+
+        agent.send("first")
+        agent.send("second")
+
+        self.assertEqual(agent.total_input_tokens, 160)
+        self.assertEqual(agent.total_cached_input_tokens, 50)
+        self.assertEqual(agent.total_output_tokens, 18)
+        self.assertEqual(agent.last_usage.total_tokens, 68)
 
     def test_antigravity_resumes_exact_isolated_conversation(self):
         project = tempfile.mkdtemp()
@@ -410,6 +452,29 @@ class SessionTests(unittest.TestCase):
             event.kind.value == "turn_start" and event.data.get("resumed")
             for event in events
         ))
+
+    def test_quota_exhaustion_waits_for_user_recovery_instead_of_long_retry(self):
+        events = []
+        agent = QuotaExhaustedFake(AgentConfig(id="quota-agent", name="quota", kind="gemini"))
+        orchestrator = Orchestrator(
+            [agent], Workspace(tempfile.mkdtemp()), event_cb=events.append, require_approval=False,
+        )
+        orchestrator._running = True
+
+        async def exercise():
+            task = asyncio.create_task(orchestrator._send_agent(agent, "draft", "turn-0001"))
+            while not orchestrator.failed_turn:
+                await asyncio.sleep(0)
+            self.assertEqual(orchestrator.failed_turn["agent_id"], "quota-agent")
+            orchestrator.stop()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(exercise())
+        self.assertFalse(any(event.kind.value == "retry" for event in events))
+        error = next(event for event in events if event.kind.value == "error")
+        self.assertEqual(error.data["error_code"], "quota_exhausted")
+        self.assertEqual(error.data["error"], "Model quota or provider credits are exhausted.")
 
     def test_failed_turn_uses_user_substituted_agent_on_retry(self):
         failed = RepairableFake(
@@ -860,6 +925,81 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["settings"]["max_tokens"], 123456)
 
+    def test_same_project_is_shared_across_browser_sessions_and_logout_only_detaches(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        first = TestClient(backend.server.app)
+        second = TestClient(backend.server.app)
+        self.assertEqual(first.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(second.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(first.post("/project/open", json={"path": directory}).status_code, 200)
+            self.assertEqual(second.post("/project/open", json={"path": directory}).status_code, 200)
+            canonical = str(Path(directory).resolve())
+
+            self.assertEqual(len(backend.server.app_states), 1)
+            self.assertIs(
+                backend.server.get_state(backend.server.auth_manager.get_session(first.cookies.get("session_id"))),
+                backend.server.get_state(backend.server.auth_manager.get_session(second.cookies.get("session_id"))),
+            )
+            shared_store = backend.server.app_states[canonical].store
+            self.assertEqual(first.post("/auth/logout").status_code, 200)
+            self.assertIs(backend.server.app_states[canonical].store, shared_store)
+            self.assertEqual(second.get("/project").status_code, 200)
+            self.assertTrue(second.get("/project").json()["open"])
+            self.assertEqual(second.post("/auth/logout").status_code, 200)
+            self.assertNotIn(canonical, backend.server.app_states)
+            self.assertTrue(shared_store._closed)
+
+    def test_explicit_tab_session_prevents_one_tab_logout_from_logging_out_another(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        first_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"}).json()
+        second_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"}).json()
+        first_headers = {"X-DesignFlow-Session": first_login["session_id"]}
+        second_headers = {"X-DesignFlow-Session": second_login["session_id"]}
+
+        self.assertEqual(client.post("/auth/logout", headers=first_headers).status_code, 200)
+        self.assertEqual(client.get("/users/me", headers=first_headers).status_code, 401)
+        remaining = client.get("/users/me", headers=second_headers)
+        self.assertEqual(remaining.status_code, 200)
+        self.assertEqual(remaining.json()["username"], "admin")
+
+    def test_switching_away_releases_project_when_session_is_last_collaborator(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self.assertEqual(client.post("/project/open", json={"path": first}).status_code, 200)
+            first_path = str(Path(first).resolve())
+            first_store = backend.server.app_states[first_path].store
+
+            self.assertEqual(client.post("/project/open", json={"path": second}).status_code, 200)
+
+            self.assertNotIn(first_path, backend.server.app_states)
+            self.assertTrue(first_store._closed)
+
+    def test_stale_running_state_without_live_task_reconciles_to_idle(self):
+        import backend.server
+
+        state = backend.server.AppState()
+        state.status = "running"
+        state.run_id = "stale-run"
+        state.orchestrator = SimpleNamespace()
+        state.run_task = None
+        state.awaiting_input = True
+
+        self.assertEqual(backend.server.reconcile_runtime_status(state), "idle")
+        self.assertIsNone(state.run_id)
+        self.assertIsNone(state.orchestrator)
+        self.assertFalse(state.awaiting_input)
+
     def test_workspace_scoped_context_and_reset_tracking(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -1006,6 +1146,48 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(orchestrator.phase_usage["peer_review"]["tokens"], 120)
         self.assertEqual(orchestrator.phase_usage["peer_review"]["turns"], 1)
+
+    def test_oversized_artifact_context_is_compacted_before_provider_call(self):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.init("small product")
+            agent = StatefulFake(
+                AgentConfig(name="reviewer", kind="openai", extra={"max_input_tokens_per_turn": 1500}),
+                replies=["ok"],
+            )
+            orchestrator = Orchestrator(
+                [agent], workspace, event_cb=events.append, max_tokens=5000, require_approval=False,
+            )
+            orchestrator._running = True
+
+            reply = asyncio.run(orchestrator._send_agent(
+                agent, "Review the design", ephemeral_context="x" * 12000,
+            ))
+
+            self.assertEqual(reply, "ok")
+            self.assertTrue(any(
+                event.kind.value == "phase" and event.data.get("status") == "context_compacted"
+                for event in events
+            ))
+            self.assertLess(len(agent.received[0][-1]["content"]), 12000)
+
+    def test_oversized_prompt_is_blocked_before_provider_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.init("small product")
+            agent = StatefulFake(
+                AgentConfig(name="reviewer", kind="openai", extra={"max_input_tokens_per_turn": 100}),
+            )
+            orchestrator = Orchestrator([agent], workspace, max_tokens=1000, require_approval=False)
+            orchestrator._running = True
+
+            with self.assertRaisesRegex(RuntimeError, "Preflight blocked"):
+                asyncio.run(orchestrator._send_agent(agent, "x" * 4000))
+
+            self.assertEqual(agent.received, [])
 
     def test_workspace_create_file(self):
         from fastapi.testclient import TestClient

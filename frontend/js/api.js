@@ -2,10 +2,15 @@
 // ── Auth & 401 Interceptor ──────────────────────────────────────────────────
 const originalFetch = window.fetch;
 window.fetch = async function(...args) {
+    const tabSession = sessionStorage.getItem('designflow_session_id');
     if (args.length === 1 && typeof args[0] === 'string') {
         args.push({ credentials: 'same-origin' });
     } else if (args.length === 2 && typeof args[1] === 'object') {
         args[1].credentials = args[1].credentials || 'same-origin';
+    }
+    if (tabSession) {
+        if (args.length === 1) args.push({ headers: {'X-DesignFlow-Session': tabSession}, credentials: 'same-origin' });
+        else args[1].headers = {...(args[1].headers || {}), 'X-DesignFlow-Session': tabSession};
     }
     const response = await originalFetch(...args);
     if (response.status === 401 || response.status === 403) {
@@ -27,6 +32,8 @@ async function submitLogin() {
     });
     
     if (res.ok) {
+        const loginData = await res.json();
+        sessionStorage.setItem('designflow_session_id', loginData.session_id);
         document.getElementById('loginModal').style.display = 'none';
         document.getElementById('loginError').textContent = '';
         document.getElementById('logoutBtn').style.display = 'inline-block';
@@ -40,6 +47,7 @@ async function submitLogin() {
 
 async function submitLogout() {
     await fetch('/auth/logout', { method: 'POST' });
+    sessionStorage.removeItem('designflow_session_id');
     window.location.reload();
 }
 
@@ -381,7 +389,9 @@ async function updateDesignCockpit() {
 }
 
 function connectSSE() {
-  const es = new EventSource('/events');
+  const tabSession = sessionStorage.getItem('designflow_session_id');
+  const eventsUrl = tabSession ? `/events?session_id=${encodeURIComponent(tabSession)}` : '/events';
+  const es = new EventSource(eventsUrl);
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     handleEvent(ev);
@@ -818,6 +828,19 @@ function handleSteerInput(event) {
 async function steer() {
   const msg = document.getElementById('steerInput').value.trim();
 
+  // Project runtimes can be recreated after the last collaborator leaves. Do
+  // not route a prompt using stale browser state from the previous runtime.
+  try {
+    const statusRes = await fetch('/run/status');
+    if (statusRes.ok) {
+      const statusData = await statusRes.json();
+      if (statusData.status) updateStatus(statusData.status);
+    }
+  } catch (err) {
+    notify('Could not read the current run state. Please try again.', true);
+    return;
+  }
+
   if (msg) {
     if (promptHistory.length === 0 || promptHistory[promptHistory.length - 1] !== msg) {
       promptHistory.push(msg);
@@ -830,14 +853,24 @@ async function steer() {
     await startRun(msg);
   } else {
     if (msg) {
-      await fetch('/run/steer', {
+      const steerRes = await fetch('/run/steer', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({message: msg})
       });
+      if (!steerRes.ok) {
+        const error = await steerRes.json().catch(() => ({}));
+        notify(error.detail || 'Could not send the prompt to the active run.', true);
+        return;
+      }
     }
     document.getElementById('steerInput').value = '';
     if (appStatus === 'paused' || appStatus === 'waiting_for_continuation') {
-      await fetch('/run/resume', {method:'POST'});
+      const resumeRes = await fetch('/run/resume', {method:'POST'});
+      if (!resumeRes.ok) {
+        const error = await resumeRes.json().catch(() => ({}));
+        notify(error.detail || 'Could not resume the run.', true);
+        return;
+      }
       paused = false;
       updateStatus('running');
     }
@@ -1146,7 +1179,7 @@ ${decisionsData.content}${unresolved}`;
 let currentUser = null;
 
 async function checkAuth() {
-    const res = await originalFetch('/users/me');
+    const res = await fetch('/users/me');
     if (res.ok) {
         currentUser = await res.json();
         const label = document.getElementById('loggedInUserLabel');

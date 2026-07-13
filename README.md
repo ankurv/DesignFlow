@@ -2,6 +2,25 @@
 
 DesignFlow is an interactive **AI Architect Dashboard and Planning Board** designed to help developers design with multiple AI agents. Instead of letting AI blindly generate codebases, DesignFlow focuses on the critical initial step: **aligning on design decisions and producing crisp, structured implementation plans** that you can feed to any AI builder (like Cursor, Codex, or Antigravity) to write the code.
 
+## How DesignFlow works
+
+```mermaid
+flowchart LR
+    Goal["Product goal + repository"] --> Runtime["Shared project runtime"]
+    Runtime --> Draft["Coordinator drafts baseline"]
+    Draft --> Review["Relevant specialists review"]
+    Review --> Decision{"Material user decision?"}
+    Decision -->|Yes| User["Inline user checkpoint"]
+    User --> Refine["Synthesis and quality checks"]
+    Decision -->|No| Refine
+    Refine --> Output["Design · Plan · Decisions"]
+    Output --> Builder["Human + coding agent"]
+```
+
+Python owns routing, workflow state, persistence, and recovery. Models are used for specialist judgment and synthesis. Multiple users opening the same project share one runtime; when the last collaborator leaves, background work stops and the runtime closes cleanly.
+
+See [DesignFlow Architecture](docs/ARCHITECTURE.md) for the system, workflow, context-memory, collaboration, and provider-recovery diagrams.
+
 ---
 
 ## 🏗️ Key Features

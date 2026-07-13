@@ -465,7 +465,12 @@ class Orchestrator:
         debate_terms = ("debate", "discuss", "discussion", "project", "loop", "run debate")
         words = re.findall(r"[a-z]+", idea_lower)
         fuzzy_debate = any(get_close_matches(word, debate_terms[:3], n=1, cutoff=0.84) for word in words)
-        explicit_debate = any(k in idea_lower for k in debate_terms) or fuzzy_debate or os.environ.get("DESIGNFLOW_TEST") == "1"
+        explicit_debate = (
+            self.mode == "debate"
+            or any(k in idea_lower for k in debate_terms)
+            or fuzzy_debate
+            or os.environ.get("DESIGNFLOW_TEST") == "1"
+        )
 
         # Default to continuous multi-agent loop if we have a coordinator, UNLESS they @mentioned a specific agent.
         is_direct = target_agent is not None or (not explicit_debate and not coordinator)
@@ -966,6 +971,35 @@ class Orchestrator:
         self._turn_attempts[turn_id] = attempt
         context = dict(turn_context or {})
         max_retries = int(agent.config.extra.get("rate_limit_max_retries", 0) or 0)
+        effective_system = system_override or self._agent_system(agent)
+        estimated_input = agent.estimate_input_tokens(prompt, effective_system, ephemeral_context or "")
+        output_reserve = int(agent.config.extra.get("max_tokens", 2000) or 2000)
+        per_turn_cap = int(agent.config.extra.get("max_input_tokens_per_turn", 32000) or 32000)
+        remaining = max(0, self.max_tokens - self.run_token_total) if self.max_tokens > 0 else per_turn_cap + output_reserve
+
+        if estimated_input > per_turn_cap or estimated_input + output_reserve > remaining:
+            compact = self.ws.read("context")
+            compact_estimate = agent.estimate_input_tokens(prompt, effective_system, compact)
+            if compact_estimate < estimated_input:
+                ephemeral_context = compact
+                estimated_input = compact_estimate
+                self._emit(Event(EventKind.PHASE, agent=agent.name, data={
+                    "phase": context.get("phase", "turn"),
+                    "status": "context_compacted",
+                    "estimated_input_tokens": estimated_input,
+                    "reason": "Turn context was compacted before contacting the provider.",
+                }))
+
+        if estimated_input > per_turn_cap:
+            raise RuntimeError(
+                f"Preflight blocked an oversized prompt estimated at {estimated_input} input tokens "
+                f"(per-turn limit {per_turn_cap})."
+            )
+        if self.max_tokens > 0 and estimated_input + output_reserve > remaining:
+            raise RuntimeError(
+                f"Preflight blocked this turn: approximately {estimated_input + output_reserve} tokens "
+                f"are required but only {remaining} remain in the run budget."
+            )
         while self._running:
             try:
                 def call_mcp_tool(name: str, args: dict) -> str:
@@ -979,15 +1013,16 @@ class Orchestrator:
                     return future.result()
 
                 response = await asyncio.to_thread(
-                    agent.send, prompt, system_override or self._agent_system(agent), ephemeral_context,
+                    agent.send, prompt, effective_system, ephemeral_context,
                     mcp_tools=self.mcp_tools, tool_handler=call_mcp_tool
                 )
                 self._failed_turn = None
                 return response
             except RuntimeError as exc:
-                if not self._is_rate_limit(exc):
+                provider_error = classify_provider_error(exc)
+                if not provider_error.retryable:
                     agent.mark_error(str(exc))
-                    public_error, error_code = self._public_error(exc)
+                    public_error, error_code = provider_error.message, provider_error.code
                     self._failed_turn = {
                         "turn_id": turn_id,
                         "attempt": attempt,
@@ -1007,7 +1042,7 @@ class Orchestrator:
                         "error": public_error,
                         "error_code": error_code,
                         "recoverable": True,
-                        "message": "Fix this agent's configuration, save it, then retry the failed turn.",
+                        "message": "Pause or fix this provider, then retry the failed turn.",
                     }))
                     await self._recovery_event.wait()
                     if not self._running:

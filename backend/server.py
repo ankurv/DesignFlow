@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from backend.auth import auth_manager, Session
@@ -34,7 +35,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     yield
     tasks = []
-    for state in list(app_states.values()):
+    all_states = list(app_states.values()) + list(unbound_states.values())
+    for state in all_states:
         if state.orchestrator:
             state.orchestrator.stop()
         if state.run_task and not state.run_task.done():
@@ -42,9 +44,11 @@ async def lifespan(app: FastAPI):
             tasks.append(state.run_task)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    for state in list(app_states.values()):
+    for state in all_states:
         state.close()
     app_states.clear()
+    unbound_states.clear()
+    session_projects.clear()
 
 
 app = FastAPI(title="DesignFlow", version="1.1.0", lifespan=lifespan)
@@ -107,11 +111,18 @@ class AppState:
         return load_global_agents()
 
 
-# Multi-user session isolation
-app_states = {}
+# Project runtimes are shared; browser sessions only select a project.
+app_states: dict[str, AppState] = {}
+session_projects: dict[str, str] = {}
+unbound_states: dict[str, AppState] = {}
+runtime_registry_lock = threading.RLock()
 
 def get_session(request: Request) -> Session:
-    session_id = request.cookies.get("session_id")
+    session_id = (
+        request.headers.get("X-DesignFlow-Session")
+        or request.query_params.get("session_id")
+        or request.cookies.get("session_id")
+    )
     if not session_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     session = auth_manager.get_session(session_id)
@@ -120,9 +131,56 @@ def get_session(request: Request) -> Session:
     return session
 
 def get_state(session: Session = Depends(get_session)) -> AppState:
-    if session.session_id not in app_states:
-        app_states[session.session_id] = AppState()
-    return app_states[session.session_id]
+    project_path = session_projects.get(session.session_id)
+    if project_path:
+        with runtime_registry_lock:
+            state = app_states.get(project_path)
+            if state:
+                return state
+            session_projects.pop(session.session_id, None)
+    return unbound_states.setdefault(session.session_id, AppState())
+
+
+async def release_project_binding(session_id: str) -> None:
+    with runtime_registry_lock:
+        project_path = session_projects.pop(session_id, None)
+        if not project_path or project_path in session_projects.values():
+            return
+        state = app_states.pop(project_path, None)
+    if not state:
+        return
+    if state.orchestrator:
+        state.orchestrator.stop()
+    if state.run_task and not state.run_task.done():
+        state.run_task.cancel()
+        await asyncio.gather(state.run_task, return_exceptions=True)
+    if state.store and state.run_id:
+        agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+        state.store.finish_run(state.run_id, "stopped", agents)
+        state.store.clear_run_state()
+    state.status = "idle"
+    state.awaiting_input = False
+    state.close()
+
+
+async def bind_project(session: Session, path: str) -> AppState:
+    canonical = str(Path(path).expanduser().resolve())
+    current = session_projects.get(session.session_id)
+    if current == canonical and canonical in app_states:
+        return app_states[canonical]
+    if current:
+        await release_project_binding(session.session_id)
+    with runtime_registry_lock:
+        state = app_states.get(canonical)
+        if state is None:
+            state = AppState()
+            state.open_project(canonical)
+            app_states[canonical] = state
+        session_projects[session.session_id] = canonical
+        detached = unbound_states.pop(session.session_id, None)
+        if detached:
+            detached.close()
+        return state
 
 class LoginBody(BaseModel):
     username: str
@@ -134,7 +192,7 @@ def login(body: LoginBody, response: Response):
     if not session:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     response.set_cookie(key="session_id", value=session.session_id, httponly=True)
-    return {"ok": True, "username": session.username, "role": session.role}
+    return {"ok": True, "username": session.username, "role": session.role, "session_id": session.session_id}
 
 
 # User Management Endpoints
@@ -188,11 +246,12 @@ def get_me(session: Session = Depends(get_session)):
     return {"username": session.username, "role": session.role}
 
 @app.post("/auth/logout")
-def logout(response: Response, session: Session = Depends(get_session)):
+async def logout(response: Response, session: Session = Depends(get_session)):
     auth_manager.logout(session.session_id)
-    state = app_states.pop(session.session_id, None)
-    if state:
-        state.close()
+    await release_project_binding(session.session_id)
+    detached = unbound_states.pop(session.session_id, None)
+    if detached:
+        detached.close()
     response.delete_cookie("session_id")
     return {"ok": True}
 
@@ -292,6 +351,7 @@ class ProjectBriefIn(BaseModel):
 
 
 def project_payload(state) -> dict:
+    reconcile_runtime_status(state)
     if not state.workspace:
         return {"open": False, "path": "", "brief": "", "recent_runs": []}
     return {
@@ -303,15 +363,28 @@ def project_payload(state) -> dict:
     }
 
 
+def reconcile_runtime_status(state: AppState) -> str:
+    """Repair stale active flags left after restart, cancellation, or task failure."""
+    active = state.status in {"running", "paused", "needs_attention"}
+    has_live_task = bool(state.run_task and not state.run_task.done())
+    if active and (not state.orchestrator or not has_live_task or not state.run_id):
+        state.status = "idle"
+        state.awaiting_input = False
+        state.run_task = None
+        state.orchestrator = None
+        state.run_id = None
+    return state.status
+
+
 @app.get("/project")
 def get_project(state: AppState = Depends(get_state)):
     return project_payload(state)
 
 
 @app.post("/project/open")
-def open_project(body: ProjectOpenIn, state: AppState = Depends(get_state)):
+async def open_project(body: ProjectOpenIn, session: Session = Depends(get_session)):
     try:
-        state.open_project(body.path)
+        state = await bind_project(session, body.path)
     except (OSError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, **project_payload(state), "agents": state.configs}
@@ -576,14 +649,19 @@ class StartBody(BaseModel):
 
 
 @app.post("/run/start")
-async def start_run(body: StartBody, state: AppState = Depends(get_state)):
+async def start_run(
+    body: StartBody,
+    state: AppState = Depends(get_state),
+    session: Session = Depends(get_session),
+):
+    reconcile_runtime_status(state)
     if state.status in {"running", "paused", "needs_attention"}:
         raise HTTPException(400, "A run is already in progress")
     if body.project_path:
         requested = str(Path(body.project_path).expanduser().resolve())
         if not state.workspace or state.workspace.path != requested:
             try:
-                state.open_project(requested)
+                state = await bind_project(session, requested)
             except (OSError, ValueError) as exc:
                 raise HTTPException(400, str(exc)) from exc
     if not state.workspace:
@@ -781,6 +859,7 @@ async def steer_run(body: SteerBody, state: AppState = Depends(get_state)):
 
 @app.get("/run/status")
 def run_status(state: AppState = Depends(get_state)):
+    reconcile_runtime_status(state)
     agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
     return {
         "status": state.status,

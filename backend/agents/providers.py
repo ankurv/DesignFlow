@@ -374,6 +374,7 @@ class CLIAgent(AgentBase):
     def __init__(self, config: AgentConfig):
         super().__init__(config)
         self._provider_session_id = ""
+        self._cli_usage_snapshot = Usage()
         self._configure_working_directories(config)
         self._configure_command(config)
 
@@ -497,16 +498,33 @@ class CLIAgent(AgentBase):
                     text = item.get("text", text)
             if event.get("type") == "turn.completed":
                 raw = event.get("usage", {})
-                usage = Usage(
+                reported = Usage(
                     input_tokens=int(raw.get("input_tokens", 0) or 0),
                     cached_input_tokens=int(raw.get("cached_input_tokens", 0) or 0),
                     output_tokens=int(raw.get("output_tokens", 0) or 0),
                 )
+                mode = str(self.config.extra.get("cli_usage_mode", "per_turn")).lower()
+                cumulative = mode == "cumulative" or bool(raw.get("cumulative")) or raw.get("usage_type") == "cumulative"
+                usage = self._normalize_cli_usage(reported, cumulative)
         if not text:
             text = result.stdout.strip()
         if usage.total_tokens == 0:
             usage = self._estimated_usage(prompt, text)
         return text, usage
+
+    def _normalize_cli_usage(self, reported: Usage, cumulative: bool) -> Usage:
+        """Convert explicitly cumulative CLI counters into safe per-turn deltas."""
+        if not cumulative:
+            return reported
+        previous = self._cli_usage_snapshot
+        normalized = Usage(
+            input_tokens=max(0, reported.input_tokens - previous.input_tokens),
+            cached_input_tokens=max(0, reported.cached_input_tokens - previous.cached_input_tokens),
+            output_tokens=max(0, reported.output_tokens - previous.output_tokens),
+            estimated=reported.estimated,
+        )
+        self._cli_usage_snapshot = reported
+        return normalized
 
     def _antigravity_base_args(self) -> list[str]:
         args = []
@@ -592,6 +610,7 @@ class CLIAgent(AgentBase):
 
     def _reset_provider_session(self):
         self._provider_session_id = ""
+        self._cli_usage_snapshot = Usage()
 
     def provider_session_id(self) -> str:
         return self._provider_session_id

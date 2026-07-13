@@ -120,6 +120,17 @@ class AgentBase(ABC):
     def total_tokens(self) -> int:
         return self.total_input_tokens + self.total_output_tokens
 
+    def estimate_input_tokens(
+        self, message: str, system: str = "", ephemeral_context: str = ""
+    ) -> int:
+        """Conservative local estimate used before a provider request."""
+        prior = self._windowed_history()
+        prior_text = "\n".join(item.content for item in prior)
+        characters = len(system) + len(message) + len(ephemeral_context) + len(prior_text)
+        # Four characters/token is a common English/code approximation. Add
+        # message framing overhead and round upward rather than underestimating.
+        return max(1, (characters + 3) // 4 + (len(prior) + 2) * 8)
+
     def _pricing(self) -> tuple[float, float, float, bool]:
         extra = self.config.extra
         configured = any(
