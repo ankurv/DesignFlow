@@ -48,21 +48,80 @@ Browser sessions identify people and select a project. They do not own the orche
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Discovery: Start with goal + repository context
-    Discovery --> Approval: Essential context is missing
-    Discovery --> Drafting: Context is sufficient
-    Approval --> Drafting: User answers discovery question
-    Drafting --> PeerReview: Coordinator creates baseline
-    PeerReview --> PeerReview: Next relevant specialist
-    PeerReview --> Refinement: Selected reviews complete
-    Refinement --> Refinement: Deterministic checks find gaps
-    Refinement --> Approval: Material decision needs confirmation
-    Approval --> Complete: User confirms decision
-    Refinement --> Complete: Artifacts pass quality checks
-    Complete --> [*]
+    direction TB
+    
+    %% Entry Point
+    [*] --> Init: run()
+    Init --> DiscoveryPhase: Start Loop (max 30 steps)
+
+    %% Discovery
+    state "Discovery Phase" as DiscoveryPhase {
+        direction LR
+        D1[Check Context] --> D2{Context Missing?}
+        D2 -->|Yes| D3[Write Clarifying Question to QUESTIONS.md]
+        D2 -->|No| D4[Skip to Drafting]
+    }
+    
+    %% Drafting
+    state "Drafting Phase" as DraftingPhase {
+        direction LR
+        Dr1[Find Strongest Model] --> Dr2[Coordinator Drafts Plan & Design]
+        Dr2 --> Dr3[Update DESIGN.md & PLAN.md]
+    }
+
+    %% Peer Review
+    state "Peer Review Phase" as PeerReviewPhase {
+        direction LR
+        P1[select_peer_review_agents] --> P2[Select Relevant Specialists by Keywords]
+        P2 --> P3{More Peers?}
+        P3 -->|Yes| P4[Peer Reads Context & Critiques]
+        P4 --> P5[Log to LOGBOOK & Add Context Event]
+        P5 --> P3
+        P3 -->|No| P6[Done with reviews]
+    }
+
+    %% Refinement
+    state "Refinement Phase" as RefinementPhase {
+        direction LR
+        R1[Coordinator Resolves Critiques] --> R2[Update Artifacts]
+        R2 --> R3{coordinator_completion_errors()}
+        R3 -->|Errors found < 3 times| R4[Inject deterministic quality_failure event]
+        R3 -->|Material Decision Needed| R5[Write Checkpoint to QUESTIONS.md]
+        R3 -->|Pass| R6[Done]
+    }
+
+    %% Approval
+    state "Approval Phase" as ApprovalPhase {
+        direction LR
+        A1[Pause Run & Wait for UI] --> A2[User Input Received]
+        A2 --> A3[Log User Steering Event]
+        A3 --> A4[Resume Target Phase]
+    }
+
+    %% Transitions
+    DiscoveryPhase --> DraftingPhase: No questions
+    DiscoveryPhase --> ApprovalPhase: Needs User Input
+    
+    DraftingPhase --> PeerReviewPhase
+    
+    PeerReviewPhase --> RefinementPhase
+    
+    RefinementPhase --> RefinementPhase: Retry due to quality errors
+    RefinementPhase --> ApprovalPhase: Decision Checkpoint needed
+    RefinementPhase --> Complete: Clean pass
+    
+    ApprovalPhase --> DraftingPhase: (from Discovery)
+    ApprovalPhase --> Complete: (from Refinement)
+    
+    Complete --> [*]: Baseline Finished
 ```
 
-The orchestrator does not call every agent sequentially. It selects a small, relevant panel using the product goal, repository signals, and specialist roles. Stronger configured models are reserved for drafting and synthesis. Python controls phase transitions and quality gates so cheaper models cannot hallucinate the workflow.
+### Deeper Dive into the Mechanisms
+1. **Loop Bound:** The state machine runs in a `while` loop (up to 30 steps) calling phase handlers. If it hits 30 without finishing, it throws an exception to prevent infinite AI loops.
+2. **Deterministic Discovery (`_run_discovery_phase`):** Python regex checks if the goal is underspecified. If it mentions "payments" but not "compliance", Python outputs the question itself instead of burning LLM tokens to figure that out. It triggers the `ApprovalPhase`.
+3. **Keyword-Heuristic Peer Review (`_run_peer_review_phase`):** Instead of broadcasting to all agents, Python looks at the goal words. If it sees "AWS" or "docker", it selects the `devops_engineer`. Each selected peer reads the coordinator's draft, writes a critique to `LOGBOOK.md`, and injects an unresolved `peer_critique` event into the active context.
+4. **Deterministic Quality Gates (`_run_refinement_phase`):** The coordinator synthesizes the peer critiques. Python then checks the output for structural errors (`_coordinator_completion_errors()`). If it failed to address requirements, Python increments `_refinement_attempts` and forces the coordinator to try again *without human intervention*.
+5. **Approval Resumption (`_run_approval_phase`):** A pause stops the loop. When the user responds via `/run/steer`, the steering is added as a `user_decision` context event, and the state machine resumes whatever phase was stored in `post_approval_phase`.
 
 Questions are written to `QUESTIONS.md` for durable state and rendered inline in the main discussion window. Each checkpoint asks one material question with a small set of choices and accepts a custom response through the normal prompt input.
 
