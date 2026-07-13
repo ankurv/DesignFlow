@@ -541,6 +541,12 @@ function appendFeed(ev) {
   }
 
   const avatarChar = (ev.agent || 'SYS').slice(0, 1).toUpperCase();
+  const providerAgent = ev.data.provider_agent || '';
+  const providerKind = ev.data.provider_kind || '';
+  const providerModel = ev.data.provider_model || '';
+  const providerLabel = providerAgent
+    ? `${providerAgent}${providerKind ? ' · ' + providerKind : ''}${providerModel ? ' · ' + providerModel : ''}`
+    : '';
 
   div.innerHTML = `
     <div class="feed-row">
@@ -551,6 +557,7 @@ function appendFeed(ev) {
         <div class="feed-header-line">
           <div class="feed-agent-details">
             <span class="feed-agent">${ev.agent || 'System'}</span>
+            ${providerLabel ? `<span class="feed-provider" title="Underlying configured agent and model">via ${escHtml(providerLabel)}</span>` : ''}
             <span class="feed-kind">${escHtml(kindLabel)}</span>
             ${metricsHtml}
           </div>

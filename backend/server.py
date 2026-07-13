@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from backend.auth import auth_manager, Session
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response
+from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    lease_task = asyncio.create_task(lease_cleanup_loop())
     yield
+    lease_task.cancel()
+    await asyncio.gather(lease_task, return_exceptions=True)
     tasks = []
     all_states = list(app_states.values()) + list(unbound_states.values())
     for state in all_states:
@@ -45,13 +49,22 @@ async def lifespan(app: FastAPI):
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     for state in all_states:
+        if state.store and state.run_id and state.status in {"running", "paused", "needs_attention"}:
+            agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+            state.store.finish_run(state.run_id, "stopped", agents)
+            state.store.clear_run_state()
+        state.status = "idle"
+        state.awaiting_input = False
         state.close()
     app_states.clear()
     unbound_states.clear()
     session_projects.clear()
+    session_last_seen.clear()
 
 
 app = FastAPI(title="DesignFlow", version="1.1.0", lifespan=lifespan)
+app.state.shutting_down = False
+app.state.request_shutdown = None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -114,6 +127,7 @@ class AppState:
 # Project runtimes are shared; browser sessions only select a project.
 app_states: dict[str, AppState] = {}
 session_projects: dict[str, str] = {}
+session_last_seen: dict[str, float] = {}
 unbound_states: dict[str, AppState] = {}
 runtime_registry_lock = threading.RLock()
 
@@ -128,6 +142,7 @@ def get_session(request: Request) -> Session:
     session = auth_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=401, detail="Invalid session")
+    session_last_seen[session_id] = time.monotonic()
     return session
 
 def get_state(session: Session = Depends(get_session)) -> AppState:
@@ -142,6 +157,7 @@ def get_state(session: Session = Depends(get_session)) -> AppState:
 
 
 async def release_project_binding(session_id: str) -> None:
+    session_last_seen.pop(session_id, None)
     with runtime_registry_lock:
         project_path = session_projects.pop(session_id, None)
         if not project_path or project_path in session_projects.values():
@@ -177,10 +193,28 @@ async def bind_project(session: Session, path: str) -> AppState:
             state.open_project(canonical)
             app_states[canonical] = state
         session_projects[session.session_id] = canonical
+        session_last_seen[session.session_id] = time.monotonic()
         detached = unbound_states.pop(session.session_id, None)
         if detached:
             detached.close()
         return state
+
+
+async def expire_stale_bindings(now: Optional[float] = None, ttl_seconds: int = 75) -> list[str]:
+    current = time.monotonic() if now is None else now
+    stale = [
+        session_id for session_id, project_path in list(session_projects.items())
+        if project_path and current - session_last_seen.get(session_id, 0) > ttl_seconds
+    ]
+    for session_id in stale:
+        await release_project_binding(session_id)
+    return stale
+
+
+async def lease_cleanup_loop():
+    while True:
+        await asyncio.sleep(15)
+        await expire_stale_bindings()
 
 class LoginBody(BaseModel):
     username: str
@@ -253,6 +287,12 @@ async def logout(response: Response, session: Session = Depends(get_session)):
     if detached:
         detached.close()
     response.delete_cookie("session_id")
+    return {"ok": True}
+
+
+@app.post("/session/heartbeat")
+def session_heartbeat(session: Session = Depends(get_session)):
+    session_last_seen[session.session_id] = time.monotonic()
     return {"ok": True}
 
 
@@ -502,6 +542,7 @@ def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
     expert["name"] = active.name
     expert["role"] = active.role
     expert["system_prompt"] = active.config.system_prompt
+    expert.setdefault("extra", {})["runtime_base_name"] = new_base.get("name", new_base.get("id", "provider"))
 
     new_agent = create_agent(to_agent_config(expert, s))
     active.transfer_runtime_state_to(new_agent)
@@ -654,6 +695,8 @@ async def start_run(
     state: AppState = Depends(get_state),
     session: Session = Depends(get_session),
 ):
+    if app.state.shutting_down:
+        raise HTTPException(503, "Server shutdown is in progress")
     reconcile_runtime_status(state)
     if state.status in {"running", "paused", "needs_attention"}:
         raise HTTPException(400, "A run is already in progress")
@@ -692,6 +735,7 @@ async def start_run(
             expert["model"] = model_for_virtual_agent(base_config, i, len(base_configs))
             expert["id"] = f"{base_config.get('id', 'base')}_{role}"
             expert["base_id"] = base_config.get("id", "")
+            expert.setdefault("extra", {})["runtime_base_name"] = base_config.get("name", base_config.get("id", "provider"))
             expert["name"] = role
             expert["role"] = role
             expert["system_prompt"] = system_prompt
@@ -972,15 +1016,16 @@ def event_history(state: AppState = Depends(get_state)):
 
 
 @app.post("/admin/shutdown")
-def admin_shutdown(session: Session = Depends(get_session)):
+def admin_shutdown(background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     if session.username != "admin":
         raise HTTPException(403, "Only admin can shut down the server")
-    import os
-    import threading
-    def killer():
-        os._exit(0)
-    threading.Timer(0.5, killer).start()
-    return {"ok": True, "message": "Server shutting down"}
+    callback = app.state.request_shutdown
+    if not callable(callback):
+        raise HTTPException(503, "Graceful shutdown is unavailable in this server launcher")
+    if not app.state.shutting_down:
+        app.state.shutting_down = True
+        background_tasks.add_task(callback)
+    return {"ok": True, "message": "Graceful server shutdown started"}
 
 _frontend = Path(__file__).parent.parent / "frontend"
 if _frontend.exists():

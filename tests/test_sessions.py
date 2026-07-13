@@ -155,6 +155,7 @@ class SessionTests(unittest.TestCase):
         backend.server.auth_manager = test_auth_manager
         backend.server.app_states.clear()
         backend.server.session_projects.clear()
+        backend.server.session_last_seen.clear()
         backend.server.unbound_states.clear()
 
     def tearDown(self):
@@ -171,6 +172,7 @@ class SessionTests(unittest.TestCase):
         self._backend_server.auth_manager = self._orig_server_auth_manager
         self._backend_server.app_states.clear()
         self._backend_server.session_projects.clear()
+        self._backend_server.session_last_seen.clear()
         self._backend_server.unbound_states.clear()
         self._auth_tmpdir.cleanup()
 
@@ -521,6 +523,21 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(replacement.total_cost_usd, original.total_cost_usd)
         self.assertEqual(replacement.error_message, "quota exhausted")
         self.assertEqual(replacement.state_dict()["base_id"], "provider-b")
+
+    def test_agent_events_identify_underlying_provider_and_model(self):
+        agent = StatefulFake(AgentConfig(
+            id="base-security", base_id="gemini-main", name="security_auditor",
+            kind="gemini", model="gemini-2.5-pro",
+            extra={"runtime_base_name": "Gemini Primary"},
+        ))
+        orchestrator = Orchestrator([agent], Workspace(tempfile.mkdtemp()), require_approval=False)
+
+        metadata = orchestrator._event_actor_meta(agent)
+
+        self.assertEqual(metadata["provider_agent"], "Gemini Primary")
+        self.assertEqual(metadata["provider_id"], "gemini-main")
+        self.assertEqual(metadata["provider_kind"], "gemini")
+        self.assertEqual(metadata["provider_model"], "gemini-2.5-pro")
 
     def test_workspace_writes_into_project_and_reads_designflow_brief(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -969,6 +986,39 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(remaining.status_code, 200)
         self.assertEqual(remaining.json()["username"], "admin")
 
+    def test_admin_shutdown_uses_graceful_server_callback(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        self.assertEqual(login.status_code, 200)
+        called = []
+        original_callback = backend.server.app.state.request_shutdown
+        original_flag = backend.server.app.state.shutting_down
+        try:
+            backend.server.app.state.request_shutdown = lambda: called.append(True)
+            backend.server.app.state.shutting_down = False
+
+            response = client.post("/admin/shutdown")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(called, [True])
+            self.assertTrue(backend.server.app.state.shutting_down)
+        finally:
+            backend.server.app.state.request_shutdown = original_callback
+            backend.server.app.state.shutting_down = original_flag
+
+    def test_non_admin_cannot_shutdown_server(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        login = client.post("/auth/login", json={"username": "user", "password": "user123"})
+        self.assertEqual(login.status_code, 200)
+        response = client.post("/admin/shutdown")
+        self.assertEqual(response.status_code, 403)
+
     def test_switching_away_releases_project_when_session_is_last_collaborator(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -999,6 +1049,36 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(state.run_id)
         self.assertIsNone(state.orchestrator)
         self.assertFalse(state.awaiting_input)
+
+    def test_expired_last_tab_lease_releases_project_runtime(self):
+        import backend.server
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = backend.server.AppState()
+            state.open_project(directory)
+            canonical = str(Path(directory).resolve())
+            backend.server.app_states[canonical] = state
+            backend.server.session_projects["closed-tab"] = canonical
+            backend.server.session_last_seen["closed-tab"] = 10.0
+            store = state.store
+
+            expired = asyncio.run(backend.server.expire_stale_bindings(now=100.0, ttl_seconds=75))
+
+            self.assertEqual(expired, ["closed-tab"])
+            self.assertNotIn("closed-tab", backend.server.session_projects)
+            self.assertNotIn(canonical, backend.server.app_states)
+            self.assertTrue(store._closed)
+
+    def test_active_tab_heartbeat_prevents_lease_expiry(self):
+        import backend.server
+
+        backend.server.session_projects["active-tab"] = "/tmp/project"
+        backend.server.session_last_seen["active-tab"] = 50.0
+
+        expired = asyncio.run(backend.server.expire_stale_bindings(now=100.0, ttl_seconds=75))
+
+        self.assertEqual(expired, [])
+        self.assertIn("active-tab", backend.server.session_projects)
 
     def test_workspace_scoped_context_and_reset_tracking(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -329,6 +329,7 @@
   .feed-header-line { display: flex; align-items: center; justify-content: space-between; }
   .feed-agent-details { display: flex; align-items: center; gap: 8px; }
   .feed-agent { font-size: 13px; font-weight: 700; color: var(--text); }
+  .feed-provider { font-size: 10.5px; color: var(--text-muted); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .feed-kind  { font-size: 10.5px; color: var(--muted); background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 8px; }
   .feed-ts    { font-size: 10.5px; color: var(--muted); }
   .feed-metrics-badge {

@@ -63,3 +63,11 @@ setInterval(() => {
   // once when agents are loaded, because they can consume provider quota.
   if (['running', 'paused', 'needs_attention'].includes(appStatus)) fetchAgentStatus();
 }, 4000);
+
+// Keep this tab's project lease alive. If the tab disappears, the server
+// expires the binding and stops the project after the collaboration grace period.
+setInterval(() => {
+  if (sessionStorage.getItem('designflow_session_id')) {
+    fetch('/session/heartbeat', {method: 'POST'}).catch(() => {});
+  }
+}, 20000);

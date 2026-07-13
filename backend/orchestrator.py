@@ -924,6 +924,10 @@ class Orchestrator:
             "actor_role": "coordinator" if is_coordinator else "agent",
             "is_coordinator": is_coordinator,
             "standing_role": agent.config.role,
+            "provider_agent": agent.config.extra.get("runtime_base_name") or agent.config.base_id or agent.name,
+            "provider_id": agent.config.base_id or agent.config.id,
+            "provider_kind": agent.config.kind,
+            "provider_model": agent.config.model or "default",
         }
 
     def _begin_turn(self, agent: AgentBase, context: dict) -> str:
@@ -1043,6 +1047,7 @@ class Orchestrator:
                         "error_code": error_code,
                         "recoverable": True,
                         "message": "Pause or fix this provider, then retry the failed turn.",
+                        **self._event_actor_meta(agent),
                     }))
                     await self._recovery_event.wait()
                     if not self._running:
@@ -1059,7 +1064,7 @@ class Orchestrator:
                     agent.error_message = ""
                     self._emit(Event(EventKind.TURN_START, agent=agent.name, data={
                         "turn_id": turn_id, "attempt": attempt, "resumed": True,
-                        "retry_reason": "manual_recovery", **context,
+                        "retry_reason": "manual_recovery", **context, **self._event_actor_meta(agent),
                     }))
                     continue
                 if max_retries and attempt >= max_retries + 1:
@@ -1072,6 +1077,7 @@ class Orchestrator:
                     "retry_in_seconds": delay,
                     "retry_at": retry_at.isoformat(),
                     "reason": str(exc),
+                    **self._event_actor_meta(agent),
                 }))
                 remaining = delay
                 while remaining > 0 and self._running:
@@ -1083,7 +1089,7 @@ class Orchestrator:
                     self._turn_attempts[turn_id] = attempt
                     self._emit(Event(EventKind.TURN_START, agent=agent.name, data={
                         "turn_id": turn_id, "attempt": attempt, "resumed": True,
-                        "retry_reason": "usage_limit", **context,
+                        "retry_reason": "usage_limit", **context, **self._event_actor_meta(agent),
                     }))
         raise asyncio.CancelledError()
 
