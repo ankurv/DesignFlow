@@ -388,10 +388,17 @@ async function updateDesignCockpit() {
   }
 }
 
+let activeEventSource = null;
+
 function connectSSE() {
+  if (activeEventSource) {
+    activeEventSource.close();
+    activeEventSource = null;
+  }
   const tabSession = sessionStorage.getItem('designflow_session_id');
   const eventsUrl = tabSession ? `/events?session_id=${encodeURIComponent(tabSession)}` : '/events';
   const es = new EventSource(eventsUrl);
+  activeEventSource = es;
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     handleEvent(ev);
@@ -992,8 +999,7 @@ async function fetchAgentStatus() {
   let visibleAgents = res.agents || [];
   agentCapacityStatus = {};
   (res.agents || []).forEach(agent => {
-    const rawId = String(agent.id || '');
-    const baseId = rawId.includes('_') ? rawId.split('_')[0] : rawId;
+    const baseId = String(agent.base_id || agent.id || '');
     if (!baseId) return;
     ['global-', 'project-'].forEach(prefix => {
       const uid = prefix + baseId;
@@ -1002,9 +1008,25 @@ async function fetchAgentStatus() {
       current.cost_usd += Number(agent.cost_usd || 0);
       current.pricing_known = current.pricing_known && agent.pricing_known !== false;
       if (agent.retry_at) current.retry_at = agent.retry_at;
+      if (agent.status === 'error') {
+        current.runtime_status = 'error';
+        current.error = agent.error_message || 'Agent execution failed';
+      }
       agentCapacityStatus[uid] = current;
     });
   });
+  const failedTurn = res.failed_turn || {};
+  if (failedTurn.agent_id) {
+    const failedBaseId = String(failedTurn.agent_id);
+    ['global-', 'project-'].forEach(prefix => {
+      const uid = prefix + failedBaseId;
+      const current = agentCapacityStatus[uid] || {};
+      current.runtime_status = 'error';
+      current.error_code = failedTurn.error_code || '';
+      current.error = failedTurn.public_error || failedTurn.error || 'Agent execution failed';
+      agentCapacityStatus[uid] = current;
+    });
+  }
   if (!visibleAgents.length) {
     const configured = await fetch('/agents').then(r=>r.json());
     visibleAgents = (configured.merged || []).map(a => ({...a, status:'idle', total_tokens:0,
@@ -1052,6 +1074,10 @@ async function fetchAgentStatus() {
   document.getElementById('totalCachedTokens').textContent = cached.toLocaleString();
   document.getElementById('totalCost').textContent = costText;
   updateDesignCockpit();
+  const configPanel = document.getElementById('panel-config');
+  if (configPanel?.classList.contains('active') && typeof renderAgentCards === 'function') {
+    renderAgentCards();
+  }
 }
 
 function formatCost(value) {

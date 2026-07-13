@@ -322,6 +322,9 @@ async function openProject(pathOverride = '') {
   if (eventCounter) eventCounter.textContent = '0';
   rememberRecentProject(path);
   applyProjectState(data);
+  // The previous SSE stream belongs to the prior project binding (or the
+  // unbound session). Reconnect so project history is replayed into the feed.
+  if (typeof connectSSE === 'function') connectSSE();
   currentWsKey = 'cockpit';
   await loadAgentConfig();
   renderHistory(data.recent_runs || []);

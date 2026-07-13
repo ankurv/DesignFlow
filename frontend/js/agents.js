@@ -118,8 +118,10 @@ function renderSingleCard(cfg, idx, isGlobal) {
       : (statusInfo.status === 'success' ? 'Agent working correctly' : 'Testing connection...');
     const capacity = agentCapacityStatus[uid] || {};
     const isLocal = ['cli', 'ollama'].includes(cfg.kind);
-    const capacityLabel = isLocal ? 'Local' : statusInfo.status === 'failed' ? 'Blocked' : capacity.retry_at ? 'Limited' : statusInfo.status === 'success' ? 'Healthy' : 'Checking';
-    const capacityClass = capacityLabel.toLowerCase();
+    const runtimeBlocked = capacity.runtime_status === 'error';
+    const quotaBlocked = capacity.error_code === 'quota_exhausted' || /quota|credit|billing|usage limit|resource exhausted/i.test(capacity.error || '');
+    const capacityLabel = isLocal ? 'Local' : quotaBlocked ? 'Quota exhausted' : runtimeBlocked || statusInfo.status === 'failed' ? 'Blocked' : capacity.retry_at ? 'Limited' : statusInfo.status === 'success' ? 'Healthy' : 'Checking';
+    const capacityClass = quotaBlocked || runtimeBlocked ? 'blocked' : capacityLabel.toLowerCase();
     const costText = capacity.pricing_known === false ? 'Cost unavailable for this model' : `DesignFlow usage: $${Number(capacity.cost_usd || 0).toFixed(4)}`;
     const checkedText = statusInfo.checked_at ? new Date(statusInfo.checked_at).toLocaleTimeString() : 'Not checked yet';
 
@@ -145,7 +147,7 @@ function renderSingleCard(cfg, idx, isGlobal) {
             </div>
             <button type="button" class="agent-capacity-pill ${capacityClass}" onclick="toggleAgentCapacity('${uid}')">Capacity: ${capacityLabel}</button>
             <div class="agent-capacity-details" id="capacity-${uid}" hidden>
-              <div><strong>${isLocal ? 'Local runtime' : 'Provider capacity'}</strong><span>${isLocal ? 'No cloud credits required' : statusInfo.status === 'failed' ? escHtml(friendlyProviderError(statusInfo.error)) : 'Inference endpoint is reachable'}</span></div>
+              <div><strong>${isLocal ? 'Local runtime' : 'Provider capacity'}</strong><span>${isLocal ? 'No cloud credits required' : runtimeBlocked ? escHtml(friendlyProviderError(capacity.error)) : statusInfo.status === 'failed' ? escHtml(friendlyProviderError(statusInfo.error)) : 'Inference endpoint is reachable'}</span></div>
               <div><strong>Local usage</strong><span>${Number(capacity.total_tokens || 0).toLocaleString()} tokens · ${costText}</span></div>
               ${capacity.retry_at ? `<div><strong>Retry</strong><span>${new Date(capacity.retry_at).toLocaleString()}</span></div>` : ''}
               <div><strong>Provider balance</strong><span>${isLocal ? 'Not applicable' : 'Not exposed by this provider credential'}</span></div>

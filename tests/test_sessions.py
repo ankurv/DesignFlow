@@ -477,6 +477,8 @@ class SessionTests(unittest.TestCase):
         error = next(event for event in events if event.kind.value == "error")
         self.assertEqual(error.data["error_code"], "quota_exhausted")
         self.assertEqual(error.data["error"], "Model quota or provider credits are exhausted.")
+        self.assertEqual(orchestrator.failed_turn["error_code"], "quota_exhausted")
+        self.assertEqual(orchestrator.failed_turn["public_error"], "Model quota or provider credits are exhausted.")
 
     def test_failed_turn_uses_user_substituted_agent_on_retry(self):
         failed = RepairableFake(
@@ -1428,6 +1430,24 @@ class FrontendPrivacyTests(unittest.TestCase):
         self.assertNotIn("/Users/", html)
         self.assertNotIn("/home/", html)
         self.assertIn('placeholder="/path/to/your/project"', html)
+
+    def test_project_binding_reconnects_event_stream(self):
+        state_js = (Path(__file__).parents[1] / "frontend" / "js" / "state.js").read_text()
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        main_js = (Path(__file__).parents[1] / "frontend" / "js" / "main.js").read_text()
+        self.assertIn("if (typeof connectSSE === 'function') connectSSE();", state_js)
+        self.assertIn("activeEventSource.close()", api_js)
+        self.assertIn("activeEventSource = es", api_js)
+        self.assertIn("loadCurrentProject().finally(() => connectSSE());", main_js)
+        self.assertNotIn("connectSSE();\nloadCurrentProject();", main_js)
+
+    def test_agent_capacity_uses_runtime_failure_not_only_health_probe(self):
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        agents_js = (Path(__file__).parents[1] / "frontend" / "js" / "agents.js").read_text()
+        self.assertIn("agent.base_id || agent.id", api_js)
+        self.assertIn("res.failed_turn || {}", api_js)
+        self.assertIn("capacity.error_code === 'quota_exhausted'", agents_js)
+        self.assertIn("'Quota exhausted'", agents_js)
 
 
 class DeterministicRoutingTests(unittest.TestCase):

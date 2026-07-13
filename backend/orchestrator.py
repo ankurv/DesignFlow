@@ -1033,6 +1033,8 @@ class Orchestrator:
                         "agent_id": agent.config.id,
                         "agent": agent.name,
                         "error": str(exc),
+                        "public_error": public_error,
+                        "error_code": error_code,
                         "prompt": prompt,
                         **context,
                     }

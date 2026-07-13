@@ -53,8 +53,9 @@ if (window.mermaid) {
     }
   });
 }
-connectSSE();
-loadCurrentProject();
+// Bind the browser session to its project runtime before subscribing. Opening
+// the stream first leaves it attached to the temporary, unbound session state.
+loadCurrentProject().finally(() => connectSSE());
 loadAgentConfig();
 loadMCPServers();
 fetchAgentStatus();
