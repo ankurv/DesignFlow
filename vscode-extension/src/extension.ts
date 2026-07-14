@@ -19,17 +19,23 @@ export function activate(context: vscode.ExtensionContext) {
             projectPath = workspaceFolders[0].uri.fsPath;
         }
 
-        // Read server URL from VS Code settings, default to 8010
+        // Read settings
         const config = vscode.workspace.getConfiguration('designflow');
         const serverUrl = config.get<string>('serverUrl') || 'http://127.0.0.1:8010';
+        const username = config.get<string>('username') || '';
+        const password = config.get<string>('password') || '';
 
-        panel.webview.html = getWebviewContent(serverUrl);
+        panel.webview.html = getWebviewContent(serverUrl, username, password);
     });
 
     context.subscriptions.push(disposable);
 }
 
-function getWebviewContent(serverUrl: string) {
+function getWebviewContent(serverUrl: string, username?: string, password?: string) {
+    // Escape strings just in case
+    const safeUser = (username || '').replace(/'/g, "\\'");
+    const safePass = (password || '').replace(/'/g, "\\'");
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -70,7 +76,7 @@ function getWebviewContent(serverUrl: string) {
     </style>
 </head>
 <body>
-    <iframe id="df-frame" src="${serverUrl}" onload="hideError()" onerror="showError()"></iframe>
+    <iframe id="df-frame" onload="hideError()" onerror="showError()"></iframe>
     
     <div id="error-overlay" class="error-message" style="display: none; position: absolute; top: 0; left: 0; width: 100%; background: var(--vscode-editor-background);">
         <h2>Cannot connect to DesignFlow backend</h2>
@@ -81,11 +87,32 @@ function getWebviewContent(serverUrl: string) {
     <script>
         const frame = document.getElementById('df-frame');
         const overlay = document.getElementById('error-overlay');
+        const user = '${safeUser}';
+        const pass = '${safePass}';
         
+        async function autoLogin() {
+            if (user && pass) {
+                try {
+                    const res = await fetch('${serverUrl}/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username: user, password: pass })
+                    });
+                    const data = await res.json();
+                    if (data.session_id) {
+                        frame.src = '${serverUrl}/?session_id=' + data.session_id;
+                        return;
+                    }
+                } catch (e) {
+                    console.error('Auto-login failed', e);
+                }
+            }
+            frame.src = '${serverUrl}/';
+        }
+
+        autoLogin();
+
         function hideError() {
-            // Simple check: if we can't access frame contentDocument, it means it loaded a different origin successfully (CORS).
-            // If it failed to load completely, some browsers fire onload but it's tricky to detect perfectly cross-origin.
-            // For now, assume onload means success.
             overlay.style.display = 'none';
         }
 

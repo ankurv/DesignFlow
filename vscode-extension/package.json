@@ -26,6 +26,16 @@
           "type": "string",
           "default": "http://127.0.0.1:8010",
           "description": "The URL of the local DesignFlow Python backend server."
+        },
+        "designflow.username": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: Username to automatically login to the backend."
+        },
+        "designflow.password": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: Password to automatically login to the backend."
         }
       }
     }
