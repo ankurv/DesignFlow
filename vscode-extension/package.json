@@ -18,7 +18,17 @@
         "command": "designflow.start",
         "title": "DesignFlow: Open Dashboard"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "DesignFlow",
+      "properties": {
+        "designflow.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8010",
+          "description": "The URL of the local DesignFlow Python backend server."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

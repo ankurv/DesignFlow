@@ -19,16 +19,17 @@ export function activate(context: vscode.ExtensionContext) {
             projectPath = workspaceFolders[0].uri.fsPath;
         }
 
-        // We embed the localhost server via iframe
-        // The project path could be passed via query string if the backend supported it,
-        // but for now the user can select it in the UI or it remembers the last one.
-        panel.webview.html = getWebviewContent();
+        // Read server URL from VS Code settings, default to 8010
+        const config = vscode.workspace.getConfiguration('designflow');
+        const serverUrl = config.get<string>('serverUrl') || 'http://127.0.0.1:8010';
+
+        panel.webview.html = getWebviewContent(serverUrl);
     });
 
     context.subscriptions.push(disposable);
 }
 
-function getWebviewContent() {
+function getWebviewContent(serverUrl: string) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -69,11 +70,11 @@ function getWebviewContent() {
     </style>
 </head>
 <body>
-    <iframe id="df-frame" src="http://127.0.0.1:8010" onload="hideError()" onerror="showError()"></iframe>
+    <iframe id="df-frame" src="${serverUrl}" onload="hideError()" onerror="showError()"></iframe>
     
     <div id="error-overlay" class="error-message" style="display: none; position: absolute; top: 0; left: 0; width: 100%; background: var(--vscode-editor-background);">
         <h2>Cannot connect to DesignFlow backend</h2>
-        <p>Make sure the local server is running on port 8010.</p>
+        <p>Make sure the local server is running on ${serverUrl}.</p>
         <p>Run <span class="code">python run.py</span> in your terminal, then reload this tab.</p>
     </div>
 
@@ -90,7 +91,7 @@ function getWebviewContent() {
 
         // Periodically ping to ensure server is alive, otherwise show overlay
         setInterval(() => {
-            fetch('http://127.0.0.1:8010/')
+            fetch('${serverUrl}/')
                 .then(() => overlay.style.display = 'none')
                 .catch(() => overlay.style.display = 'flex');
         }, 3000);
