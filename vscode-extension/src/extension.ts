@@ -21,7 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Read settings
         const config = vscode.workspace.getConfiguration('designflow');
-        const serverUrl = config.get<string>('serverUrl') || 'http://127.0.0.1:8010';
+        let serverUrl = config.get<string>('serverUrl') || 'http://127.0.0.1:8010';
+        serverUrl = serverUrl.replace(new RegExp('/+$'), '');
         const username = config.get<string>('username') || '';
         const password = config.get<string>('password') || '';
 
@@ -250,11 +251,20 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
                 const headers = { 'Content-Type': 'application/json' };
                 if (sessionId) headers['X-DesignFlow-Session'] = sessionId;
                 
-                const res = await fetch(serverUrl + '/steer', {
+                let res = await fetch(serverUrl + '/run/steer', {
                     method: 'POST',
                     headers: headers,
                     body: JSON.stringify({ message: val })
                 });
+                
+                if (res.status === 409) {
+                    // Try to start a new run
+                    res = await fetch(serverUrl + '/run/start', {
+                        method: 'POST',
+                        headers: headers,
+                        body: JSON.stringify({ idea: val })
+                    });
+                }
                 
                 if (!res.ok) {
                     const data = await res.json().catch(()=>({}));
