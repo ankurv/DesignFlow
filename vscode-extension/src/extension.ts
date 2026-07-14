@@ -89,28 +89,10 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
         const overlay = document.getElementById('error-overlay');
         const user = '${safeUser}';
         const pass = '${safePass}';
+        const authParams = (user && pass) ? \`/?auto_user=\${encodeURIComponent(user)}&auto_pass=\${encodeURIComponent(pass)}\` : '/';
+        const targetUrl = \`\${serverUrl}\${authParams}\`;
         
-        async function autoLogin() {
-            if (user && pass) {
-                try {
-                    const res = await fetch('${serverUrl}/auth/login', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username: user, password: pass })
-                    });
-                    const data = await res.json();
-                    if (data.session_id) {
-                        frame.src = '${serverUrl}/?session_id=' + data.session_id;
-                        return;
-                    }
-                } catch (e) {
-                    console.error('Auto-login failed', e);
-                }
-            }
-            frame.src = '${serverUrl}/';
-        }
-
-        autoLogin();
+        frame.src = targetUrl;
 
         function hideError() {
             overlay.style.display = 'none';

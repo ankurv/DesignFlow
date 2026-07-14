@@ -23,6 +23,21 @@ function showTab(id, tabElement) {
 if (window.initializeArchitectDashboard) {
   window.initializeArchitectDashboard();
 }
+
+window.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const u = params.get('auto_user');
+    const p = params.get('auto_pass');
+    if (u && p && !sessionStorage.getItem('designflow_session_id')) {
+        const uInput = document.getElementById('loginUsername');
+        const pInput = document.getElementById('loginPassword');
+        if (uInput && pInput) {
+            uInput.value = u;
+            pInput.value = p;
+            submitLogin();
+        }
+    }
+});
 if (window.mermaid) {
   mermaid.initialize({
     startOnLoad: false,
