@@ -296,6 +296,7 @@ class Orchestrator:
         require_approval: bool = True,
         mode: str = "all",
         restore: bool = False,
+        allow_artifact_changes_on_restore: bool = False,
         store: Optional[Any] = None,
     ):
         self.agents = agents
@@ -308,6 +309,7 @@ class Orchestrator:
         self.require_approval = require_approval
         self.mode = mode
         self.restore = restore
+        self.allow_artifact_changes_on_restore = allow_artifact_changes_on_restore
 
         self.mcp_manager = None
         self.mcp_tools = []
@@ -902,9 +904,13 @@ class Orchestrator:
                 if self.idea and state.get("idea") != self.idea:
                     return False
                 saved_fingerprints = state.get("artifact_fingerprints")
-                if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
+                if (
+                    saved_fingerprints
+                    and saved_fingerprints != self.ws.artifact_fingerprints()
+                    and not self.allow_artifact_changes_on_restore
+                ):
                     return False
-                self.task = state.get("task", self.task)
+                self.task = self.task or state.get("task", "")
                 self.mode = state.get("mode", self.mode)
                 self._turn_sequence = state.get("turn_sequence", 0)
                 self.run_token_total = int(state.get("run_token_total", 0) or 0)
@@ -941,9 +947,13 @@ class Orchestrator:
             if self.idea and state.get("idea") != self.idea:
                 return False
             saved_fingerprints = state.get("artifact_fingerprints")
-            if saved_fingerprints and saved_fingerprints != self.ws.artifact_fingerprints():
+            if (
+                saved_fingerprints
+                and saved_fingerprints != self.ws.artifact_fingerprints()
+                and not self.allow_artifact_changes_on_restore
+            ):
                 return False
-            self.task = state.get("task", self.task)
+            self.task = self.task or state.get("task", "")
             self.mode = state.get("mode", self.mode)
             self._turn_sequence = state.get("turn_sequence", 0)
             self.run_token_total = int(state.get("run_token_total", 0) or 0)
@@ -1047,9 +1057,11 @@ class Orchestrator:
         effective_system = system_override or self._agent_system(agent)
         estimated_input = agent.estimate_input_tokens(prompt, effective_system, ephemeral_context or "")
         output_reserve = int(agent.config.extra.get("max_tokens", 2000) or 2000)
-        provider_key = agent.config.base_id or agent.config.id or agent.name
-        observed_turn_reserve = self._provider_turn_peak.get(provider_key, 0)
-        projected_turn_reserve = max(output_reserve, observed_turn_reserve)
+        # A historical turn peak is the whole turn (input + output). Using it as
+        # an output reserve double-counts input and lets one large CLI context
+        # permanently poison future preflight checks. The configured provider
+        # output limit is the actual upper bound needed for this projection.
+        projected_turn_reserve = output_reserve
         per_turn_cap = int(agent.config.extra.get("max_input_tokens_per_turn", 32000) or 32000)
         remaining = max(0, self.max_tokens - self.run_token_total) if self.max_tokens > 0 else per_turn_cap + projected_turn_reserve
 

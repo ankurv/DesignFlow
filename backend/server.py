@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -50,9 +51,10 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(*tasks, return_exceptions=True)
     for state in all_states:
         if state.store and state.run_id and state.status in {"running", "paused", "needs_attention"}:
+            if state.orchestrator:
+                state.orchestrator.save_state()
             agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
             state.store.finish_run(state.run_id, "stopped", agents)
-            state.store.clear_run_state()
             if state.workspace:
                 state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
         state.status = "idle"
@@ -177,9 +179,10 @@ async def release_project_binding(session_id: str) -> None:
         state.run_task.cancel()
         await asyncio.gather(state.run_task, return_exceptions=True)
     if state.store and state.run_id:
+        if state.orchestrator:
+            state.orchestrator.save_state()
         agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
         state.store.finish_run(state.run_id, "stopped", agents)
-        state.store.clear_run_state()
         if state.workspace:
             state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
     state.status = "idle"
@@ -743,6 +746,17 @@ class StartBody(BaseModel):
     mode: str = "debate"
 
 
+def is_continuation_prompt(prompt: str) -> bool:
+    """Recognize explicit requests to resume an interrupted planning workflow."""
+    normalized = " ".join((prompt or "").strip().lower().split())
+    if not normalized:
+        return True
+    return bool(re.match(
+        r"^(?:please\s+)?(?:continue|resume|proceed|carry on|keep going|pick up where (?:we|you) left off)\b",
+        normalized,
+    ))
+
+
 @app.post("/run/start")
 async def start_run(
     body: StartBody,
@@ -770,12 +784,23 @@ async def start_run(
         raise HTTPException(400, "Every agent needs a unique non-empty name")
 
     brief = state.workspace.brief().strip()
-    product_goal = brief or body.idea.strip()
-    task = body.idea.strip() if brief else ""
+    continuation_requested = is_continuation_prompt(body.idea)
+    saved_state = state.store.load_run_state() if state.store and continuation_requested else None
+    saved_goal = str((saved_state or {}).get("idea", "")).strip()
+    product_goal = saved_goal or brief or body.idea.strip()
+    resumes_saved_run = bool(
+        saved_goal
+        and saved_goal == product_goal
+    )
+    task = body.idea.strip() if (brief or saved_goal) else ""
     if not product_goal:
         raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
     if body.save_brief and body.idea.strip():
         state.workspace.write_brief(body.idea)
+    if state.store and body.idea.strip() and not continuation_requested:
+        # Keep the existing artifacts as context, but never inherit a previous
+        # workflow phase when the user supplied a substantive new instruction.
+        state.store.clear_run_state()
 
     agents = []
     try:
@@ -824,6 +849,7 @@ async def start_run(
         require_approval=True,
         mode=body.mode,
         restore=True,
+        allow_artifact_changes_on_restore=resumes_saved_run,
         store=state.store,
     )
 
@@ -867,7 +893,8 @@ async def start_run(
                 state.store.clear_run_state()
 
     state.run_task = asyncio.create_task(run_and_update())
-    return {"ok": True, "run_id": state.run_id, "idea_source": "prompt" if body.idea.strip() else "DESIGNFLOW.md"}
+    idea_source = "saved_run" if resumes_saved_run else ("prompt" if body.idea.strip() else "DESIGNFLOW.md")
+    return {"ok": True, "run_id": state.run_id, "idea_source": idea_source, "resumed": resumes_saved_run}
 
 
 @app.post("/run/reset")
@@ -957,6 +984,9 @@ async def stop_run(state: AppState = Depends(get_state)):
                 agent.retry_at = ""
                 agent.retry_reason = ""
         if state.store and state.run_id:
+            # Keep the last safe workflow position so an empty fresh start can
+            # continue the design instead of silently beginning again.
+            state.orchestrator.save_state()
             agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
             state.store.finish_run(
                 state.run_id, "stopped",
@@ -964,7 +994,6 @@ async def stop_run(state: AppState = Depends(get_state)):
             )
             if state.workspace:
                 state.workspace.finish_logbook_run(state.run_id, "stopped", agent_states)
-            state.store.clear_run_state()
     state.status = "idle"
     state.last_transition = "stopped_by_user"
     state.awaiting_input = False
@@ -1016,6 +1045,57 @@ def run_status(state: AppState = Depends(get_state)):
         },
         "failed_turn": state.orchestrator.failed_turn if state.orchestrator else None,
         "phase_usage": state.orchestrator.phase_usage if state.orchestrator else {},
+    }
+
+
+@app.get("/run/progress")
+def run_progress(state: AppState = Depends(get_state)):
+    """Return a read-only workflow summary without changing recovery state."""
+    reconcile_runtime_status(state)
+    if not state.workspace:
+        raise HTTPException(400, "Open a project folder first")
+
+    saved = state.store.load_run_state() if state.store else None
+    orchestrator = state.orchestrator
+    phase = (
+        orchestrator.phase.value if orchestrator
+        else str((saved or {}).get("phase", "not_started"))
+    )
+    idea = state.current_idea or str((saved or {}).get("idea", "")) or state.workspace.brief().strip()
+    snapshot = state.workspace.snapshot()
+    completed_artifacts = [
+        name.upper() for name in ("design", "plan", "decisions")
+        if str(snapshot.get(name, "")).strip() not in {"", "(empty)"}
+    ]
+    questions = str(snapshot.get("questions", "")).strip()
+    has_pending_question = questions not in {"", "(empty)"}
+    resumable = bool(saved and state.status in {"idle", "done", "error"})
+    next_actions = {
+        "discovery": "clarify the product goal and constraints",
+        "drafting": "draft the architecture and implementation plan",
+        "peer_review": "finish specialist review of the draft",
+        "refinement": "incorporate review feedback into the artifacts",
+        "approval": "receive your answer to the current checkpoint",
+        "complete": "review or extend the completed planning baseline",
+        "not_started": "start the first design run",
+    }
+    effective_status = "stopped (ready to continue)" if resumable else state.status
+    artifacts_text = ", ".join(completed_artifacts) if completed_artifacts else "none yet"
+    message = (
+        f"Status: {effective_status}. Phase: {phase.replace('_', ' ')}. "
+        f"Completed artifacts: {artifacts_text}. "
+        f"Next: {next_actions.get(phase, 'continue the current design workflow')}."
+    )
+    if has_pending_question:
+        message += " A user decision or clarification is currently pending."
+    return {
+        "status": effective_status,
+        "phase": phase,
+        "idea": idea,
+        "completed_artifacts": completed_artifacts,
+        "awaiting_input": state.awaiting_input or has_pending_question,
+        "resumable": resumable,
+        "message": message,
     }
 
 

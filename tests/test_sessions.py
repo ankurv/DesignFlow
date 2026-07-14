@@ -1213,6 +1213,114 @@ class SessionTests(unittest.TestCase):
         self.assertIn("retries were cancelled", state.event_log[-1]["data"]["message"])
         self.assertEqual(state.event_log[-1]["event_id"], 1)
 
+    def test_stop_preserves_recovery_state_for_empty_fresh_start(self):
+        import backend.server
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = backend.server.AppState()
+            state.open_project(directory)
+            state.run_id = "run-1"
+            state.status = "paused"
+            state.orchestrator = SimpleNamespace(
+                agents=[], stop=lambda: None, resume=lambda: None,
+                save_state=lambda: state.store.save_run_state({
+                    "idea": "Finish the interrupted design",
+                    "phase": "peer_review",
+                    "agents": {},
+                }),
+            )
+
+            response = asyncio.run(backend.server.stop_run(state))
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(state.store.load_run_state()["idea"], "Finish the interrupted design")
+            self.assertEqual(state.store.load_run_state()["phase"], "peer_review")
+
+    def test_frontend_allows_empty_start_to_resume_saved_run(self):
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+
+        self.assertNotIn("Please type a prompt/task in the bottom chat input to start the run.", api_js)
+        self.assertIn("if (data.resumed) notify('Continuing the previous design run.');", api_js)
+
+    def test_only_empty_or_continuation_prompts_resume_previous_workflow(self):
+        from backend.server import is_continuation_prompt
+
+        for prompt in ("", "continue", "Please resume the design", "keep going", "carry on with the review"):
+            self.assertTrue(is_continuation_prompt(prompt), prompt)
+        for prompt in ("Design a billing API", "Add SSO", "Replace Postgres with DynamoDB"):
+            self.assertFalse(is_continuation_prompt(prompt), prompt)
+
+    def test_progress_endpoint_reads_saved_phase_without_consuming_it(self):
+        import backend.server
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = backend.server.AppState()
+            state.open_project(directory)
+            state.workspace.init("Design a billing API")
+            recovery = {
+                "idea": "Design a billing API",
+                "phase": "peer_review",
+                "agents": {},
+            }
+            state.store.save_run_state(recovery)
+
+            result = backend.server.run_progress(state)
+
+            self.assertEqual(result["phase"], "peer_review")
+            self.assertTrue(result["resumable"])
+            self.assertIn("ready to continue", result["message"])
+            self.assertEqual(state.store.load_run_state(), recovery)
+
+    def test_explicit_continuation_restores_phase_after_manual_artifact_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Design a billing API")
+            store = ProjectStore(workspace.root)
+            store.save_run_state({
+                "idea": "Design a billing API",
+                "phase": "peer_review",
+                "artifact_fingerprints": workspace.artifact_fingerprints(),
+                "agents": {},
+            })
+            workspace.write("design", "# Manually revised design\n")
+            orchestrator = Orchestrator(
+                [], workspace, restore=True, store=store,
+                allow_artifact_changes_on_restore=True,
+            )
+            orchestrator.idea = "Design a billing API"
+
+            self.assertTrue(orchestrator.load_state())
+            self.assertEqual(orchestrator.phase.value, "peer_review")
+            self.assertEqual(workspace.read("design"), "# Manually revised design\n")
+
+    def test_automatic_restore_still_rejects_unexpected_artifact_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Design a billing API")
+            store = ProjectStore(workspace.root)
+            store.save_run_state({
+                "idea": "Design a billing API",
+                "phase": "peer_review",
+                "artifact_fingerprints": workspace.artifact_fingerprints(),
+                "agents": {},
+            })
+            workspace.write("design", "# Unexpected external change\n")
+            orchestrator = Orchestrator([], workspace, restore=True, store=store)
+            orchestrator.idea = "Design a billing API"
+
+            self.assertFalse(orchestrator.load_state())
+            self.assertEqual(orchestrator.phase.value, "discovery")
+
+    def test_frontend_exposes_progress_as_a_dedicated_action(self):
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        index_html = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
+
+        self.assertNotIn("isProgressQuestion", api_js)
+        self.assertNotIn("answerProgressQuestion", api_js)
+        self.assertIn('id="statusBtn"', index_html)
+        self.assertIn('onclick="showRunProgress()"', index_html)
+        self.assertIn("fetch('/run/progress')", api_js)
+
     def test_expired_last_tab_lease_releases_project_runtime(self):
         import backend.server
 
@@ -1566,29 +1674,23 @@ class SessionTests(unittest.TestCase):
 
             self.assertEqual(agent.received, [])
 
-    def test_observed_cli_turn_size_pauses_before_budget_overshoot(self):
+    def test_historical_total_turn_peak_is_not_double_counted_as_output(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.init("logging framework")
-            agent = StatefulFake(AgentConfig(name="architect", kind="cli", id="virtual", base_id="codex-base"))
+            agent = StatefulFake(AgentConfig(
+                name="architect", kind="cli", id="virtual", base_id="codex-base",
+                extra={"max_tokens": 100},
+            ))
             events = []
             orchestrator = Orchestrator([agent], workspace, event_cb=events.append, max_tokens=1000)
             orchestrator._running = True
             orchestrator.run_token_total = 700
-            orchestrator._provider_turn_peak["codex-base"] = 600
+            orchestrator._provider_turn_peak["codex-base"] = 68976
 
-            async def exercise():
-                task = asyncio.create_task(orchestrator._send_agent(agent, "Review this design"))
-                await asyncio.sleep(0.02)
-                self.assertTrue(orchestrator._paused)
-                self.assertEqual(agent.received, [])
-                self.assertFalse(any(event.kind.value == "turn_start" for event in events))
-                orchestrator.max_tokens = 5000
-                orchestrator.resume()
-                return await task
-
-            self.assertEqual(asyncio.run(exercise()), "ok")
-            self.assertTrue(any(event.data.get("status") == "budget_exhausted" for event in events))
+            self.assertEqual(asyncio.run(orchestrator._send_agent(agent, "Review this design")), "ok")
+            self.assertFalse(orchestrator._paused)
+            self.assertFalse(any(event.data.get("status") == "budget_exhausted" for event in events))
 
     def test_provider_turn_peak_survives_run_state_cleanup_and_store_restart(self):
         with tempfile.TemporaryDirectory() as directory:
