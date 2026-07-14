@@ -720,6 +720,33 @@ function appendUserPrompt(message) {
   feed.scrollTop = feed.scrollHeight;
 }
 
+function appendProgressResponse(message) {
+  appendFeed({
+    kind: 'turn_end',
+    agent: 'DesignFlow',
+    timestamp: new Date().toISOString(),
+    data: {response: message, usage: {}, pricing_known: true, cost_usd: 0}
+  });
+}
+
+async function showRunProgress() {
+  const statusButton = document.getElementById('statusBtn');
+  if (statusButton) statusButton.disabled = true;
+  try {
+    const response = await fetch('/run/progress');
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      notify(data.detail || 'Could not read design progress.', true);
+      return;
+    }
+    appendProgressResponse(data.message);
+  } catch (err) {
+    notify('Could not read design progress.', true);
+  } finally {
+    if (statusButton) statusButton.disabled = false;
+  }
+}
+
 
 function parseMarkdown(text) {
   if (!text) return '';
@@ -765,11 +792,6 @@ async function startRun(prompt) {
     document.getElementById('steerInput').value = '';
   }
 
-  if (!idea) {
-    notify('Please type a prompt/task in the bottom chat input to start the run.', true);
-    return;
-  }
-
   if (!projectOpen) {
     const opened = await openProject();
     if (!opened) return;
@@ -809,7 +831,8 @@ async function startRun(prompt) {
   const data = await res.json();
   if (res.ok && data.ok) {
     document.getElementById('runId').textContent = data.run_id;
-    appendUserPrompt(idea);
+    if (idea) appendUserPrompt(idea);
+    if (data.resumed) notify('Continuing the previous design run.');
     updateStatus('running');
   } else {
     notify(data.detail || 'Failed to start', true);

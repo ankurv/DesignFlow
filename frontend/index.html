@@ -193,6 +193,7 @@
               <div class="cockpit-composer-row">
                 <input id="steerInput" name="design_prompt" placeholder="Describe what you want the agents to design…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="handleSteerInput(event)" style="flex:1">
                 <div class="cockpit-composer-actions">
+                  <button class="cockpit-inline-action" id="statusBtn" type="button" onclick="showRunProgress()" title="Show current workflow progress">Status</button>
                   <button class="btn btn-primary cockpit-small-btn" id="sendBtn" onclick="steer()">Start run</button>
                   <button class="cockpit-inline-action" id="resetBtn" onclick="resetRun()" style="display:none">Reset</button>
                   <button class="cockpit-inline-action" id="pauseBtn" onclick="pauseResume()" style="display:none">Pause</button>
