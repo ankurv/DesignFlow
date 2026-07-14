@@ -139,6 +139,13 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
     </div>
 
     <script>
+        const statusMsg = document.getElementById('statusMsg');
+        window.onerror = function(message, source, lineno, colno, error) {
+            if (statusMsg) {
+                statusMsg.innerText = 'Script Error: ' + message + ' at ' + lineno + ':' + colno;
+                statusMsg.className = 'feed-item error';
+            }
+        };
         const serverUrl = '${serverUrl}';
         const user = '${safeUser}';
         const pass = '${safePass}';
@@ -147,7 +154,6 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
         let eventSource = null;
 
         const feed = document.getElementById('feed');
-        const statusMsg = document.getElementById('statusMsg');
         const steerInput = document.getElementById('steerInput');
         const sendBtn = document.getElementById('sendBtn');
 
@@ -155,11 +161,15 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
             const div = document.createElement('div');
             div.className = 'feed-item' + (isError ? ' error' : '');
             
-            // Very simple markdown-like rendering for bold and code
-            const formatted = String(text)
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\`(.*?)\`/g, '<code style="background:rgba(0,0,0,0.3);padding:2px 4px;border-radius:4px;">$1</code>')
-                .replace(/\n/g, '<br>');
+            const escapedText = String(text)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+
+            const formatted = escapedText
+                .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
+                .replace(new RegExp(String.fromCharCode(96) + '(.*?)' + String.fromCharCode(96), 'g'), '<code style="background:rgba(0,0,0,0.3);padding:2px 4px;border-radius:4px;">$1</code>')
+                .replace(/\\n/g, '<br>');
 
             div.innerHTML = \`<span class="agent">\${agent}</span><div>\${formatted}</div>\`;
             feed.appendChild(div);
