@@ -75,6 +75,15 @@ Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 1. Enter an absolute folder path (e.g. `/Users/you/my-project`) in the **Project Folder** bar and click **Open / Create**.
 2. DesignFlow automatically generates an internal project metadata folder to store agent overrides, debate history, and a local SQLite database (`designflow.db`).
 
+### 3. Using the VS Code Extension
+
+You can optionally run DesignFlow directly inside VS Code as an integrated webview. 
+
+1. Ensure the backend server is running (`python run.py --port 8010`).
+2. Inside `vscode-extension/`, run `npm install` and compile with `npx vsce package`.
+3. Install the resulting `.vsix` file into your local VS Code.
+4. Open the Command Palette (`Cmd+Shift+P`) and type **DesignFlow: Open Dashboard**.
+
 ---
 
 ## 🗄️ Architecture & Structure

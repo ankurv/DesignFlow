@@ -1,0 +1,35 @@
+{
+  "name": "designflow",
+  "displayName": "DesignFlow",
+  "description": "AI-powered product planning and architecture designer",
+  "version": "0.0.1",
+  "publisher": "ankurv",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "designflow.start",
+        "title": "DesignFlow: Open Dashboard"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.1.3",
+    "@vscode/vsce": "^2.19.0"
+  }
+}
