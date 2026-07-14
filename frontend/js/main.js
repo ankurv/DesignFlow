@@ -28,7 +28,6 @@ window.addEventListener('DOMContentLoaded', () => {
     const params = new URLSearchParams(window.location.search);
     const u = params.get('auto_user');
     const p = params.get('auto_pass');
-    
     if (u && p && !sessionStorage.getItem('designflow_session_id')) {
         const uInput = document.getElementById('loginUsername');
         const pInput = document.getElementById('loginPassword');
@@ -36,23 +35,6 @@ window.addEventListener('DOMContentLoaded', () => {
             uInput.value = u;
             pInput.value = p;
             submitLogin();
-        }
-    }
-
-    const isVsCode = params.get('vscode_mode');
-    if (isVsCode === 'true') {
-        document.body.classList.add('vscode-mode');
-        showTab('chat');
-        
-        const vscodeProject = params.get('vscode_project');
-        if (vscodeProject) {
-            const input = document.getElementById('projectPathInput');
-            if (input) {
-                input.value = vscodeProject;
-                // Wait briefly for main.js functions to fully load if necessary, 
-                // though submitProjectPath is in api.js which is loaded before main.js
-                setTimeout(() => submitProjectPath(), 100);
-            }
         }
     }
 });

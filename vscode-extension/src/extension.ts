@@ -25,13 +25,13 @@ export function activate(context: vscode.ExtensionContext) {
         const username = config.get<string>('username') || '';
         const password = config.get<string>('password') || '';
 
-        panel.webview.html = getWebviewContent(serverUrl, username, password, projectPath);
+        panel.webview.html = getWebviewContent(serverUrl, username, password);
     });
 
     context.subscriptions.push(disposable);
 }
 
-function getWebviewContent(serverUrl: string, username?: string, password?: string, projectPath: string = '') {
+function getWebviewContent(serverUrl: string, username?: string, password?: string) {
     // Escape strings just in case
     const safeUser = (username || '').replace(/'/g, "\\'");
     const safePass = (password || '').replace(/'/g, "\\'");
@@ -89,10 +89,8 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
         const overlay = document.getElementById('error-overlay');
         const user = '${safeUser}';
         const pass = '${safePass}';
-        const authParams = (user && pass) ? \`/?auto_user=\${encodeURIComponent(user)}&auto_pass=\${encodeURIComponent(pass)}\` : '/?';
-        const projectPath = '${projectPath}';
-        const vscodeParams = \`\${authParams.includes('?') ? '&' : '?'}vscode_mode=true&vscode_project=\${encodeURIComponent(projectPath)}\`;
-        const targetUrl = \`\${serverUrl}\${authParams}\${vscodeParams}\`;
+        const authParams = (user && pass) ? \`/?auto_user=\${encodeURIComponent(user)}&auto_pass=\${encodeURIComponent(pass)}\` : '/';
+        const targetUrl = \`\${serverUrl}\${authParams}\`;
         
         frame.src = targetUrl;
 
