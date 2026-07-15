@@ -10,9 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.agents.base import AgentBase, AgentConfig, Usage
+from backend.agents.base import AgentBase, AgentConfig, Message, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
-from backend.orchestrator import Orchestrator, OrchestratorPhase
+from backend.orchestrator import EventKind, Orchestrator, OrchestratorPhase
 from backend.errors import classify_provider_error
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
@@ -671,6 +671,99 @@ class SessionTests(unittest.TestCase):
             self.assertIn("Confirmed by user", decisions)
             self.assertEqual(workspace.read("questions"), "(empty)")
 
+    def test_bundled_checkpoint_answers_are_presented_sequentially(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.write("questions", """# Decision Checkpoint
+
+Decision 1: Choose ingestion.
+- [A] HTTP
+- [B] Kafka
+Recommendation: B
+
+Decision 2: Choose retention.
+- [A] 30 days
+- [B] 90 days
+Recommendation: A
+""")
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.phase = OrchestratorPhase.APPROVAL
+
+            asyncio.run(orchestrator.steer("B — Kafka"))
+
+            remaining = workspace.read("questions")
+            self.assertNotIn("Choose ingestion", remaining)
+            self.assertIn("Choose retention", remaining)
+            decisions = workspace.read("decisions")
+            self.assertIn("Choose ingestion", decisions)
+            self.assertNotIn("Choose retention", decisions)
+
+    def test_restored_checkpoint_normalizes_before_it_is_presented(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            bundled = """# Decision Checkpoint
+
+Question 1: Choose transport.
+- [A] HTTP
+- [B] gRPC
+
+Question 2: Choose storage.
+- [A] S3
+- [B] Local disk
+"""
+            workspace.write("questions", bundled)
+            self.assertTrue(workspace.normalize_checkpoint_queue())
+            visible = workspace.read("questions")
+            self.assertIn("Choose transport", visible)
+            self.assertNotIn("Choose storage", visible)
+
+            restored = Workspace(directory)
+            self.assertTrue(restored.record_checkpoint_answer(visible, "B — gRPC"))
+            next_visible = restored.read("questions")
+            self.assertNotIn("Choose transport", next_visible)
+            self.assertIn("Choose storage", next_visible)
+
+    def test_checkpoint_rationale_is_not_presented_without_its_first_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.write("questions", """# Decision Checkpoint
+
+Three major design debates require user feedback.
+
+Decision 1: Choose transport.
+- [A] HTTP
+- [B] Kafka
+
+Decision 2: Choose retention.
+- [A] 30 days
+- [B] 90 days
+""")
+            self.assertTrue(workspace.normalize_checkpoint_queue())
+            visible = workspace.read("questions")
+            self.assertIn("Three major design debates", visible)
+            self.assertIn("Choose transport", visible)
+            self.assertIn("- [A] HTTP", visible)
+            self.assertNotIn("Choose retention", visible)
+
+    def test_legacy_rationale_only_checkpoint_promotes_queued_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            workspace.write("questions", "# Decision Checkpoint\n\nThree debates require feedback.")
+            (workspace.root / "checkpoint_queue.json").write_text(json.dumps([
+                "Decision 1: Choose transport.\n- [A] HTTP\n- [B] Kafka",
+                "Decision 2: Choose retention.\n- [A] 30 days\n- [B] 90 days",
+            ]))
+
+            self.assertTrue(workspace.normalize_checkpoint_queue())
+            visible = workspace.read("questions")
+            self.assertIn("Three debates require feedback", visible)
+            self.assertIn("Choose transport", visible)
+            self.assertIn("- [A] HTTP", visible)
+
     def test_explicit_user_reversal_is_recorded_without_ai_classification(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -1120,6 +1213,21 @@ class SessionTests(unittest.TestCase):
         finally:
             backend.server.app.state.request_shutdown = original_callback
             backend.server.app.state.shutting_down = original_flag
+
+    def test_shutdown_signals_open_sse_connections(self):
+        import backend.server
+
+        state = backend.server.AppState()
+        first = asyncio.Queue()
+        second = asyncio.Queue()
+        state.sse_clients.extend([first, second])
+        backend.server.unbound_states["shutdown-test"] = state
+        try:
+            self.assertEqual(backend.server.close_sse_connections(), 2)
+            self.assertIs(first.get_nowait(), backend.server.SSE_SHUTDOWN)
+            self.assertIs(second.get_nowait(), backend.server.SSE_SHUTDOWN)
+        finally:
+            backend.server.unbound_states.pop("shutdown-test", None)
 
     def test_non_admin_cannot_shutdown_server(self):
         from fastapi.testclient import TestClient
@@ -1658,21 +1766,60 @@ class SessionTests(unittest.TestCase):
             ))
             self.assertLess(len(agent.received[0][-1]["content"]), 12000)
 
-    def test_oversized_prompt_is_blocked_before_provider_call(self):
+    def test_oversized_prompt_enters_recoverable_compact_retry_flow(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.ensure()
             workspace.init("small product")
+            events = []
             agent = StatefulFake(
                 AgentConfig(name="reviewer", kind="openai", extra={"max_input_tokens_per_turn": 100}),
             )
-            orchestrator = Orchestrator([agent], workspace, max_tokens=1000, require_approval=False)
+            orchestrator = Orchestrator(
+                [agent], workspace, max_tokens=5000, require_approval=False, event_cb=events.append,
+            )
             orchestrator._running = True
 
-            with self.assertRaisesRegex(RuntimeError, "Preflight blocked"):
-                asyncio.run(orchestrator._send_agent(agent, "x" * 4000))
+            async def exercise():
+                task = asyncio.create_task(orchestrator._send_agent(agent, "x" * 4000))
+                while not orchestrator.failed_turn:
+                    await asyncio.sleep(0)
+                self.assertEqual(orchestrator.failed_turn["error_code"], "context_too_large")
+                self.assertEqual(agent.received, [])
+                agent.config.extra["max_input_tokens_per_turn"] = 2000
+                orchestrator.retry_failed_turn()
+                self.assertEqual(await task, "ok")
 
-            self.assertEqual(agent.received, [])
+            asyncio.run(exercise())
+            self.assertTrue(any(
+                event.kind == EventKind.ERROR and event.data.get("recoverable")
+                for event in events
+            ))
+
+    def test_oversized_historical_response_is_bounded_before_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("logging framework")
+            agent = StatefulFake(
+                AgentConfig(name="architect", kind="openai", extra={"max_input_tokens_per_turn": 8000}),
+                replies=["ok"],
+            )
+            agent.manages_context = False
+            agent.history = [
+                Message(role="user", content="Draft the architecture"),
+                Message(role="assistant", content="x" * 140000),
+            ]
+            orchestrator = Orchestrator([agent], workspace, max_tokens=50000, require_approval=False)
+            orchestrator._running = True
+
+            result = asyncio.run(orchestrator._send_agent(
+                agent, "Answer this basic question", ephemeral_context=workspace.read("context"),
+            ))
+
+            self.assertEqual(result, "ok")
+            sent_text = "\n".join(message["content"] for message in agent.received[0])
+            self.assertIn("older response truncated", sent_text)
+            self.assertLess(len(sent_text), 40000)
 
     def test_historical_total_turn_peak_is_not_double_counted_as_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1859,6 +2006,15 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertEqual(Orchestrator._fuzzy_intent("help"), "help")
         self.assertEqual(Orchestrator._fuzzy_intent("design a secure payment architecture"), "")
 
+    def test_auto_mode_routes_basic_questions_without_team_debate(self):
+        self.assertFalse(Orchestrator._should_run_team_workflow("Why did we choose Kafka?", "auto"))
+        self.assertFalse(Orchestrator._should_run_team_workflow("What does this setting do?", "auto"))
+        self.assertTrue(Orchestrator._should_run_team_workflow("Design a secure payment architecture", "auto"))
+        self.assertTrue(Orchestrator._should_run_team_workflow("I want to build a logging platform", "auto"))
+        self.assertTrue(Orchestrator._should_run_team_workflow("Debate the storage approach", "auto"))
+        self.assertFalse(Orchestrator._should_run_team_workflow("Design a system", "direct"))
+        self.assertTrue(Orchestrator._should_run_team_workflow("What is this?", "debate"))
+
     def test_provider_errors_prefer_structured_status_codes(self):
         forbidden = RuntimeError("a very long provider response")
         forbidden.status_code = 403
@@ -1891,6 +2047,20 @@ class DeterministicRoutingTests(unittest.TestCase):
 
         broadcast(Event(EventKind.DONE, data={}), state)
         self.assertFalse(state.awaiting_input)
+
+    def test_web_checkpoint_offers_one_click_options_and_custom_answer(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("submitDecisionOption", source)
+        self.assertIn("Other — write my own answer", source)
+        self.assertIn("Choose one option to continue", source)
+        self.assertIn("await fetch('/run/resume'", source)
+
+    def test_vscode_checkpoint_has_option_and_other_answer_flow(self):
+        source = (Path(__file__).parents[1] / "vscode-extension" / "src" / "extension.ts").read_text()
+        self.assertIn("one question at a time", source)
+        self.assertIn("showCheckpoint", source)
+        self.assertIn("O — Other…", source)
+        self.assertIn("/workspace/file/questions", source)
 
     def test_project_usage_survives_store_restart(self):
         with tempfile.TemporaryDirectory() as directory:

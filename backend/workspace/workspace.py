@@ -159,7 +159,91 @@ class Workspace:
         path = self._file("questions")
         if path.exists():
             path.unlink()
-            self.refresh_context()
+        queue_path = self.root / "checkpoint_queue.json"
+        if queue_path.exists():
+            queue_path.unlink()
+        self.refresh_context()
+
+    @staticmethod
+    def split_checkpoint_questions(content: str) -> list[str]:
+        """Split a legacy bundled checkpoint without discarding later decisions."""
+        body = re.sub(r"^#\s*(?:Decision Checkpoint|Clarifying Questions?)\s*$", "", content or "", flags=re.I | re.M).strip()
+        if not body:
+            return []
+        lines = body.splitlines()
+        marker = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:(?:decision|question)(?:\s+\d+)?\s*[:.\-—–]|\d+[.)]\s+)",
+            re.I,
+        )
+        starts = [
+            index for index, line in enumerate(lines)
+            if marker.match(re.sub(r"[*_`]", "", line))
+        ]
+        if len(starts) < 2:
+            return [body]
+        if starts[0] != 0:
+            # Introductory rationale belongs with the first real question; it
+            # must never become a standalone checkpoint with no choices.
+            starts[0] = 0
+        starts.append(len(lines))
+        return ["\n".join(lines[start:end]).strip() for start, end in zip(starts, starts[1:]) if "\n".join(lines[start:end]).strip()]
+
+    def record_checkpoint_answer(self, checkpoint: str, answer: str) -> bool:
+        """Record only the active question and persist any bundled remainder."""
+        self.normalize_checkpoint_queue(checkpoint)
+        active = self.read("questions")
+        active_questions = self.split_checkpoint_questions(active)
+        if not active_questions:
+            self.clear_questions()
+            return False
+        self.record_user_decision(active_questions[0], answer)
+        queue_path = self.root / "checkpoint_queue.json"
+        try:
+            remaining = json.loads(queue_path.read_text()) if queue_path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            remaining = []
+        if remaining:
+            self.write("questions", "# Decision Checkpoint\n\n" + remaining.pop(0))
+            if remaining:
+                queue_path.write_text(json.dumps(remaining, indent=2))
+            elif queue_path.exists():
+                queue_path.unlink()
+            return True
+        self.clear_questions()
+        return False
+
+    def normalize_checkpoint_queue(self, checkpoint: str | None = None) -> bool:
+        """Expose one active question and durably queue any bundled followers."""
+        content = checkpoint if checkpoint is not None else self.read("questions")
+        questions = self.split_checkpoint_questions(content)
+        queue_path = self.root / "checkpoint_queue.json"
+        existing: list[str] = []
+        try:
+            existing = json.loads(queue_path.read_text()) if queue_path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if len(questions) < 2:
+            # Repair checkpoints normalized by older builds that accidentally
+            # left only the introductory rationale visible and queued every
+            # actual question. Preserve the rationale with the first question.
+            has_choices = bool(re.search(r"^\s*(?:-\s*\[[A-Z]\]|[A-Z][).:\-])\s+", content or "", re.M))
+            if existing and not has_choices:
+                promoted = existing.pop(0)
+                rationale = re.sub(
+                    r"^#\s*(?:Decision Checkpoint|Clarifying Questions?)\s*$",
+                    "", content or "", flags=re.I | re.M,
+                ).strip()
+                visible = "\n\n".join(filter(None, (rationale, promoted)))
+                self.write("questions", "# Decision Checkpoint\n\n" + visible)
+                if existing:
+                    queue_path.write_text(json.dumps(existing, indent=2))
+                else:
+                    queue_path.unlink(missing_ok=True)
+                return True
+            return False
+        self.write("questions", "# Decision Checkpoint\n\n" + questions[0])
+        queue_path.write_text(json.dumps(questions[1:] + existing, indent=2))
+        return True
 
     def record_user_decision(self, question: str, answer: str) -> None:
         """Append a durable, explicitly confirmed decision without an LLM call."""

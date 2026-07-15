@@ -191,6 +191,43 @@ window.useDecisionOption = function(label, text) {
   input.setSelectionRange(input.value.length, input.value.length);
 };
 
+window.submitDecisionOption = async function(label, text) {
+  if (!awaitingDecisionInput) return;
+  const buttons = document.querySelectorAll('.decision-option, .decision-other');
+  buttons.forEach(button => { button.disabled = true; });
+  const status = document.getElementById('decisionSubmitStatus');
+  if (status) status.textContent = 'Submitting your decision…';
+  const input = document.getElementById('steerInput');
+  const answer = `${label}${text ? ' — ' + text : ''}`;
+  if (input) input.value = answer;
+  try {
+    const steerRes = await fetch('/run/steer', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: answer})
+    });
+    if (!steerRes.ok) throw new Error('decision submission failed');
+    const resumeRes = await fetch('/run/resume', {method: 'POST'});
+    if (!resumeRes.ok) throw new Error('workflow resume failed');
+    if (input) input.value = '';
+    awaitingDecisionInput = false;
+    paused = false;
+    updateStatus('running');
+    const pendingPane = document.getElementById('contextPendingActions');
+    if (pendingPane) pendingPane.style.display = 'none';
+  } catch (error) {
+    buttons.forEach(button => { button.disabled = false; });
+    if (status) status.textContent = 'Could not submit. Choose again or type an answer below.';
+  }
+};
+
+window.useCustomDecision = function() {
+  const input = document.getElementById('steerInput');
+  if (!input) return;
+  input.value = '';
+  input.placeholder = 'Type your own answer, then press Submit decision…';
+  input.focus();
+};
+
 function renderQuestionBody(content) {
   const parsed = extractDecisionOptions(content || '');
   const optionsEl = document.getElementById('contextDecisionOptions');
@@ -202,16 +239,23 @@ function renderQuestionBody(content) {
 
   const firstOptionIndex = content.search(/^\s*-\s*\[[A-Z]\]\s+/m);
   const intro = firstOptionIndex > 0 ? content.slice(0, firstOptionIndex).trim() : '# Decision checkpoint';
+  const introLines = intro.replace(/^#.*$/gm, '').split('\n').map(line => line.trim()).filter(Boolean);
+  let questionStart = introLines.findLastIndex(line => /^(?:decision|question)(?:\s+\d+)?\s*[:\-—–]/i.test(line));
+  if (questionStart < 0) questionStart = Math.max(0, introLines.length - 1);
+  const rationale = introLines.slice(0, questionStart).join(' ');
+  const question = introLines.slice(questionStart).join(' ') || 'Choose the direction you want the team to take.';
   const recommendationMatch = content.match(/recommendation\s*[:\-][^\n]*(?:\n(?!\s*-\s*\[[A-Z]\])[^\n]+)?/i);
   const recommendation = recommendationMatch ? recommendationMatch[0].trim() : '';
   const buttons = parsed.options.map(opt => {
     const recommended = parsed.recommendation === opt.label;
-    return `<button class="decision-option btn ${recommended ? 'btn-primary' : 'btn-secondary'}" onclick="useDecisionOption('${escAttr(opt.label)}','${escAttr(opt.text)}')">${recommended ? 'Recommended · ' : ''}${escHtml(opt.label)} — ${escHtml(opt.text)}</button>`;
+    const encodedText = encodeURIComponent(opt.text);
+    return `<button class="decision-option ${recommended ? 'is-recommended' : ''}" onclick="submitDecisionOption('${escAttr(opt.label)}',decodeURIComponent('${encodedText}'))"><span class="decision-option-key">${escHtml(opt.label)}</span><span class="decision-option-copy">${escHtml(opt.text)}</span>${recommended ? '<span class="decision-recommended-badge">Recommended</span>' : ''}</button>`;
   }).join('');
   const more = parsed.hasMoreDecisions
     ? '<div class="decision-more-note">Additional decisions will be asked after you answer this one.</div>'
     : '';
-  return `<div class="decision-group"><div class="decision-question-copy">${parseMarkdown(intro)}${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><div class="decision-inline-options">${buttons}</div></div>`;
+  const context = rationale ? `<details class="decision-context"><summary>Why this decision is needed</summary><div>${escHtml(rationale)}</div></details>` : '';
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-step-label">Decision required</div>${context}<div class="decision-question">${escHtml(question)}</div>${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><div class="decision-inline-options" role="group" aria-label="Decision options">${buttons}<button class="decision-option decision-other" onclick="useCustomDecision()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — write my own answer</span></button><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite">Choose one option to continue.</div></div></div>`;
 }
 
 function renderInteractiveQuestionPanel(content) {
@@ -440,7 +484,18 @@ function handleEvent(ev) {
     recentFileWrites.unshift({ file: ev.data.file || 'Unknown file', meta: ev.data.preview || 'Artifact updated' });
     recentFileWrites = recentFileWrites.slice(0, 8);
   }
-  if (ev.kind === 'error') { awaitingDecisionInput = false; updateStatus(ev.data.recoverable ? 'needs_attention' : 'error'); }
+  if (ev.kind === 'error') {
+    awaitingDecisionInput = false;
+    const retryBtn = document.getElementById('retryBtn');
+    if (retryBtn && ev.data.recoverable) {
+      retryBtn.textContent = ev.data.error_code === 'context_too_large' ? 'Compact & Retry' : 'Retry failed turn';
+      retryBtn.title = ev.data.error_code === 'context_too_large'
+        ? 'Re-run preflight with bounded history and compact project context'
+        : 'Retry the failed model turn';
+      retryBtn.disabled = false;
+    }
+    updateStatus(ev.data.recoverable ? 'needs_attention' : 'error');
+  }
 
   // Parse coordinator turn into user-facing summary cards
   if (ev.kind === 'turn_end' && isCoordinatorEvent(ev)) {
@@ -805,8 +860,8 @@ async function startRun(prompt) {
   mergedAgents.forEach(a => {
     if (!agentColors[a.name]) agentColors[a.name] = COLORS[colorIdx++ % COLORS.length];
   });
-  // Default to debate, but allow the user to override via prompt if they explicitly ask to build
-  let mode = "debate";
+  // Auto routes basic questions to one model and substantive design work to the team.
+  let mode = "auto";
   totalTokens = 0;
   totalCost = 0;
   eventCount = 0;
@@ -861,12 +916,21 @@ async function pauseResume() {
 }
 
 async function retryFailedTurn() {
+  const retryBtn = document.getElementById('retryBtn');
+  if (retryBtn) {
+    retryBtn.disabled = true;
+    retryBtn.textContent = 'Compacting…';
+  }
   const response = await fetch('/run/retry', {method:'POST'});
   const data = await response.json();
-  if (!response.ok) { notify(data.detail || 'Could not retry the failed turn', true); return; }
+  if (!response.ok) {
+    if (retryBtn) retryBtn.disabled = false;
+    notify(data.detail || 'Could not retry the failed turn', true);
+    return;
+  }
   paused = false;
   updateStatus('running');
-  notify('Retrying the same failed turn');
+  notify('Context compacted. Retrying the same turn.');
 }
 
 async function resetRun() {
@@ -1080,6 +1144,12 @@ async function fetchAgentStatus() {
     });
   });
   const failedTurn = res.failed_turn || {};
+  const retryBtn = document.getElementById('retryBtn');
+  if (retryBtn && failedTurn.error_code === 'context_too_large') {
+    retryBtn.textContent = 'Compact & Retry';
+    retryBtn.title = 'Re-run preflight with bounded history and compact project context';
+    retryBtn.disabled = false;
+  }
   if (failedTurn.agent_id) {
     const failedBaseId = String(failedTurn.agent_id);
     ['global-', 'project-'].forEach(prefix => {

@@ -31,6 +31,7 @@ from .crypto import encrypt_key, decrypt_key
 from .errors import classify_provider_error
 
 logger = logging.getLogger(__name__)
+SSE_SHUTDOWN = object()
 
 
 @asynccontextmanager
@@ -130,6 +131,31 @@ class AppState:
         if self.configs:
             return list(self.configs)
         return load_global_agents()
+
+
+def close_sse_connections() -> int:
+    """Ask every event stream to finish so the HTTP server can shut down cleanly."""
+    closed = 0
+    seen: set[int] = set()
+    states = list(app_states.values()) + list(unbound_states.values())
+    for state in states:
+        if id(state) in seen:
+            continue
+        seen.add(id(state))
+        for queue in list(state.sse_clients):
+            try:
+                queue.put_nowait(SSE_SHUTDOWN)
+                closed += 1
+            except asyncio.QueueFull:
+                # A full stream is already unhealthy. Make room for the close
+                # signal instead of waiting for its client to drain old events.
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(SSE_SHUTDOWN)
+                    closed += 1
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+    return closed
 
 
 # Project runtimes are shared; browser sessions only select a project.
@@ -388,6 +414,8 @@ async def sse_stream(request: Request, state: AppState = Depends(get_state)):
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=5)
+                    if event is SSE_SHUTDOWN:
+                        break
                     yield f"id: {event.get('event_id', '')}\ndata: {json.dumps(event)}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
@@ -1202,6 +1230,7 @@ def admin_shutdown(background_tasks: BackgroundTasks, session: Session = Depends
         raise HTTPException(503, "Graceful shutdown is unavailable in this server launcher")
     if not app.state.shutting_down:
         app.state.shutting_down = True
+        close_sse_connections()
         background_tasks.add_task(callback)
     return {"ok": True, "message": "Graceful server shutdown started"}
 

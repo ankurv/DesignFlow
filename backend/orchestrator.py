@@ -346,6 +346,7 @@ class Orchestrator:
         self.idea = ""
         self.task = ""
         self._state_loaded = False
+        self._checkpoint_has_more = False
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -364,9 +365,10 @@ class Orchestrator:
         self.ws.add_context_event(event_kind, message, self.phase.value, "user")
         if pending_question and pending_question != "(empty)":
             self._user_checkpoint_count += 1
-            self.ws.record_user_decision(pending_question, message)
+            self._checkpoint_has_more = self.ws.record_checkpoint_answer(pending_question, message)
         await self._steer_queue.put(message)
-        self.ws.clear_questions()
+        if not pending_question or pending_question == "(empty)":
+            self.ws.clear_questions()
         self.ws.reset_context_tracking()
         self._context_invocations.clear()
         self._emit(Event(EventKind.STEER, agent="human", data={"message": message}))
@@ -428,6 +430,29 @@ class Orchestrator:
             artifacts = ", ".join(ready) if ready else "no planning artifacts yet"
             return f"Project status: {artifacts}. Run usage is {self.run_token_total:,} of {self.max_tokens:,} configured tokens."
         return ""
+
+    @staticmethod
+    def _should_run_team_workflow(text: str, mode: str) -> bool:
+        """Route ordinary questions to one agent and substantive planning work to the team."""
+        normalized = " ".join((text or "").lower().split())
+        if mode in {"debate", "all"}:
+            return True
+        if mode == "direct":
+            return False
+        if re.search(r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized):
+            return True
+        strong_planning_request = re.search(
+            r"^(?:please\s+)?(?:build|design|architect|plan|create|develop|redesign|refactor|re-architect)\b",
+            normalized,
+        )
+        revision_request = re.search(r"^(?:please\s+)?(?:revise|update|improve|review)\b", normalized)
+        planning_object = re.search(
+            r"\b(?:architecture|implementation plan|technical design|system design|product plan|mvp)\b",
+            normalized,
+        )
+        return bool(strong_planning_request) or bool(revision_request and planning_object) or bool(
+            re.search(r"\b(?:i|we)\s+(?:want|need)\s+to\s+(?:build|design|create|plan|develop)\b", normalized)
+        )
 
     async def run(self, idea: str, task: str = ""):
         self._running = True
@@ -492,19 +517,11 @@ class Orchestrator:
                 target_agent = names[matched_name]
                 prompt_text = re.sub(rf'@{match.group(1)}\s*', '', idea, flags=re.IGNORECASE).strip()
 
-        idea_lower = idea.lower()
-        debate_terms = ("debate", "discuss", "discussion", "project", "loop", "run debate")
-        words = re.findall(r"[a-z]+", idea_lower)
-        fuzzy_debate = any(get_close_matches(word, debate_terms[:3], n=1, cutoff=0.84) for word in words)
-        explicit_debate = (
-            self.mode == "debate"
-            or any(k in idea_lower for k in debate_terms)
-            or fuzzy_debate
-            or os.environ.get("DESIGNFLOW_TEST") == "1"
-        )
+        team_workflow = self._should_run_team_workflow(idea, self.mode)
 
-        # Default to continuous multi-agent loop if we have a coordinator, UNLESS they @mentioned a specific agent.
-        is_direct = target_agent is not None or (not explicit_debate and not coordinator)
+        # Basic questions use one capable agent. Team planning is reserved for
+        # explicit design/build/debate work, and @mentions always stay direct.
+        is_direct = target_agent is not None or not team_workflow
 
         if is_direct:
             if not target_agent:
@@ -517,11 +534,14 @@ class Orchestrator:
             turn_context = {"step": 1, "phase": "direct_chat", "standing_role": target_agent.config.role}
             turn_id = self._begin_turn(target_agent, turn_context)
 
-            snapshot = self.ws.snapshot()
+            context = self.ws.scoped_context(["design", "plan", "decisions"])
+            if len(context) > 12000:
+                context = context[:12000].rstrip() + "\n\n[context truncated]"
             prompt = (
                 f"Conversational Turn.\n"
                 f"User Prompt: {prompt_text}\n"
-                f"Workspace context (if any):\n{snapshot}\n"
+                f"Answer the question directly and concisely. Do not start a design debate.\n"
+                f"Relevant workspace context (if any):\n{context}\n"
             )
 
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
@@ -814,6 +834,7 @@ class Orchestrator:
             self.post_approval_phase = None
             self.save_state()
             return
+        self.ws.normalize_checkpoint_queue()
         self._emit(Event(EventKind.PHASE, data={"phase": "approval", "status": "waiting_for_approval", "step": step}))
         self.pause()
         await self._wait_if_paused()
@@ -824,10 +845,14 @@ class Orchestrator:
         new_steering = await self._drain_steer()
         if new_steering:
             self.ws.append("logbook", new_steering, "User", "Provided approval/clarification")
-            self._pending_user_input = new_steering
+            self._pending_user_input = "\n".join(filter(None, (self._pending_user_input, new_steering)))
         self._user_checkpoint_count += 1
-        self.phase = self.post_approval_phase or OrchestratorPhase.COMPLETE
-        self.post_approval_phase = None
+        if self._checkpoint_has_more or self.ws.read("questions").strip() not in {"", "(empty)"}:
+            self._checkpoint_has_more = False
+            self.phase = OrchestratorPhase.APPROVAL
+        else:
+            self.phase = self.post_approval_phase or OrchestratorPhase.COMPLETE
+            self.post_approval_phase = None
         self.save_state()
 
     async def _send_agent_basic(self, agent, prompt, phase_name, step, ephemeral="", synthesis=False):
@@ -1078,11 +1103,61 @@ class Orchestrator:
                     "reason": "Turn context was compacted before contacting the provider.",
                 }))
 
-        if estimated_input > per_turn_cap:
-            raise RuntimeError(
+        while estimated_input > per_turn_cap:
+            error = (
                 f"Preflight blocked an oversized prompt estimated at {estimated_input} input tokens "
                 f"(per-turn limit {per_turn_cap})."
             )
+            agent.mark_error(error)
+            self._failed_turn = {
+                "turn_id": turn_id,
+                "attempt": attempt,
+                "agent_id": agent.config.id,
+                "agent": agent.name,
+                "error": error,
+                "public_error": (
+                    "This turn exceeded the model context limit. DesignFlow compacted the available "
+                    "workspace context and history; use Compact & Retry to run preflight again."
+                ),
+                "error_code": "context_too_large",
+                "prompt": prompt,
+                "estimated_input_tokens": estimated_input,
+                "per_turn_limit": per_turn_cap,
+                **context,
+            }
+            self._recovery_event.clear()
+            self._paused = True
+            self._pause_event.clear()
+            self._emit(Event(EventKind.ERROR, agent=agent.name, data={
+                "turn_id": turn_id,
+                "attempt": attempt,
+                "agent_id": agent.config.id,
+                "error": self._failed_turn["public_error"],
+                "error_code": "context_too_large",
+                "recoverable": True,
+                "estimated_input_tokens": estimated_input,
+                "per_turn_limit": per_turn_cap,
+                **self._event_actor_meta(agent),
+                **context,
+            }))
+            await self._recovery_event.wait()
+            if not self._running:
+                raise asyncio.CancelledError()
+            agent = next(
+                (candidate for candidate in self.agents if candidate.config.id == self._failed_turn["agent_id"]),
+                agent,
+            )
+            attempt += 1
+            self._turn_attempts[turn_id] = attempt
+            agent.error_message = ""
+            current_history_cap = int(agent.config.extra.get("max_history_chars", 24000) or 24000)
+            agent.config.extra["max_history_chars"] = max(4000, current_history_cap // 2)
+            effective_system = system_override or self._agent_system(agent)
+            compact = self.ws.read("context")
+            ephemeral_context = compact
+            estimated_input = agent.estimate_input_tokens(prompt, effective_system, compact)
+            per_turn_cap = int(agent.config.extra.get("max_input_tokens_per_turn", 32000) or 32000)
+        self._failed_turn = None
         while self.max_tokens > 0 and estimated_input + projected_turn_reserve > remaining:
             self._budget_exhausted = True
             self._emit(Event(EventKind.PHASE, agent=agent.name, data={

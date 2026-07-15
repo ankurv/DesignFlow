@@ -135,7 +135,7 @@ class AgentBase(ABC):
         self, message: str, system: str = "", ephemeral_context: str = ""
     ) -> int:
         """Conservative local estimate used before a provider request."""
-        prior = self._windowed_history()
+        prior = self._bounded_history(self._windowed_history())
         prior_text = "\n".join(item.content for item in prior)
         characters = len(system) + len(message) + len(ephemeral_context) + len(prior_text)
         # Four characters/token is a common English/code approximation. Add
@@ -189,7 +189,11 @@ class AgentBase(ABC):
         if self.manages_context:
             window = [user_message]
         else:
-            window = self._windowed_history()
+            counted_window = self._windowed_history()
+            # Preserve the current request exactly; only historical messages
+            # are compacted. Canonical workspace artifacts are supplied
+            # separately as ephemeral context.
+            window = self._bounded_history(counted_window[:-1]) + [user_message]
 
         system = system_override or self.config.system_prompt
         raw_msgs = [{"role": m.role, "content": m.content} for m in window]
@@ -254,6 +258,32 @@ class AgentBase(ABC):
             return self.history
         # Preserve the initial exchange and the most recent turns.
         return self.history[:2] + self.history[-(max_messages - 2):]
+
+    def _bounded_history(self, messages: list[Message]) -> list[Message]:
+        """Bound history by content size so one verbose turn cannot poison future prompts."""
+        max_chars = int(self.config.extra.get("max_history_chars", 24000) or 24000)
+        if max_chars <= 0 or sum(len(item.content) for item in messages) <= max_chars:
+            return messages
+        selected: list[Message] = []
+        remaining = max_chars
+        for item in reversed(messages):
+            if remaining <= 0:
+                break
+            content = item.content
+            if len(content) > remaining:
+                marker = "\n\n[older response truncated]\n\n"
+                available = max(0, remaining - len(marker))
+                head = available // 2
+                tail = available - head
+                content = content[:head] + marker + (content[-tail:] if tail else "")
+            selected.append(Message(
+                role=item.role,
+                content=content,
+                timestamp=item.timestamp,
+                usage=item.usage,
+            ))
+            remaining -= len(content)
+        return list(reversed(selected))
 
     def usage_dict(self) -> dict:
         _, _, _, pricing_known = self._pricing()
