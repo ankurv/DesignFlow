@@ -2,7 +2,9 @@ import asyncio
 import os
 os.environ["DESIGNFLOW_TEST"] = "1"
 import json
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -18,6 +20,40 @@ from backend.debug_observer import DebugObserver
 from backend.audit import AuditLog
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def test_release_version_is_semver_and_consistent(self):
+        from backend.server import app, healthz, version
+        from backend.version import VERSION_PATTERN, __version__
+
+        root = Path(__file__).parents[1]
+        extension = json.loads((root / "vscode-extension" / "package.json").read_text())
+        extension_lock = json.loads((root / "vscode-extension" / "package-lock.json").read_text())
+        self.assertRegex(__version__, VERSION_PATTERN)
+        self.assertEqual((root / "VERSION").read_text().strip(), __version__)
+        self.assertEqual(app.version, __version__)
+        self.assertEqual(healthz()["version"], __version__)
+        self.assertEqual(version()["version"], __version__)
+        self.assertEqual(extension["version"], __version__)
+        self.assertEqual(extension_lock["version"], __version__)
+        self.assertEqual(extension_lock["packages"][""]["version"], __version__)
+
+    def test_cli_exposes_release_version(self):
+        root = Path(__file__).parents[1]
+        result = subprocess.run(
+            [sys.executable, str(root / "run.py"), "--version"],
+            cwd=root, capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip(), "DesignFlow 0.1.0")
+
+    def test_browser_places_version_in_usage_bar(self):
+        root = Path(__file__).parents[1]
+        html = (root / "frontend" / "index.html").read_text()
+        token_bar = re.search(r'<div class="token-bar">([\s\S]*?)</div>', html)
+        self.assertIsNotNone(token_bar)
+        self.assertIn('id="appVersion"', token_bar.group(1))
+        self.assertEqual(html.count('id="appVersion"'), 1)
 
 
 class StatefulFake(AgentBase):

@@ -1462,6 +1462,19 @@ async function checkAuth() {
     }
 }
 
+async function loadAppVersion() {
+    try {
+        const res = await fetch('/version');
+        if (!res.ok) return;
+        const data = await res.json();
+        const label = document.getElementById('appVersion');
+        if (label) label.textContent = `v${data.version}`;
+        document.title = `DesignFlow ${data.version}`;
+    } catch (_) {
+        // Version display is informational and must not block login or startup.
+    }
+}
+
 async function loadUsers() {
     const res = await fetch('/users');
     if (res.ok) {

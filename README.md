@@ -1,5 +1,7 @@
 # 🚀 DesignFlow
 
+Current release: **0.1.0**
+
 DesignFlow is an interactive **AI Architect Dashboard and Planning Board** designed to help developers design with multiple AI agents. Instead of letting AI blindly generate codebases, DesignFlow focuses on the critical initial step: **aligning on design decisions and producing crisp, structured implementation plans** that you can feed to any AI builder (like Cursor, Codex, or Antigravity) to write the code.
 
 ## How DesignFlow works

@@ -8,6 +8,7 @@ import uvicorn
 
 from backend.server import app
 from backend.audit import audit_log
+from backend.version import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true")
+    parser.add_argument("--version", action="version", version=f"DesignFlow {__version__}")
     parser.add_argument(
         "--debug-observer", action="store_true",
         help="passively record redacted workflow diagnostics under .designflow/debug",
@@ -25,7 +27,7 @@ if __name__ == "__main__":
     args = build_parser().parse_args()
     app.state.debug_observer_enabled = args.debug_observer
 
-    print(f"\n🚀 DesignFlow running at http://{args.host}:{args.port}\n")
+    print(f"\n🚀 DesignFlow {__version__} running at http://{args.host}:{args.port}\n")
     if args.debug_observer:
         print("🔎 Debug observer enabled; diagnostics will be stored per project in .designflow/debug\n")
         audit_log.record(

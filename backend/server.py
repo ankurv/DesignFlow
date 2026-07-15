@@ -30,6 +30,7 @@ from .workspace.workspace import Workspace
 from .errors import classify_provider_error
 from .debug_observer import DebugObserver
 from .audit import audit_log
+from .version import __version__
 
 logger = logging.getLogger(__name__)
 SSE_SHUTDOWN = object()
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
     session_last_seen.clear()
 
 
-app = FastAPI(title="DesignFlow", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="DesignFlow", version=__version__, lifespan=lifespan)
 app.state.shutting_down = False
 app.state.request_shutdown = None
 app.state.debug_observer_enabled = False
@@ -135,7 +136,12 @@ async def audit_requests(request: Request, call_next):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "status": "healthy"}
+    return {"ok": True, "status": "healthy", "version": __version__}
+
+
+@app.get("/version")
+def version():
+    return {"version": __version__}
 
 
 class AppState:

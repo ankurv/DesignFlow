@@ -1,4 +1,6 @@
 // ── Tabs ──────────────────────────────────────────────────────────────────────
+loadAppVersion();
+
 function showTab(id, tabElement) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => {

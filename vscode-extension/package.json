@@ -2,7 +2,7 @@
   "name": "designflow",
   "displayName": "DesignFlow",
   "description": "AI-powered product planning and architecture designer",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "ankurv",
   "engines": {
     "vscode": "^1.80.0"
