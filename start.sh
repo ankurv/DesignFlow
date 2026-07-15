@@ -13,8 +13,15 @@ if [ -f server.pid ]; then
     fi
 fi
 
-echo "Starting DesignFlow server..."
-nohup python3 run.py "$@" > server.log 2>&1 &
+# Check if --port is provided in the arguments
+if [[ "$*" != *"--port"* ]]; then
+    ARGS="--port 8010 $@"
+else
+    ARGS="$@"
+fi
+
+echo "Starting DesignFlow server with arguments: $ARGS"
+nohup python3 run.py $ARGS > server.log 2>&1 &
 PID=$!
 echo $PID > server.pid
 
