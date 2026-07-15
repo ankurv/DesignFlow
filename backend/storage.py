@@ -121,6 +121,8 @@ class ProjectStore:
                     chosen_option TEXT NOT NULL DEFAULT '',
                     rationale TEXT NOT NULL DEFAULT '',
                     answered_by TEXT NOT NULL DEFAULT '',
+                    source_ref TEXT NOT NULL DEFAULT '',
+                    raw_markdown TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -148,6 +150,13 @@ class ProjectStore:
             }
             if "decision_id" not in checkpoint_columns:
                 self._db.execute("ALTER TABLE decision_checkpoints ADD COLUMN decision_id TEXT")
+            decision_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(decisions)").fetchall()
+            }
+            if "source_ref" not in decision_columns:
+                self._db.execute("ALTER TABLE decisions ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''")
+            if "raw_markdown" not in decision_columns:
+                self._db.execute("ALTER TABLE decisions ADD COLUMN raw_markdown TEXT NOT NULL DEFAULT ''")
             self._backfill_checkpoint_decisions()
 
     def _backfill_checkpoint_decisions(self):
