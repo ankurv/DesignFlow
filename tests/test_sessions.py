@@ -854,21 +854,35 @@ Decision 2: Choose retention.
                 mode="all",
                 max_debate_rounds=1,
             )
+            async def deterministic_discovery(_coordinator, _step):
+                return orchestrator._deterministic_discovery_question()
+            orchestrator._adaptive_discovery_question = deterministic_discovery
 
             async def run_test():
                 run_task = asyncio.create_task(orchestrator.run("social app"))
-                await asyncio.sleep(0.05)
-                self.assertTrue(orchestrator._paused)
-
-                # Steer the coordinator with user response
-                await orchestrator.steer("We want SQLite")
-                orchestrator.resume()
+                answers = [
+                    "Primary users are small friend groups planning meetups",
+                    "A — Cloud-agnostic and portable across providers",
+                    "A — Small launch: up to 1,000 active users",
+                    "A — No special constraints beyond standard security practices",
+                    "A — Approve the baseline",
+                ]
+                for answer in answers:
+                    for _ in range(100):
+                        if orchestrator._paused or run_task.done():
+                            break
+                        await asyncio.sleep(0.01)
+                    if run_task.done():
+                        break
+                    self.assertTrue(orchestrator._paused)
+                    await orchestrator.steer(answer)
+                    orchestrator.resume()
 
                 # Wait for task to finish
                 await run_task
 
                 # Check that the next prompt received the steering response!
-                self.assertIn("We want SQLite", boss.received[-1][-1]["content"])
+                self.assertIn("Cloud-agnostic", boss.received[-1][-1]["content"])
             asyncio.run(run_test())
 
     def test_need_based_review_selects_small_relevant_panel(self):
@@ -1497,7 +1511,7 @@ Decision 2: Choose retention.
             self.assertFalse(orchestrator.load_state())
             self.assertEqual(orchestrator._turn_sequence, 0)
 
-    def test_existing_project_context_suppresses_generic_discovery_question(self):
+    def test_existing_project_is_asked_for_missing_deployment_constraint(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.ensure()
@@ -1509,9 +1523,9 @@ Decision 2: Choose retention.
             orchestrator = Orchestrator([], workspace, require_approval=True)
             orchestrator.idea = "continue"
 
-            self.assertEqual(orchestrator._deterministic_discovery_question(), "")
+            self.assertIn("deployment constraint", orchestrator._deterministic_discovery_question())
 
-    def test_enterprise_brief_reaches_specialists_before_role_checkpoint(self):
+    def test_enterprise_brief_gets_architecture_constraints_before_specialists(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.write_brief(
@@ -1522,7 +1536,40 @@ Decision 2: Choose retention.
             orchestrator = Orchestrator([], workspace, require_approval=True)
             orchestrator.idea = workspace.brief()
 
-            self.assertEqual(orchestrator._deterministic_discovery_question(), "")
+            self.assertIn("deployment constraint", orchestrator._deterministic_discovery_question())
+
+    def test_discovery_asks_specific_provider_after_cloud_specific_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief("Build an internal enterprise logging product for engineering teams.")
+            workspace.init(workspace.brief())
+            workspace.record_user_decision(
+                "What deployment constraint should drive the architecture?",
+                "B — Optimize for one cloud provider",
+            )
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.idea = workspace.brief()
+            self.assertIn("Which cloud provider", orchestrator._deterministic_discovery_question())
+
+    def test_adaptive_discovery_validates_structured_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator([], Workspace(directory), require_approval=True)
+            response = json.dumps({
+                "status": "ask",
+                "dimension": "operations",
+                "question": "Who will operate this system after launch?",
+                "reason": "Operational ownership changes deployment and observability choices.",
+                "options": [
+                    {"label": "Product team", "consequence": "Prefer managed components."},
+                    {"label": "Platform team", "consequence": "More operational control is viable."},
+                ],
+                "recommended": "Product team",
+                "blocking": True,
+            })
+            question = orchestrator._parse_discovery_proposal(response)
+            self.assertIn("Who will operate", question)
+            self.assertIn("Why this matters", question)
+            self.assertEqual(orchestrator._discovery_questions_asked, 1)
 
     def test_inline_questions_are_not_announced_as_workspace_artifact_writes(self):
         source = (Path(__file__).parents[1] / "backend" / "orchestrator.py").read_text()

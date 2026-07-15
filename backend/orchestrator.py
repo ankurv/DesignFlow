@@ -347,6 +347,8 @@ class Orchestrator:
         self.task = ""
         self._state_loaded = False
         self._checkpoint_has_more = False
+        self._discovery_questions_asked = 0
+        self._discovery_question_keys: set[str] = set()
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -660,13 +662,17 @@ class Orchestrator:
         return selected
 
     def _deterministic_discovery_question(self) -> str:
-        """Ask one high-value question only when the seed is genuinely underspecified."""
+        """Fallback question used only when adaptive discovery returns invalid output."""
         existing_design = self.ws.read("design")
         existing_plan = self.ws.read("plan")
         brief = self.ws.brief()
+        decisions = self.ws.read("decisions")
+        decisions_lower = decisions.lower()
+        confirmed_answers = " ".join(re.findall(r"^- \*\*Decision:\*\*\s*(.+)$", decisions, re.I | re.M))
         context = "\n".join((self.idea, brief, existing_design, existing_plan))
         seed_words = set(re.findall(r"[a-z0-9]+", self.idea.lower()))
         words = set(re.findall(r"[a-z0-9]+", context.lower()))
+        answer_words = set(re.findall(r"[a-z0-9]+", confirmed_answers.lower()))
         # Existing substantive artifacts already establish the product context;
         # discovery should refine them instead of asking a generic seed question.
         has_product_context = (
@@ -674,14 +680,137 @@ class Orchestrator:
             or len(existing_design.replace("(empty)", "").strip()) >= 300
             or len(existing_plan.replace("(empty)", "").strip()) >= 200
         )
-        if len(seed_words) < 6 and not has_product_context:
-            return "Who is the primary user, and what outcome must they achieve with this product?"
-        # Do not interrupt a substantive brief with a generic checklist question.
-        # Material ambiguities should first be challenged by relevant specialists,
-        # then surfaced as a focused decision checkpoint with trade-offs.
-        if words.intersection({"payment", "health", "medical", "finance", "bank", "identity"}) and not words.intersection({"compliance", "privacy", "region", "retention"}):
-            return "Are there mandatory compliance, data residency, or retention constraints?"
+        if len(seed_words) < 6 and not has_product_context and "who is the primary user" not in decisions_lower:
+            return (
+                "Who is the primary user, and what is the single most important outcome they must achieve?\n\n"
+                "- [A] I’ll describe the primary user and outcome\n"
+                "- [B] Infer a provisional user and outcome from the project\n\n"
+                "Recommendation: A — explicit product intent prevents architecture built around the wrong workflow."
+            )
+
+        deployment_signals = {"aws", "azure", "gcp", "cloud", "onprem", "premises", "selfhosted", "agnostic", "portable"}
+        deployment_answered = "what deployment constraint should drive the architecture" in decisions_lower
+        if not deployment_answered and not words.intersection(deployment_signals):
+            return (
+                "What deployment constraint should drive the architecture?\n\n"
+                "- [A] Cloud-agnostic and portable across providers\n"
+                "- [B] Optimize for one cloud provider (you can name it as a custom answer)\n"
+                "- [C] Self-hosted or on-premises deployment\n\n"
+                "Recommendation: A — keep provider coupling low unless a specific cloud capability is a firm requirement."
+            )
+
+        specific_cloud = "one cloud provider" in confirmed_answers.lower() or "cloud-specific" in confirmed_answers.lower()
+        named_provider = words.intersection({"aws", "azure", "gcp"}) or answer_words.intersection({"aws", "azure", "gcp"})
+        if specific_cloud and not named_provider:
+            return (
+                "Which cloud provider should the design optimize for?\n\n"
+                "- [A] AWS\n"
+                "- [B] Microsoft Azure\n"
+                "- [C] Google Cloud Platform\n\n"
+                "Recommendation: Choose the provider your team already operates; use Other if the provider is not listed."
+            )
+
+        scale_signals = {"users", "requests", "rps", "traffic", "throughput", "events", "volume", "concurrent", "tenants"}
+        scale_answered = "what initial scale should the architecture support" in decisions_lower
+        if not scale_answered and not words.intersection(scale_signals):
+            return (
+                "What initial scale should the architecture support without redesign?\n\n"
+                "- [A] Small launch: up to 1,000 active users\n"
+                "- [B] Growing product: up to 100,000 active users\n"
+                "- [C] Large or enterprise workload with explicit throughput targets\n\n"
+                "Recommendation: A — start simple unless growth or contractual requirements justify additional complexity."
+            )
+
+        constraint_signals = {"compliance", "privacy", "residency", "retention", "gdpr", "hipaa", "pci", "soc2", "sensitive"}
+        constraints_answered = "mandatory security, compliance, data-residency" in decisions_lower
+        if not constraints_answered and not words.intersection(constraint_signals):
+            return (
+                "Are there mandatory security, compliance, data-residency, or retention constraints?\n\n"
+                "- [A] No special constraints beyond standard security practices\n"
+                "- [B] Yes — I’ll provide the required standards or regions\n"
+                "- [C] Unknown — record them as validation items before implementation\n\n"
+                "Recommendation: C when uncertain — make the unknown visible instead of silently assuming it away."
+            )
         return ""
+
+    @staticmethod
+    def _question_key(question: str) -> str:
+        words = re.findall(r"[a-z0-9]+", (question or "").lower())
+        stop = {"the", "a", "an", "is", "are", "what", "which", "should", "do", "does", "to", "for", "and", "or"}
+        return " ".join(word for word in words if word not in stop)[:180]
+
+    def _parse_discovery_proposal(self, response: str) -> str:
+        match = re.search(r"\{[\s\S]*\}", response or "")
+        if not match:
+            return ""
+        try:
+            proposal = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return ""
+        if str(proposal.get("status", "")).lower() in {"ready", "ready_to_draft"}:
+            self._discovery_questions_asked = max(1, self._discovery_questions_asked)
+            return ""
+        question = str(proposal.get("question", "")).strip()
+        reason = str(proposal.get("reason", "")).strip()
+        options = proposal.get("options", [])
+        if len(question) < 12 or len(reason) < 12 or not isinstance(options, list) or not 2 <= len(options) <= 3:
+            return ""
+        key = self._question_key(question)
+        semantically_repeated = any(
+            SequenceMatcher(None, key, previous).ratio() >= 0.82
+            for previous in self._discovery_question_keys
+        )
+        if not key or key in self._discovery_question_keys or semantically_repeated:
+            return ""
+        rendered_options = []
+        for index, option in enumerate(options):
+            if isinstance(option, dict):
+                label = str(option.get("label", "")).strip()
+                consequence = str(option.get("consequence", "")).strip()
+                text = f"{label} — {consequence}" if consequence else label
+            else:
+                text = str(option).strip()
+            if not text:
+                return ""
+            rendered_options.append(f"- [{chr(65 + index)}] {text}")
+        recommendation = str(proposal.get("recommended", "")).strip()
+        blocking = bool(proposal.get("blocking", True))
+        self._discovery_question_keys.add(key)
+        self._discovery_questions_asked += 1
+        parts = [question, f"Why this matters: {reason}", "\n".join(rendered_options)]
+        if recommendation:
+            parts.append(f"Recommendation: {recommendation}")
+        if not blocking:
+            parts.append("You may choose Other and defer this as a documented validation item.")
+        return "\n\n".join(parts)
+
+    async def _adaptive_discovery_question(self, coordinator, step: int) -> str:
+        if self._discovery_questions_asked >= 6:
+            return ""
+        context = self.ws.scoped_context(["design", "plan", "decisions", "questions", "src_index"])
+        if len(context) > 14000:
+            context = context[:14000].rstrip() + "\n[context truncated]"
+        prompt = (
+            "Act as a requirements discovery analyst, not a designer or debater. Inspect the project evidence and "
+            "identify the single highest-impact unresolved question whose answer could materially change the architecture. "
+            "Do not ask anything answerable from the repository or already confirmed. Do not ask implementation trivia, "
+            "bundle topics, or assume deployment, scale, security, data, integration, operational, budget, or team constraints. "
+            "Return JSON only with: status ('ask' or 'ready_to_draft'), dimension, question, reason, "
+            "options (2-3 objects with label and consequence), recommended, and blocking. "
+            "Use ready_to_draft only when no material architecture uncertainty remains.\n\n"
+            f"Product goal: {self.idea}\nCurrent request: {self.task or self.idea}\n"
+            f"Questions already asked: {sorted(self._discovery_question_keys)}\n\nProject evidence:\n{context}"
+        )
+        turn_context = {"step": step, "phase": "discovery_analysis", "standing_role": coordinator.config.role}
+        turn_id = self._begin_turn(coordinator, turn_context)
+        response = await self._send_agent(coordinator, prompt, turn_id, turn_context)
+        self._record_turn_usage(coordinator, "discovery")
+        self._emit(Event(EventKind.TURN_END, agent=coordinator.name, data={
+            "turn_id": turn_id, "attempt": self._turn_attempts[turn_id], "step": step,
+            "response": "Discovery analysis complete.", **self._event_actor_meta(coordinator),
+            **self._usage_event(coordinator),
+        }))
+        return self._parse_discovery_proposal(response)
 
     @staticmethod
     def _is_explicit_user_correction(text: str) -> bool:
@@ -741,10 +870,12 @@ class Orchestrator:
 
     async def _run_discovery_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "discovery", "status": "running", "step": step}))
-        question = self._deterministic_discovery_question()
+        question = await self._adaptive_discovery_question(coordinator, step) if self.require_approval else ""
+        if self.require_approval and not question and self._discovery_questions_asked == 0:
+            question = self._deterministic_discovery_question()
         if question and self.require_approval:
             self.ws.write("questions", f"# Clarifying Question\n\n{question}")
-            self.post_approval_phase = OrchestratorPhase.DRAFTING
+            self.post_approval_phase = OrchestratorPhase.DISCOVERY
             self.phase = OrchestratorPhase.APPROVAL
         else:
             self.phase = OrchestratorPhase.DRAFTING
@@ -939,6 +1070,8 @@ class Orchestrator:
             "pending_user_input": self._pending_user_input,
             "consulted_specialists": sorted(self._consulted_specialists),
             "user_checkpoint_count": self._user_checkpoint_count,
+            "discovery_questions_asked": self._discovery_questions_asked,
+            "discovery_question_keys": sorted(self._discovery_question_keys),
             "artifact_fingerprints": self.ws.artifact_fingerprints(),
             "agents": {
                 a.name: [
@@ -989,6 +1122,8 @@ class Orchestrator:
                 self._pending_user_input = str(state.get("pending_user_input", ""))
                 self._consulted_specialists = set(state.get("consulted_specialists", []))
                 self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
+                self._discovery_questions_asked = int(state.get("discovery_questions_asked", 0) or 0)
+                self._discovery_question_keys = set(state.get("discovery_question_keys", []))
 
                 agent_states = state.get("agents", {})
                 for a in self.agents:
@@ -1032,6 +1167,8 @@ class Orchestrator:
             self._pending_user_input = str(state.get("pending_user_input", ""))
             self._consulted_specialists = set(state.get("consulted_specialists", []))
             self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
+            self._discovery_questions_asked = int(state.get("discovery_questions_asked", 0) or 0)
+            self._discovery_question_keys = set(state.get("discovery_question_keys", []))
 
             agent_states = state.get("agents", {})
             for a in self.agents:
