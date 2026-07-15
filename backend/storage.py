@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,6 +79,39 @@ class ProjectStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS decision_checkpoints (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    phase TEXT NOT NULL,
+                    dimension TEXT NOT NULL DEFAULT '',
+                    question TEXT NOT NULL,
+                    rationale TEXT NOT NULL DEFAULT '',
+                    recommendation TEXT NOT NULL DEFAULT '',
+                    blocking INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    answered_at TEXT,
+                    answered_by TEXT NOT NULL DEFAULT '',
+                    selected_option_id TEXT,
+                    custom_answer TEXT NOT NULL DEFAULT '',
+                    UNIQUE(run_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS decision_options (
+                    id TEXT PRIMARY KEY,
+                    checkpoint_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    consequence TEXT NOT NULL DEFAULT '',
+                    recommended INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(checkpoint_id) REFERENCES decision_checkpoints(id) ON DELETE CASCADE,
+                    UNIQUE(checkpoint_id, sequence)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_checkpoint
+                    ON decision_checkpoints(run_id) WHERE status = 'active';
+                CREATE INDEX IF NOT EXISTS idx_checkpoint_run_status
+                    ON decision_checkpoints(run_id, status, sequence);
                 """
             )
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
@@ -85,6 +119,133 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0")
             if "pricing_complete" not in columns:
                 self._db.execute("ALTER TABLE runs ADD COLUMN pricing_complete INTEGER NOT NULL DEFAULT 1")
+
+    def enqueue_checkpoint(self, run_id: str, phase: str, question: str, rationale: str,
+                           options: list[dict], recommendation: str = "", dimension: str = "",
+                           blocking: bool = True) -> dict:
+        checkpoint_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM decision_checkpoints WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            sequence = int(row["next_sequence"])
+            has_active = self._db.execute(
+                "SELECT 1 FROM decision_checkpoints WHERE run_id=? AND status='active'", (run_id,)
+            ).fetchone()
+            status = "pending" if has_active else "active"
+            self._db.execute(
+                """INSERT INTO decision_checkpoints(
+                   id, run_id, sequence, phase, dimension, question, rationale, recommendation,
+                   blocking, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (checkpoint_id, run_id, sequence, phase, dimension, question, rationale,
+                 recommendation, int(blocking), status, now),
+            )
+            for index, option in enumerate(options):
+                option_id = str(option.get("id") or uuid.uuid4())
+                self._db.execute(
+                    """INSERT INTO decision_options(
+                       id, checkpoint_id, sequence, label, summary, consequence, recommended)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (option_id, checkpoint_id, index, str(option.get("label", "")),
+                     str(option.get("summary", "")), str(option.get("consequence", "")),
+                     int(bool(option.get("recommended")))),
+                )
+        return self.checkpoint(checkpoint_id)
+
+    def checkpoint(self, checkpoint_id: str) -> dict:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM decision_checkpoints WHERE id=?", (checkpoint_id,)).fetchone()
+            if not row:
+                return {}
+            options = self._db.execute(
+                "SELECT * FROM decision_options WHERE checkpoint_id=? ORDER BY sequence", (checkpoint_id,)
+            ).fetchall()
+        data = dict(row)
+        data["blocking"] = bool(data["blocking"])
+        data["options"] = [{**dict(option), "recommended": bool(option["recommended"])} for option in options]
+        return data
+
+    def current_checkpoint(self, run_id: str) -> dict:
+        if not run_id:
+            return {}
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT id FROM decision_checkpoints WHERE run_id=? AND status='active' ORDER BY sequence LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if not row:
+                row = self._db.execute(
+                    "SELECT id FROM decision_checkpoints WHERE run_id=? AND status='pending' ORDER BY sequence LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if row:
+                    self._db.execute("UPDATE decision_checkpoints SET status='active' WHERE id=?", (row["id"],))
+        return self.checkpoint(row["id"]) if row else {}
+
+    def latest_current_checkpoint(self) -> dict:
+        """Recover the latest unresolved checkpoint after a process restart."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                """SELECT c.id FROM decision_checkpoints c
+                   LEFT JOIN runs r ON r.run_id=c.run_id
+                   WHERE c.status IN ('active', 'pending')
+                   ORDER BY COALESCE(r.started_at, c.created_at) DESC,
+                            CASE c.status WHEN 'active' THEN 0 ELSE 1 END,
+                            c.sequence
+                   LIMIT 1"""
+            ).fetchone()
+            if row:
+                checkpoint = self._db.execute(
+                    "SELECT run_id, status FROM decision_checkpoints WHERE id=?", (row["id"],)
+                ).fetchone()
+                if checkpoint["status"] == "pending":
+                    self._db.execute(
+                        "UPDATE decision_checkpoints SET status='active' WHERE id=?", (row["id"],)
+                    )
+        return self.checkpoint(row["id"]) if row else {}
+
+    def answer_checkpoint(self, run_id: str, checkpoint_id: str, answered_by: str,
+                          option_id: str = "", custom_answer: str = "") -> tuple[dict, dict]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            checkpoint = self._db.execute(
+                "SELECT * FROM decision_checkpoints WHERE id=? AND run_id=?", (checkpoint_id, run_id)
+            ).fetchone()
+            if not checkpoint or checkpoint["status"] != "active":
+                raise ValueError("This checkpoint is no longer active")
+            option = None
+            if option_id:
+                option = self._db.execute(
+                    "SELECT * FROM decision_options WHERE id=? AND checkpoint_id=?", (option_id, checkpoint_id)
+                ).fetchone()
+                if not option:
+                    raise ValueError("The selected option does not belong to this checkpoint")
+            if not option and not custom_answer.strip():
+                raise ValueError("Select an option or provide a custom answer")
+            self._db.execute(
+                """UPDATE decision_checkpoints SET status='answered', answered_at=?, answered_by=?,
+                   selected_option_id=?, custom_answer=? WHERE id=?""",
+                (now, answered_by, option_id or None, custom_answer.strip(), checkpoint_id),
+            )
+            next_row = self._db.execute(
+                "SELECT id FROM decision_checkpoints WHERE run_id=? AND status='pending' ORDER BY sequence LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if next_row:
+                self._db.execute("UPDATE decision_checkpoints SET status='active' WHERE id=?", (next_row["id"],))
+        answer = custom_answer.strip() if custom_answer.strip() else f"{option['label']} — {option['summary']}"
+        answered = self.checkpoint(checkpoint_id)
+        answered["answer"] = answer
+        return answered, self.checkpoint(next_row["id"]) if next_row else {}
+
+    def run_checkpoints(self, run_id: str) -> list[dict]:
+        with self._lock:
+            ids = [row["id"] for row in self._db.execute(
+                "SELECT id FROM decision_checkpoints WHERE run_id=? ORDER BY sequence", (run_id,)
+            ).fetchall()]
+        return [self.checkpoint(checkpoint_id) for checkpoint_id in ids]
 
     def load_agents(self) -> list[dict]:
         with self._lock:

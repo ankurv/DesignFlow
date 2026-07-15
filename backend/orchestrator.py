@@ -298,10 +298,12 @@ class Orchestrator:
         restore: bool = False,
         allow_artifact_changes_on_restore: bool = False,
         store: Optional[Any] = None,
+        run_id: str = "",
     ):
         self.agents = agents
         self.ws = workspace
         self.store = store
+        self.run_id = run_id
         self._cb = event_cb
         self.max_debate_rounds = max_debate_rounds
         self.max_tokens = max_tokens
@@ -351,6 +353,7 @@ class Orchestrator:
         self._discovery_question_keys: set[str] = set()
         self._adaptive_discovery_unavailable = False
         self._discovery_failed_providers: set[str] = set()
+        self._pending_discovery_checkpoint: dict | None = None
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -362,7 +365,7 @@ class Orchestrator:
         self._paused = False
         self._pause_event.set()
 
-    async def steer(self, message: str):
+    async def steer(self, message: str, username: str = "human"):
         """Inject a human message that all agents will see next turn."""
         pending_question = self.ws.read("questions").strip()
         event_kind = "user_decision" if pending_question and pending_question != "(empty)" else "user_steering"
@@ -375,7 +378,21 @@ class Orchestrator:
             self.ws.clear_questions()
         self.ws.reset_context_tracking()
         self._context_invocations.clear()
-        self._emit(Event(EventKind.STEER, agent="human", data={"message": message}))
+        self._emit(Event(EventKind.STEER, agent=username or "human", data={"message": message}))
+
+    async def accept_structured_checkpoint_answer(
+        self, message: str, has_more: bool, username: str = "human"
+    ) -> None:
+        """Inject a transactionally recorded checkpoint answer without parsing Markdown state."""
+        self.ws.add_context_event("user_decision", message, self.phase.value, "user")
+        await self._steer_queue.put(message)
+        self._checkpoint_has_more = has_more
+        self.ws.reset_context_tracking()
+        self._context_invocations.clear()
+        self._emit(Event(
+            EventKind.STEER, agent=username or "human",
+            data={"message": message, "checkpoint": True},
+        ))
 
     def stop(self):
         self._running = False
@@ -757,6 +774,11 @@ class Orchestrator:
         options = proposal.get("options", [])
         if len(question) < 12 or len(reason) < 12 or not isinstance(options, list) or not 2 <= len(options) <= 3:
             return None
+        # Internal ledger headings such as "Decision 31: Delivery Contract"
+        # are not answerable prompts. A checkpoint must stand on its own for a
+        # user who has not followed the agents' internal discussion.
+        if not question.endswith("?") or re.match(r"^\s*decision(?:\s+\d+)?\s*:", question, re.I):
+            return None
         key = self._question_key(question)
         semantically_repeated = any(
             SequenceMatcher(None, key, previous).ratio() >= 0.82
@@ -769,6 +791,8 @@ class Orchestrator:
             if isinstance(option, dict):
                 label = str(option.get("label", "")).strip()
                 consequence = str(option.get("consequence", "")).strip()
+                if len(label) < 3 or len(consequence) < 12:
+                    return None
                 text = f"{label} — {consequence}" if consequence else label
             else:
                 text = str(option).strip()
@@ -779,6 +803,23 @@ class Orchestrator:
         blocking = bool(proposal.get("blocking", True))
         self._discovery_question_keys.add(key)
         self._discovery_questions_asked += 1
+        self._pending_discovery_checkpoint = {
+            "phase": "discovery", "dimension": str(proposal.get("dimension", "")),
+            "question": question, "rationale": reason, "recommendation": recommendation,
+            "blocking": blocking,
+            "options": [
+                {
+                    "label": chr(65 + index),
+                    "summary": str(option.get("label", "")) if isinstance(option, dict) else str(option),
+                    "consequence": str(option.get("consequence", "")) if isinstance(option, dict) else "",
+                    "recommended": recommendation.lower() in {
+                        chr(65 + index).lower(),
+                        (str(option.get("label", "")) if isinstance(option, dict) else str(option)).lower(),
+                    },
+                }
+                for index, option in enumerate(options)
+            ],
+        }
         parts = [question, f"Why this matters: {reason}", "\n".join(rendered_options)]
         if recommendation:
             parts.append(f"Recommendation: {recommendation}")
@@ -799,6 +840,11 @@ class Orchestrator:
             "identify the single highest-impact unresolved question whose answer could materially change the architecture. "
             "Do not ask anything answerable from the repository or already confirmed. Do not ask implementation trivia, "
             "bundle topics, or assume deployment, scale, security, data, integration, operational, budget, or team constraints. "
+            "Write for a project owner who has not seen the agents' discussion. The question must be a complete, "
+            "plain-language sentence ending in '?', name the component or user interaction being decided, and never "
+            "use an internal heading such as 'Decision 12: Delivery Contract'. The reason must explain the current "
+            "project context and the practical impact of the choice. Each option label must describe the choice in "
+            "plain language, and each consequence must state what the user gains or gives up. "
             "Return JSON only with: status ('ask' or 'ready_to_draft'), dimension, question, reason, "
             "options (2-3 objects with label and consequence), recommended, and blocking. "
             "Use ready_to_draft only when no material architecture uncertainty remains.\n\n"
@@ -933,12 +979,55 @@ class Orchestrator:
         if self.require_approval and not question and self._discovery_questions_asked == 0:
             question = self._deterministic_discovery_question()
         if question and self.require_approval:
+            if self.store and self.run_id:
+                payload = self._pending_discovery_checkpoint or self._checkpoint_payload_from_text(question)
+                self.store.enqueue_checkpoint(self.run_id, **payload)
             self.ws.write("questions", f"# Clarifying Question\n\n{question}")
             self.post_approval_phase = OrchestratorPhase.DISCOVERY
             self.phase = OrchestratorPhase.APPROVAL
         else:
             self.phase = OrchestratorPhase.DRAFTING
         self.save_state()
+
+    @staticmethod
+    def _checkpoint_payload_from_text(text: str) -> dict:
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        question_candidates = [
+            line for line in lines
+            if re.search(r"\b(?:decision|question)(?:\s+\d+)?\b", re.sub(r"[*_`]", "", line), re.I)
+            and not line.startswith("-")
+        ]
+        raw_question = question_candidates[-1] if question_candidates else next(
+            (line for line in lines if not line.startswith("-") and not line.lower().startswith("recommendation:")),
+            "Decision required",
+        )
+        question = re.sub(r"^\s*(?:\d+[.)]\s*)?[*_`]*", "", raw_question)
+        question = re.sub(r"[*_`]+", "", question).strip().rstrip(":")
+        rationale_line = next((line for line in lines if line.lower().startswith("why this matters:")), "")
+        if rationale_line:
+            rationale = rationale_line.split(":", 1)[1].strip()
+        else:
+            question_index = lines.index(raw_question) if raw_question in lines else 0
+            rationale = " ".join(line for line in lines[:question_index] if not line.startswith("#"))
+        recommendation = next((line.split(":", 1)[1].strip() for line in lines if line.lower().startswith("recommendation:")), "")
+        options = []
+        for line in lines:
+            match = re.match(
+                r"^(?:-\s*)?(?:\[([A-Z])\]|(?:\*\*)?Option\s+([A-Z])(?:\s*\([^)]*\))?(?:\*\*)?\s*:)\s*(.+)$",
+                line, re.I,
+            )
+            if match:
+                label = (match.group(1) or match.group(2)).upper()
+                summary, _, consequence = match.group(3).partition(" — ")
+                options.append({
+                    "label": label, "summary": summary, "consequence": consequence,
+                    "recommended": "recommended" in line.lower() or recommendation.lower().startswith(label.lower()),
+                })
+        return {
+            "phase": "discovery", "dimension": "", "question": question,
+            "rationale": rationale, "recommendation": recommendation,
+            "blocking": True, "options": options,
+        }
 
     async def _run_drafting_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "drafting", "status": "running", "step": step}))

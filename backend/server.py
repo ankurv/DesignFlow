@@ -92,6 +92,7 @@ def audit_action(method: str, path: str) -> str:
         (r"^/run/pause$", "run.pause"), (r"^/run/resume$", "run.resume"),
         (r"^/run/retry$", "run.retry"), (r"^/run/stop$", "run.stop"),
         (r"^/run/reset$", "run.reset"), (r"^/run/steer$", "run.steer"),
+        (r"^/run/checkpoint(?:/.*)?$", "checkpoint.answer"),
         (r"^/mcp(?:/.*)?$", "mcp.configure"), (r"^/workspace/file/.*$", "artifact.update"),
         (r"^/workspace/src/.*$", "source.update"), (r"^/admin/shutdown$", "admin.shutdown"),
     )
@@ -890,6 +891,7 @@ async def start_run(
         restore=True,
         allow_artifact_changes_on_restore=resumes_saved_run,
         store=state.store,
+        run_id=state.run_id,
     )
 
     async def run_and_update():
@@ -1047,12 +1049,89 @@ class SteerBody(BaseModel):
 
 
 @app.post("/run/steer")
-async def steer_run(body: SteerBody, state: AppState = Depends(get_state)):
+async def steer_run(
+    body: SteerBody, session: Session = Depends(get_session), state: AppState = Depends(get_state),
+):
     reconcile_runtime_status(state)
     if state.status not in {"running", "paused", "needs_attention"} or not state.orchestrator:
         raise HTTPException(409, "There is no active workflow to steer")
-    await state.orchestrator.steer(body.message)
+    await state.orchestrator.steer(body.message, session.username)
     return {"ok": True}
+
+
+class CheckpointAnswerBody(BaseModel):
+    option_id: str = ""
+    custom_answer: str = ""
+
+
+def checkpoint_projection(checkpoint: dict) -> str:
+    if not checkpoint:
+        return ""
+    parts = [checkpoint["question"]]
+    if checkpoint.get("rationale"):
+        parts.append(f"Why this matters: {checkpoint['rationale']}")
+    for option in checkpoint.get("options", []):
+        suffix = f" — {option['consequence']}" if option.get("consequence") else ""
+        recommended = " (Recommended)" if option.get("recommended") else ""
+        parts.append(f"- [{option['label']}] {option['summary']}{suffix}{recommended}")
+    if checkpoint.get("recommendation"):
+        parts.append(f"Recommendation: {checkpoint['recommendation']}")
+    return "\n\n".join(parts)
+
+
+def ensure_structured_checkpoint(state: AppState) -> dict:
+    if not state.store:
+        return {}
+    current = (state.store.current_checkpoint(state.run_id)
+               if state.run_id else state.store.latest_current_checkpoint())
+    if current and state.workspace:
+        state.workspace.write("questions", "# Decision Checkpoint\n\n" + checkpoint_projection(current))
+    return current
+
+
+@app.get("/run/checkpoint/current")
+def current_checkpoint(state: AppState = Depends(get_state)):
+    checkpoint = ensure_structured_checkpoint(state)
+    return {"checkpoint": checkpoint or None}
+
+
+@app.post("/run/checkpoint/{checkpoint_id}/answer")
+async def answer_checkpoint(
+    checkpoint_id: str, body: CheckpointAnswerBody,
+    session: Session = Depends(get_session), state: AppState = Depends(get_state),
+):
+    if not state.store:
+        raise HTTPException(409, "There is no active checkpoint")
+    checkpoint = state.store.checkpoint(checkpoint_id)
+    if not checkpoint:
+        raise HTTPException(409, "This checkpoint no longer exists")
+    try:
+        answered, next_checkpoint = state.store.answer_checkpoint(
+            checkpoint["run_id"], checkpoint_id, session.username, body.option_id, body.custom_answer,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    answer = answered["answer"]
+    if state.workspace:
+        state.workspace.record_user_decision(answered["question"], answer)
+        if next_checkpoint:
+            state.workspace.write("questions", "# Decision Checkpoint\n\n" + checkpoint_projection(next_checkpoint))
+        else:
+            state.workspace.clear_questions()
+    if state.orchestrator:
+        await state.orchestrator.accept_structured_checkpoint_answer(
+            answer, bool(next_checkpoint), session.username,
+        )
+        if state.status == "paused":
+            state.orchestrator.resume()
+            state.status = "running"
+            state.awaiting_input = False
+    return {"ok": True, "answered": answered, "next_checkpoint": next_checkpoint or None}
+
+
+@app.get("/runs/{run_id}/checkpoints")
+def checkpoint_history(run_id: str, state: AppState = Depends(get_state)):
+    return {"checkpoints": state.store.run_checkpoints(run_id) if state.store else []}
 
 
 @app.get("/admin/runtime-diagnostics")
@@ -1202,6 +1281,8 @@ def get_file(key: str, state: AppState = Depends(get_state)):
     allowed = ["context", "design", "plan", "decisions", "questions", "logbook"]
     if key not in allowed:
         raise HTTPException(400, f"key must be one of {allowed}")
+    if key == "questions":
+        state.workspace.normalize_checkpoint_queue()
     return {"key": key, "content": state.workspace.read(key)}
 
 

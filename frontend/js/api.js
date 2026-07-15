@@ -158,10 +158,11 @@ function extractDecisionOptions(text) {
   const lines = String(text || '').split('\n');
   let optionGroupStarted = false;
   for (const line of lines) {
-    const match = line.match(/^\s*-\s*\[([A-Z])\]\s+(.+)$/);
+    const match = line.match(/^\s*(?:-\s*)?(?:\[([A-Z])\]|(?:\*\*)?Option\s+([A-Z])(?:\s*\([^)]*\))?(?:\*\*)?\s*:)\s*(.+)$/i);
     if (match) {
       optionGroupStarted = true;
-      options.push({ label: match[1], text: match[2].trim() });
+      const label = (match[1] || match[2]).toUpperCase();
+      options.push({ label, text: match[3].trim(), recommended: /recommended/i.test(line) });
       if (options.length === 3) break;
     } else if (optionGroupStarted && line.trim()) {
       break;
@@ -174,22 +175,84 @@ function extractDecisionOptions(text) {
       if (options.length === 3) break;
     }
   }
-  const rec = text.match(/recommendation\s*[:\-]\s*([A-Z])/i);
-  const allOptionCount = [...String(text || '').matchAll(/^\s*-\s*\[[A-Z]\]\s+.+$/gm)].length;
+  const rec = text.match(/recommendation\s*[:\-]\s*(?:option\s*)?([A-Z])/i);
+  const inlineRecommended = options.find(option => option.recommended);
+  const allOptionCount = [...String(text || '').matchAll(/^\s*(?:-\s*)?(?:\[[A-Z]\]|(?:\*\*)?Option\s+[A-Z])/gim)].length;
   return {
     options,
-    recommendation: rec ? rec[1].toUpperCase() : '',
+    recommendation: rec ? rec[1].toUpperCase() : (inlineRecommended?.label || ''),
     hasMoreDecisions: allOptionCount > options.length,
   };
 }
 
-window.useDecisionOption = function(label, text) {
+window.selectDecisionRadio = function() {
+  const selected = document.querySelector('input[name="decisionChoice"]:checked');
   const input = document.getElementById('steerInput');
-  if (!input) return;
-  input.value = `${label}${text ? ' — ' + text : ''}`;
+  if (!selected || !input) return;
+  if (selected.value === 'other') {
+    input.value = '';
+    input.placeholder = 'Type your own answer…';
+  } else {
+    const label = selected.dataset.label || '';
+    const text = decodeURIComponent(selected.dataset.text || '');
+    input.value = `${label}${text ? ' — ' + text : ''}`;
+  }
   input.focus();
-  input.setSelectionRange(input.value.length, input.value.length);
 };
+
+window.submitSelectedDecision = async function() {
+  const selected = document.querySelector('input[name="decisionChoice"]:checked');
+  const promptInput = document.getElementById('steerInput');
+  if (!selected && !promptInput?.value.trim()) return;
+  if (!selected || selected.value === 'other') {
+    const answer = promptInput?.value.trim();
+    if (!answer) {
+      const status = document.getElementById('decisionSubmitStatus');
+      if (status) status.textContent = 'Type your answer in the prompt box.';
+      promptInput?.focus();
+      return;
+    }
+    if (window.activeStructuredCheckpointId) await submitStructuredCheckpoint('', answer);
+    else await submitDecisionOption('Other', answer);
+    return;
+  }
+  if (window.activeStructuredCheckpointId) await submitStructuredCheckpoint(selected.value, '');
+  else await submitDecisionOption(selected.dataset.label || '', decodeURIComponent(selected.dataset.text || ''));
+};
+
+async function submitStructuredCheckpoint(optionId, customAnswer) {
+  const checkpointId = window.activeStructuredCheckpointId;
+  if (!checkpointId || !awaitingDecisionInput) return;
+  const controls = document.querySelectorAll('input[name="decisionChoice"], #sendBtn, #steerInput');
+  controls.forEach(control => { control.disabled = true; });
+  const status = document.getElementById('decisionSubmitStatus');
+  if (status) status.textContent = 'Saving your decision…';
+  try {
+    const response = await fetch(`/run/checkpoint/${encodeURIComponent(checkpointId)}/answer`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({option_id: optionId, custom_answer: customAnswer}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not save this decision.');
+    controls.forEach(control => { control.disabled = false; });
+    const promptInput = document.getElementById('steerInput');
+    if (promptInput) promptInput.value = '';
+    if (data.next_checkpoint) {
+      renderInteractiveQuestionPanel('', data.next_checkpoint);
+      awaitingDecisionInput = true;
+      updateStatus('paused');
+    } else {
+      window.activeStructuredCheckpointId = '';
+      awaitingDecisionInput = false;
+      updateStatus('running');
+      const pendingPane = document.getElementById('contextPendingActions');
+      if (pendingPane) pendingPane.style.display = 'none';
+    }
+  } catch (error) {
+    controls.forEach(control => { control.disabled = false; });
+    if (status) status.textContent = error.message;
+  }
+}
 
 window.submitDecisionOption = async function(label, text) {
   if (!awaitingDecisionInput) return;
@@ -220,14 +283,6 @@ window.submitDecisionOption = async function(label, text) {
   }
 };
 
-window.useCustomDecision = function() {
-  const input = document.getElementById('steerInput');
-  if (!input) return;
-  input.value = '';
-  input.placeholder = 'Type your own answer, then press Submit decision…';
-  input.focus();
-};
-
 function renderQuestionBody(content) {
   const parsed = extractDecisionOptions(content || '');
   const optionsEl = document.getElementById('contextDecisionOptions');
@@ -237,31 +292,51 @@ function renderQuestionBody(content) {
   }
   if (!parsed.options.length) return parseMarkdown(content);
 
-  const firstOptionIndex = content.search(/^\s*-\s*\[[A-Z]\]\s+/m);
+  const firstOptionIndex = content.search(/^\s*(?:-\s*)?(?:\[[A-Z]\]|(?:\*\*)?Option\s+[A-Z])/im);
   const intro = firstOptionIndex > 0 ? content.slice(0, firstOptionIndex).trim() : '# Decision checkpoint';
   const introLines = intro.replace(/^#.*$/gm, '').split('\n').map(line => line.trim()).filter(Boolean);
-  let questionStart = introLines.findLastIndex(line => /^(?:decision|question)(?:\s+\d+)?\s*[:\-—–]/i.test(line));
-  if (questionStart < 0) questionStart = Math.max(0, introLines.length - 1);
-  const rationale = introLines.slice(0, questionStart).join(' ');
-  const question = introLines.slice(questionStart).join(' ') || 'Choose the direction you want the team to take.';
+  const whyIndex = introLines.findIndex(line => /^why this matters\s*:/i.test(line));
+  let rationale = '';
+  let question = '';
+  if (whyIndex > 0) {
+    question = introLines.slice(0, whyIndex).join(' ');
+    rationale = introLines.slice(whyIndex).join(' ').replace(/^why this matters\s*:\s*/i, '');
+  } else {
+    let questionStart = introLines.findLastIndex(line => /^(?:decision|question)(?:\s+\d+)?\s*[:\-—–]/i.test(line));
+    if (questionStart < 0) questionStart = Math.max(0, introLines.length - 1);
+    rationale = introLines.slice(0, questionStart).join(' ');
+    question = introLines.slice(questionStart).join(' ');
+  }
+  question = question || 'Choose the direction you want the team to take.';
   const recommendationMatch = content.match(/recommendation\s*[:\-][^\n]*(?:\n(?!\s*-\s*\[[A-Z]\])[^\n]+)?/i);
   const recommendation = recommendationMatch ? recommendationMatch[0].trim() : '';
-  const buttons = parsed.options.map(opt => {
+  const radios = parsed.options.map(opt => {
     const recommended = parsed.recommendation === opt.label;
     const encodedText = encodeURIComponent(opt.text);
-    return `<button class="decision-option ${recommended ? 'is-recommended' : ''}" onclick="submitDecisionOption('${escAttr(opt.label)}',decodeURIComponent('${encodedText}'))"><span class="decision-option-key">${escHtml(opt.label)}</span><span class="decision-option-copy">${escHtml(opt.text)}</span>${recommended ? '<span class="decision-recommended-badge">Recommended</span>' : ''}</button>`;
+    return `<label class="decision-option ${recommended ? 'is-recommended' : ''}"><input type="radio" name="decisionChoice" value="option" data-label="${escAttr(opt.label)}" data-text="${escAttr(encodedText)}" onchange="selectDecisionRadio()"><span class="decision-option-key">${escHtml(opt.label)}</span><span class="decision-option-copy">${escHtml(opt.text)}</span>${recommended ? '<span class="decision-recommended-badge">Recommended</span>' : ''}</label>`;
   }).join('');
   const more = parsed.hasMoreDecisions
     ? '<div class="decision-more-note">Additional decisions will be asked after you answer this one.</div>'
     : '';
   const context = rationale ? `<details class="decision-context"><summary>Why this decision is needed</summary><div>${escHtml(rationale)}</div></details>` : '';
-  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-step-label">Decision required</div>${context}<div class="decision-question">${escHtml(question)}</div>${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><div class="decision-inline-options" role="group" aria-label="Decision options">${buttons}<button class="decision-option decision-other" onclick="useCustomDecision()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — write my own answer</span></button><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite">Choose one option to continue.</div></div></div>`;
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(question)}</div>${context}${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — type my own answer in the prompt box</span></label><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div></fieldset></div>`;
 }
 
-function renderInteractiveQuestionPanel(content) {
+function renderStructuredCheckpoint(checkpoint) {
+  window.activeStructuredCheckpointId = checkpoint.id;
+  const radios = (checkpoint.options || []).map(option => {
+    const consequence = option.consequence ? `<span class="decision-option-consequence">${escHtml(option.consequence)}</span>` : '';
+    return `<label class="decision-option ${option.recommended ? 'is-recommended' : ''}"><input type="radio" name="decisionChoice" value="${escAttr(option.id)}" data-label="${escAttr(option.label)}" data-text="${escAttr(encodeURIComponent(option.summary))}" onchange="selectDecisionRadio()"><span class="decision-option-key">${escHtml(option.label)}</span><span class="decision-option-copy"><strong>${escHtml(option.summary)}</strong>${consequence}</span>${option.recommended ? '<span class="decision-recommended-badge">Recommended</span>' : ''}</label>`;
+  }).join('');
+  const rationale = checkpoint.rationale ? `<div class="decision-rationale"><strong>Why this decision matters</strong><span>${escHtml(checkpoint.rationale)}</span></div>` : '';
+  const recommendation = checkpoint.recommendation ? `<div class="decision-recommendation"><strong>Recommendation:</strong> ${escHtml(checkpoint.recommendation)}</div>` : '';
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(checkpoint.question)}</div>${rationale}${recommendation}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — type my own answer in the prompt box</span></label><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div></fieldset></div>`;
+}
+
+function renderInteractiveQuestionPanel(content, checkpoint = null) {
   const pendingPane = document.getElementById('contextPendingActions');
   const bodyEl = document.getElementById('contextQuestionsBody');
-  const hasQuestion = awaitingDecisionInput && !!(content && content.trim() && content.trim() !== '(empty)');
+  const hasQuestion = awaitingDecisionInput && (!!checkpoint || !!(content && content.trim() && content.trim() !== '(empty)'));
   if (!pendingPane || !bodyEl) return false;
 
   if (!hasQuestion) {
@@ -270,7 +345,7 @@ function renderInteractiveQuestionPanel(content) {
   }
 
   pendingPane.style.display = 'flex';
-  bodyEl.innerHTML = renderQuestionBody(content);
+  bodyEl.innerHTML = checkpoint ? renderStructuredCheckpoint(checkpoint) : renderQuestionBody(content);
   const steerInput = document.getElementById('steerInput');
   const sendBtn = document.getElementById('sendBtn');
   if (steerInput && !steerInput.value) {
@@ -395,11 +470,12 @@ async function updateDesignCockpit() {
   if (loadedState) loadedState.style.display = projectOpen ? 'flex' : 'none';
   if (!projectOpen) return;
   try {
-    const [designRes, planRes, decisionsRes, questionsRes] = await Promise.all([
+    const [designRes, planRes, decisionsRes, questionsRes, checkpointRes] = await Promise.all([
       fetch('/workspace/file/design').then(r => r.json()).catch(() => ({ content: '' })),
       fetch('/workspace/file/plan').then(r => r.json()).catch(() => ({ content: '' })),
       fetch('/workspace/file/decisions').then(r => r.json()).catch(() => ({ content: '' })),
       fetch('/workspace/file/questions').then(r => r.json()).catch(() => ({ content: '' })),
+      fetch('/run/checkpoint/current').then(r => r.json()).catch(() => ({ checkpoint: null })),
     ]);
     const design = designRes.content || '';
     const plan = planRes.content || '';
@@ -411,7 +487,7 @@ async function updateDesignCockpit() {
       : (latestDecisionTimeline(decisions)[0]?.title || 'No active decision is surfaced right now.');
     const recommendation = recommendationFromContent(questions, decisions);
     const loops = openLoopsFromArtifacts({ questions, plan, design });
-    renderInteractiveQuestionPanel(questions);
+    renderInteractiveQuestionPanel(questions, checkpointRes.checkpoint);
 
     const stageEl = document.getElementById('cockpitStage');
     if (stageEl) stageEl.textContent = stage;
@@ -540,7 +616,8 @@ function appendFeed(ev) {
   const div = document.createElement('div');
   div.className = `feed-item ${ev.kind}`;
 
-  const agentColor = agentColors[ev.agent] || '#64748b';
+  const displayAgent = ev.agent === 'human' && currentUser?.username ? currentUser.username : ev.agent;
+  const agentColor = agentColors[displayAgent] || agentColors[ev.agent] || '#64748b';
   const ts = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : '';
 
   let summary = '';
@@ -633,7 +710,7 @@ function appendFeed(ev) {
       summary = JSON.stringify(ev.data).slice(0, 100);
   }
 
-  const avatarChar = (ev.agent || 'SYS').slice(0, 1).toUpperCase();
+  const avatarChar = (displayAgent || 'SYS').slice(0, 1).toUpperCase();
   const providerAgent = ev.data.provider_agent || '';
   const providerKind = ev.data.provider_kind || '';
   const providerModel = ev.data.provider_model || '';
@@ -649,7 +726,7 @@ function appendFeed(ev) {
       <div class="feed-meta">
         <div class="feed-header-line">
           <div class="feed-agent-details">
-            <span class="feed-agent">${ev.agent || 'System'}</span>
+            <span class="feed-agent">${escHtml(displayAgent || 'System')}</span>
             ${providerLabel ? `<span class="feed-provider" title="Underlying configured agent and model">via ${escHtml(providerLabel)}</span>` : ''}
             <span class="feed-kind">${escHtml(kindLabel)}</span>
             ${metricsHtml}
@@ -983,6 +1060,14 @@ function handleSteerInput(event) {
 async function steer() {
   const msg = document.getElementById('steerInput').value.trim();
 
+  // The normal prompt Submit button is also the checkpoint submit action.
+  // Radio choices only prepare the answer; they never add a second CTA.
+  const selectedDecision = document.querySelector('input[name="decisionChoice"]:checked');
+  if (awaitingDecisionInput && (window.activeStructuredCheckpointId || selectedDecision)) {
+    await window.submitSelectedDecision();
+    return;
+  }
+
   // Project runtimes can be recreated after the last collaborator leaves. Do
   // not route a prompt using stale browser state from the previous runtime.
   try {
@@ -1241,8 +1326,13 @@ function clearFeed() {
 
 async function showInteractiveQuestions() {
   try {
-    const res = await fetch('/workspace/file/questions').then(r=>r.json());
-    renderInteractiveQuestionPanel(res?.content || '');
+    const checkpointRes = await fetch('/run/checkpoint/current').then(r=>r.json());
+    if (checkpointRes?.checkpoint) {
+      renderInteractiveQuestionPanel('', checkpointRes.checkpoint);
+      return;
+    }
+    const legacyRes = await fetch('/workspace/file/questions').then(r=>r.json());
+    renderInteractiveQuestionPanel(legacyRes?.content || '');
   } catch (err) {
     console.error("Failed to load interactive questions", err);
   }

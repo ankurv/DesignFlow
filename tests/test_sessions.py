@@ -64,6 +64,106 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(audit_action("POST", "/session/heartbeat"), "")
 
 
+class StructuredCheckpointTests(unittest.TestCase):
+    def test_bold_unbulleted_legacy_decisions_split_and_convert(self):
+        legacy = """# Decision Checkpoint
+
+**Decision 31: Delivery Contract**:
+
+**Option A (Recommended)**: Best-effort, at-most-once delivery.
+**Option B**: Selectable durability acknowledgments.
+**Decision 32: Version Compatibility Policy**:
+
+**Option A (Recommended)**: Exact major versioning.
+**Option B**: Permissive versionless parsing.
+"""
+        questions = Workspace.split_checkpoint_questions(legacy)
+        self.assertEqual(len(questions), 2)
+        first = Orchestrator._checkpoint_payload_from_text(questions[0])
+        second = Orchestrator._checkpoint_payload_from_text(questions[1])
+        self.assertIn("Decision 31", first["question"])
+        self.assertEqual([option["label"] for option in first["options"]], ["A", "B"])
+        self.assertIn("Decision 32", second["question"])
+
+    def test_legacy_logger_checkpoint_converts_once_to_structured_options(self):
+        legacy = """We have unresolved proposed decisions.
+
+1. **Decision 24: Routing Authority & Destination Validation**:
+   - **Option A (Recommended)**: Validate destination aliases against an allowlist.
+   - **Option B**: Trust client service-name claims.
+"""
+        payload = Orchestrator._checkpoint_payload_from_text(legacy)
+        self.assertIn("Decision 24", payload["question"])
+        self.assertEqual([option["label"] for option in payload["options"]], ["A", "B"])
+        self.assertTrue(payload["options"][0]["recommended"])
+        self.assertIn("unresolved proposed decisions", payload["rationale"])
+
+    def test_only_one_checkpoint_is_active_and_answers_advance_transactionally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            first = store.enqueue_checkpoint(
+                "run-1", "discovery", "Where should this run?", "Deployment changes packaging.",
+                [{"label": "A", "summary": "Cloud", "consequence": "Use managed services", "recommended": True},
+                 {"label": "B", "summary": "On premises", "consequence": "Package every dependency"}],
+            )
+            second = store.enqueue_checkpoint(
+                "run-1", "discovery", "What scale is required?", "Scale changes topology.",
+                [{"label": "A", "summary": "Small"}, {"label": "B", "summary": "Large"}],
+            )
+            self.assertEqual(first["status"], "active")
+            self.assertEqual(second["status"], "pending")
+            answered, next_checkpoint = store.answer_checkpoint(
+                "run-1", first["id"], "admin", option_id=first["options"][0]["id"],
+            )
+            self.assertEqual(answered["status"], "answered")
+            self.assertEqual(next_checkpoint["id"], second["id"])
+            self.assertEqual(next_checkpoint["status"], "active")
+            with self.assertRaises(ValueError):
+                store.answer_checkpoint("run-1", first["id"], "admin", custom_answer="stale")
+            store.close()
+
+    def test_checkpoint_survives_store_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory)
+            store = ProjectStore(metadata)
+            checkpoint = store.enqueue_checkpoint(
+                "run-2", "approval", "Choose delivery semantics", "This controls durability.",
+                [{"label": "A", "summary": "At most once"}, {"label": "B", "summary": "At least once"}],
+            )
+            store.close()
+            reopened = ProjectStore(metadata)
+            restored = reopened.current_checkpoint("run-2")
+            self.assertEqual(restored["id"], checkpoint["id"])
+            self.assertEqual(len(restored["options"]), 2)
+            reopened.close()
+
+    def test_latest_checkpoint_recovers_without_in_memory_run_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory)
+            store = ProjectStore(metadata)
+            store.start_run("run-older", "older")
+            store.enqueue_checkpoint(
+                "run-older", "approval", "Old question", "",
+                [{"label": "A", "summary": "Old answer"}],
+            )
+            store.start_run("run-current", "current")
+            first = store.enqueue_checkpoint(
+                "run-current", "approval", "First current question", "",
+                [{"label": "A", "summary": "First answer"}],
+            )
+            store.enqueue_checkpoint(
+                "run-current", "approval", "Second current question", "",
+                [{"label": "A", "summary": "Second answer"}],
+            )
+            store.close()
+
+            reopened = ProjectStore(metadata)
+            restored = reopened.latest_current_checkpoint()
+            self.assertEqual(restored["id"], first["id"])
+            self.assertEqual(restored["question"], "First current question")
+            reopened.close()
+
+
 class UsageSerializationTests(unittest.TestCase):
     def test_usage_round_trip_ignores_derived_total_tokens(self):
         original = Usage(input_tokens=120, cached_input_tokens=40, output_tokens=30, estimated=True)
@@ -1597,6 +1697,23 @@ Decision 2: Choose retention.
             self.assertIn("Why this matters", question)
             self.assertEqual(orchestrator._discovery_questions_asked, 1)
 
+    def test_adaptive_discovery_rejects_internal_decision_heading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator([], Workspace(directory), require_approval=True)
+            response = json.dumps({
+                "status": "ask",
+                "dimension": "delivery",
+                "question": "Decision 31: Delivery Contract",
+                "reason": "The acknowledgement boundary controls latency and possible event loss.",
+                "options": [
+                    {"label": "Accept into memory", "consequence": "Lower latency with a small loss window."},
+                    {"label": "Confirm durable storage", "consequence": "Lower loss risk with additional latency."},
+                ],
+                "recommended": "Accept into memory",
+                "blocking": True,
+            })
+            self.assertIsNone(orchestrator._parse_discovery_proposal(response))
+
     def test_adaptive_discovery_fails_over_to_another_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -2072,9 +2189,23 @@ class DeterministicRoutingTests(unittest.TestCase):
     def test_web_checkpoint_offers_one_click_options_and_custom_answer(self):
         source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
         self.assertIn("submitDecisionOption", source)
-        self.assertIn("Other — write my own answer", source)
-        self.assertIn("Choose one option to continue", source)
+        self.assertIn("Other — type my own answer in the prompt box", source)
+        self.assertIn('type="radio" name="decisionChoice"', source)
+        self.assertNotIn("Continue with this choice", source)
+        self.assertNotIn("One decision at a time", source)
+        self.assertIn("await window.submitSelectedDecision()", source)
+        self.assertIn("body: JSON.stringify({option_id: optionId, custom_answer: customAnswer})", source)
+        self.assertIn("why this matters", source.lower())
         self.assertIn("await fetch('/run/resume'", source)
+
+    def test_user_events_display_authenticated_username(self):
+        server = (Path(__file__).parents[1] / "backend" / "server.py").read_text()
+        orchestrator = (Path(__file__).parents[1] / "backend" / "orchestrator.py").read_text()
+        web = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("body.message, session.username", server)
+        self.assertIn("bool(next_checkpoint), session.username", server)
+        self.assertIn('agent=username or "human"', orchestrator)
+        self.assertIn("ev.agent === 'human' && currentUser?.username", web)
 
     def test_vscode_checkpoint_has_option_and_other_answer_flow(self):
         source = (Path(__file__).parents[1] / "vscode-extension" / "src" / "extension.ts").read_text()

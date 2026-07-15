@@ -172,7 +172,7 @@ class Workspace:
             return []
         lines = body.splitlines()
         marker = re.compile(
-            r"^\s*(?:#{1,6}\s*)?(?:(?:decision|question)(?:\s+\d+)?\s*[:.\-—–]|\d+[.)]\s+)",
+            r"^\s*(?:#{1,6}\s*)?(?:\d+[.)]\s+)?(?:\*\*)?(?:decision|question)(?:\s+\d+)?\b",
             re.I,
         )
         starts = [

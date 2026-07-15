@@ -78,6 +78,11 @@ redacted metadata; they never include passwords, provider credentials, full prom
 model responses. Administrators can query recent events through `GET /admin/audit` with
 optional `username`, `action`, `result`, and `limit` filters. Events are retained for 90 days.
 
+Decision checkpoints are stored as structured rows in each project's SQLite database.
+Exactly one checkpoint per run may be active, option answers are validated transactionally,
+and stale submissions are rejected by checkpoint ID. `QUESTIONS.md` is now only a readable
+compatibility projection; legacy Markdown checkpoints are migrated into SQLite when opened.
+
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ### 2. Setup a Project Folder
