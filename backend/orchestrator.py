@@ -349,6 +349,8 @@ class Orchestrator:
         self._checkpoint_has_more = False
         self._discovery_questions_asked = 0
         self._discovery_question_keys: set[str] = set()
+        self._adaptive_discovery_unavailable = False
+        self._discovery_failed_providers: set[str] = set()
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -739,14 +741,14 @@ class Orchestrator:
         stop = {"the", "a", "an", "is", "are", "what", "which", "should", "do", "does", "to", "for", "and", "or"}
         return " ".join(word for word in words if word not in stop)[:180]
 
-    def _parse_discovery_proposal(self, response: str) -> str:
+    def _parse_discovery_proposal(self, response: str) -> Optional[str]:
         match = re.search(r"\{[\s\S]*\}", response or "")
         if not match:
-            return ""
+            return None
         try:
             proposal = json.loads(match.group(0))
         except json.JSONDecodeError:
-            return ""
+            return None
         if str(proposal.get("status", "")).lower() in {"ready", "ready_to_draft"}:
             self._discovery_questions_asked = max(1, self._discovery_questions_asked)
             return ""
@@ -754,14 +756,14 @@ class Orchestrator:
         reason = str(proposal.get("reason", "")).strip()
         options = proposal.get("options", [])
         if len(question) < 12 or len(reason) < 12 or not isinstance(options, list) or not 2 <= len(options) <= 3:
-            return ""
+            return None
         key = self._question_key(question)
         semantically_repeated = any(
             SequenceMatcher(None, key, previous).ratio() >= 0.82
             for previous in self._discovery_question_keys
         )
         if not key or key in self._discovery_question_keys or semantically_repeated:
-            return ""
+            return None
         rendered_options = []
         for index, option in enumerate(options):
             if isinstance(option, dict):
@@ -771,7 +773,7 @@ class Orchestrator:
             else:
                 text = str(option).strip()
             if not text:
-                return ""
+                return None
             rendered_options.append(f"- [{chr(65 + index)}] {text}")
         recommendation = str(proposal.get("recommended", "")).strip()
         blocking = bool(proposal.get("blocking", True))
@@ -787,6 +789,8 @@ class Orchestrator:
     async def _adaptive_discovery_question(self, coordinator, step: int) -> str:
         if self._discovery_questions_asked >= 6:
             return ""
+        if self._adaptive_discovery_unavailable:
+            return self._deterministic_discovery_question()
         context = self.ws.scoped_context(["design", "plan", "decisions", "questions", "src_index"])
         if len(context) > 14000:
             context = context[:14000].rstrip() + "\n[context truncated]"
@@ -801,16 +805,71 @@ class Orchestrator:
             f"Product goal: {self.idea}\nCurrent request: {self.task or self.idea}\n"
             f"Questions already asked: {sorted(self._discovery_question_keys)}\n\nProject evidence:\n{context}"
         )
-        turn_context = {"step": step, "phase": "discovery_analysis", "standing_role": coordinator.config.role}
-        turn_id = self._begin_turn(coordinator, turn_context)
-        response = await self._send_agent(coordinator, prompt, turn_id, turn_context)
-        self._record_turn_usage(coordinator, "discovery")
-        self._emit(Event(EventKind.TURN_END, agent=coordinator.name, data={
-            "turn_id": turn_id, "attempt": self._turn_attempts[turn_id], "step": step,
-            "response": "Discovery analysis complete.", **self._event_actor_meta(coordinator),
-            **self._usage_event(coordinator),
+        analysts = []
+        seen_providers = set()
+        for candidate in [coordinator] + sorted(
+            (agent for agent in self.agents if agent is not coordinator),
+            key=self._synthesis_score,
+            reverse=True,
+        ):
+            provider_id = candidate.config.base_id or candidate.config.id or candidate.name
+            if provider_id in seen_providers or provider_id in self._discovery_failed_providers:
+                continue
+            seen_providers.add(provider_id)
+            analysts.append(candidate)
+            if len(analysts) >= 3:
+                break
+
+        last_error = None
+        for attempt_index, analyst in enumerate(analysts):
+            turn_context = {"step": step, "phase": "discovery_analysis", "standing_role": analyst.config.role}
+            turn_id = self._begin_turn(analyst, turn_context)
+            self._emit(Event(EventKind.TURN_START, agent=analyst.name, data={
+                "turn_id": turn_id, "attempt": self._turn_attempts.get(turn_id, 1),
+                **turn_context, **self._event_actor_meta(analyst),
+            }))
+            original_timeout = analyst.config.extra.get("timeout")
+            analyst.config.extra["timeout"] = min(int(original_timeout or 45), 45)
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(analyst.send, prompt, "", context),
+                    timeout=45,
+                )
+            except (RuntimeError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                self._discovery_failed_providers.add(analyst.config.base_id or analyst.config.id or analyst.name)
+                self._emit(Event(EventKind.PHASE, agent=analyst.name, data={
+                    "phase": "discovery", "status": "provider_failover",
+                    "message": "Discovery analyst failed; trying another configured agent.",
+                    "reason": classify_provider_error(exc).code,
+                    "attempted_provider": analyst.config.base_id or analyst.config.id,
+                }))
+                continue
+            finally:
+                if original_timeout is None:
+                    analyst.config.extra.pop("timeout", None)
+                else:
+                    analyst.config.extra["timeout"] = original_timeout
+
+            question = self._parse_discovery_proposal(response)
+            if question is None:
+                last_error = RuntimeError("Discovery analyst returned an invalid or duplicate question")
+                continue
+            self._record_turn_usage(analyst, "discovery")
+            self._emit(Event(EventKind.TURN_END, agent=analyst.name, data={
+                "turn_id": turn_id, "attempt": self._turn_attempts[turn_id], "step": step,
+                "response": "Discovery analysis complete.", **self._event_actor_meta(analyst),
+                **self._usage_event(analyst),
+            }))
+            return question
+
+        self._adaptive_discovery_unavailable = True
+        self._emit(Event(EventKind.PHASE, agent=coordinator.name, data={
+            "phase": "discovery", "status": "fallback",
+            "message": "All discovery analysts were unavailable; continuing with bounded local discovery questions.",
+            "reason": classify_provider_error(last_error or RuntimeError("No discovery analyst available")).code,
         }))
-        return self._parse_discovery_proposal(response)
+        return self._deterministic_discovery_question()
 
     @staticmethod
     def _is_explicit_user_correction(text: str) -> bool:
@@ -1072,6 +1131,7 @@ class Orchestrator:
             "user_checkpoint_count": self._user_checkpoint_count,
             "discovery_questions_asked": self._discovery_questions_asked,
             "discovery_question_keys": sorted(self._discovery_question_keys),
+            "discovery_failed_providers": sorted(self._discovery_failed_providers),
             "artifact_fingerprints": self.ws.artifact_fingerprints(),
             "agents": {
                 a.name: [
@@ -1124,6 +1184,7 @@ class Orchestrator:
                 self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
                 self._discovery_questions_asked = int(state.get("discovery_questions_asked", 0) or 0)
                 self._discovery_question_keys = set(state.get("discovery_question_keys", []))
+                self._discovery_failed_providers = set(state.get("discovery_failed_providers", []))
 
                 agent_states = state.get("agents", {})
                 for a in self.agents:
@@ -1169,6 +1230,7 @@ class Orchestrator:
             self._user_checkpoint_count = int(state.get("user_checkpoint_count", 0) or 0)
             self._discovery_questions_asked = int(state.get("discovery_questions_asked", 0) or 0)
             self._discovery_question_keys = set(state.get("discovery_question_keys", []))
+            self._discovery_failed_providers = set(state.get("discovery_failed_providers", []))
 
             agent_states = state.get("agents", {})
             for a in self.agents:

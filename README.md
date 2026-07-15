@@ -72,6 +72,12 @@ For passive, project-local workflow diagnostics during development, start with
 `python3 run.py --port 8000 --debug-observer`. The observer is disabled by default,
 redacts sensitive values, and writes suggestions under `.designflow/debug/`.
 
+Security- and state-relevant user actions are recorded by default in the server-wide
+`~/.designflow/audit.db`. Audit entries contain hashed session/project identifiers and
+redacted metadata; they never include passwords, provider credentials, full prompts, or
+model responses. Administrators can query recent events through `GET /admin/audit` with
+optional `username`, `action`, `result`, and `limit` filters. Events are retained for 90 days.
+
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ### 2. Setup a Project Folder

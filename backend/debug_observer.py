@@ -76,6 +76,12 @@ class DebugObserver:
         events = events[last_start:]
         kinds = Counter(event.get("kind", "") for event in events)
         phases = [str(event.get("data", {}).get("phase", "")) for event in events]
+        discovery_fallbacks = [
+            event for event in events
+            if event.get("kind") == "phase"
+            and event.get("data", {}).get("phase") == "discovery"
+            and event.get("data", {}).get("status") == "fallback"
+        ]
         files = [str(event.get("data", {}).get("file", "")) for event in events if event.get("kind") == "file_write"]
         insights = []
 
@@ -95,6 +101,12 @@ class DebugObserver:
             insights.append(self._insight(
                 "run_errors", "high", f"The observed timeline contains {kinds['error']} errors.",
                 "Review the error events and ensure the UI presents a recovery action.",
+            ))
+        if discovery_fallbacks:
+            insights.append(self._insight(
+                "adaptive_discovery_fallback", "medium",
+                "Adaptive discovery could not use the preferred model and switched to local fallback questions.",
+                "Show the provider failure in the UI and try another healthy configured agent before using the deterministic fallback.",
             ))
         diagram_requested = any("mermaid" in prompt.lower() or "visual design" in prompt.lower() for prompt in self._run_prompts.values())
         completed = kinds["done"] > 0

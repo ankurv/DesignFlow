@@ -29,6 +29,7 @@ from .storage import ProjectStore
 from .workspace.workspace import Workspace
 from .errors import classify_provider_error
 from .debug_observer import DebugObserver
+from .audit import audit_log
 
 logger = logging.getLogger(__name__)
 SSE_SHUTDOWN = object()
@@ -75,6 +76,65 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+
+def audit_action(method: str, path: str) -> str:
+    if method == "GET" and path in {"/admin/runtime-diagnostics", "/admin/audit"}:
+        return "admin." + ("runtime_diagnostics" if path.endswith("runtime-diagnostics") else "audit.read")
+    if method not in {"POST", "PUT", "DELETE"} or path in {"/auth/login", "/session/heartbeat"}:
+        return ""
+    rules = (
+        (r"^/auth/logout$", "auth.logout"), (r"^/users/password$", "user.password_change"),
+        (r"^/users(?:/.*)?$", "user.manage"), (r"^/project/open$", "project.open"),
+        (r"^/project/brief$", "project.brief_update"), (r"^/project/settings$", "project.settings_update"),
+        (r"^/agents/test$", "agent.test"), (r"^/agents/models$", "agent.models_discover"),
+        (r"^/agents(?:/.*)?$", "agent.configure"), (r"^/run/start$", "run.start"),
+        (r"^/run/pause$", "run.pause"), (r"^/run/resume$", "run.resume"),
+        (r"^/run/retry$", "run.retry"), (r"^/run/stop$", "run.stop"),
+        (r"^/run/reset$", "run.reset"), (r"^/run/steer$", "run.steer"),
+        (r"^/mcp(?:/.*)?$", "mcp.configure"), (r"^/workspace/file/.*$", "artifact.update"),
+        (r"^/workspace/src/.*$", "source.update"), (r"^/admin/shutdown$", "admin.shutdown"),
+    )
+    return next((action for pattern, action in rules if re.match(pattern, path)), "")
+
+
+@app.middleware("http")
+async def audit_requests(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    action = audit_action(request.method, request.url.path)
+    session_id = request.headers.get("X-DesignFlow-Session") or request.cookies.get("session_id") or ""
+    session = auth_manager.get_session(session_id) if session_id else None
+    project_path = session_projects.get(session_id, "")
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception:
+        if action:
+            audit_log.record(
+                request_id=request_id, session_id=session_id,
+                username=session.username if session else "", role=session.role if session else "",
+                project_path=project_path, action=action, target=request.url.path,
+                result="error", source_ip=request.client.host if request.client else "",
+                metadata={"method": request.method},
+            )
+        raise
+    response.headers["X-Request-ID"] = request_id
+    if action:
+        project_path = session_projects.get(session_id, project_path)
+        audit_log.record(
+            request_id=request_id, session_id=session_id,
+            username=session.username if session else "", role=session.role if session else "",
+            project_path=project_path, action=action, target=request.url.path,
+            result="success" if status_code < 400 else "denied" if status_code in {401, 403} else "failed",
+            source_ip=request.client.host if request.client else "",
+            metadata={"method": request.method, "status_code": status_code},
+        )
+    return response
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "status": "healthy"}
 
 
 class AppState:
@@ -263,11 +323,21 @@ class LoginBody(BaseModel):
     password: str
 
 @app.post("/auth/login")
-def login(body: LoginBody, response: Response):
+def login(body: LoginBody, response: Response, request: Request):
     session = auth_manager.login(body.username, body.password)
     if not session:
+        audit_log.record(
+            action="auth.login", target=body.username, result="failed",
+            username=body.username, source_ip=request.client.host if request.client else "",
+            metadata={"reason": "invalid_credentials"},
+        )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     response.set_cookie(key="session_id", value=session.session_id, httponly=True)
+    audit_log.record(
+        session_id=session.session_id, username=session.username, role=session.role,
+        action="auth.login", target=session.username, result="success",
+        source_ip=request.client.host if request.client else "",
+    )
     return {"ok": True, "username": session.username, "role": session.role, "session_id": session.session_id}
 
 
@@ -995,6 +1065,19 @@ def runtime_diagnostics(session: Session = Depends(get_session)):
             reconcile_runtime_status(state)
             diagnostics.append(runtime_diagnostic(state, project_path))
     return {"runtimes": diagnostics}
+
+
+@app.get("/admin/audit")
+def read_audit_log(
+    username: str = "", action: str = "", result: str = "", limit: int = 100,
+    session: Session = Depends(get_session),
+):
+    if session.role != "admin":
+        raise HTTPException(403, "Admins only")
+    return {
+        "events": audit_log.query(username=username, action=action, result=result, limit=limit),
+        "dropped_events": audit_log.dropped,
+    }
 
 
 @app.get("/run/status")

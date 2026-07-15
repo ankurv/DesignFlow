@@ -7,6 +7,7 @@ import argparse
 import uvicorn
 
 from backend.server import app
+from backend.audit import audit_log
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,10 @@ if __name__ == "__main__":
     print(f"\n🚀 DesignFlow running at http://{args.host}:{args.port}\n")
     if args.debug_observer:
         print("🔎 Debug observer enabled; diagnostics will be stored per project in .designflow/debug\n")
+        audit_log.record(
+            action="debug_observer.enable", target="server", result="success",
+            username="system", role="system", metadata={"port": args.port},
+        )
     config = uvicorn.Config(
         app,
         host=args.host,

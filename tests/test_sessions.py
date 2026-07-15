@@ -15,6 +15,7 @@ from backend.agents.providers import CLIAgent, GroqAgent, discover_models
 from backend.orchestrator import EventKind, Orchestrator, OrchestratorPhase
 from backend.errors import classify_provider_error
 from backend.debug_observer import DebugObserver
+from backend.audit import AuditLog
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
 
@@ -36,6 +37,31 @@ class StatefulFake(AgentBase):
             cached_input_tokens=40,
             output_tokens=20,
         )
+
+
+class AuditLogTests(unittest.TestCase):
+    def test_audit_log_redacts_sensitive_metadata_and_hashes_identifiers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(Path(directory) / "audit.db")
+            log.record(
+                session_id="session-secret", project_path="/private/project",
+                username="admin", role="admin", action="agent.configure",
+                target="agent-1", result="success", source_ip="127.0.0.1",
+                metadata={"api_key": "sk-secret", "changed_fields": ["model"]},
+            )
+            events = log.query(limit=10)
+            log.close()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["metadata"]["api_key"], "[REDACTED]")
+            self.assertNotEqual(events[0]["session_hash"], "session-secret")
+            self.assertNotIn("/private/project", json.dumps(events[0]))
+
+    def test_audit_action_classification_covers_sensitive_mutations(self):
+        from backend.server import audit_action
+        self.assertEqual(audit_action("POST", "/run/start"), "run.start")
+        self.assertEqual(audit_action("PUT", "/agents/a1"), "agent.configure")
+        self.assertEqual(audit_action("POST", "/workspace/file/design"), "artifact.update")
+        self.assertEqual(audit_action("POST", "/session/heartbeat"), "")
 
 
 class UsageSerializationTests(unittest.TestCase):
@@ -1570,6 +1596,37 @@ Decision 2: Choose retention.
             self.assertIn("Who will operate", question)
             self.assertIn("Why this matters", question)
             self.assertEqual(orchestrator._discovery_questions_asked, 1)
+
+    def test_adaptive_discovery_fails_over_to_another_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Build a logging service")
+            failed = StatefulFake(AgentConfig(id="provider-a", name="failed", kind="cli"))
+            failed.replies = iter([])
+            healthy_response = json.dumps({
+                "status": "ask",
+                "dimension": "deployment",
+                "question": "Where must this logging service be deployed?",
+                "reason": "Deployment constraints determine packaging and managed-service choices.",
+                "options": ["Cloud-agnostic", "One cloud provider", "Self-hosted"],
+                "recommended": "Cloud-agnostic",
+                "blocking": True,
+            })
+            healthy = StatefulFake(
+                AgentConfig(id="provider-b", name="healthy", kind="openai", model="gpt-4o"),
+                replies=[healthy_response],
+            )
+            events = []
+            orchestrator = Orchestrator([failed, healthy], workspace, event_cb=events.append, require_approval=True)
+            orchestrator.idea = "Build a logging service"
+            question = asyncio.run(orchestrator._adaptive_discovery_question(failed, 1))
+            self.assertIn("Where must", question)
+            self.assertTrue(any(
+                event.kind == EventKind.PHASE and event.data.get("status") == "provider_failover"
+                for event in events
+            ))
+            self.assertFalse(orchestrator._adaptive_discovery_unavailable)
+            self.assertIn("provider-a", orchestrator._discovery_failed_providers)
 
     def test_inline_questions_are_not_announced_as_workspace_artifact_writes(self):
         source = (Path(__file__).parents[1] / "backend" / "orchestrator.py").read_text()
