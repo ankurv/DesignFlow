@@ -1,14 +1,12 @@
 // ── Agent config ──────────────────────────────────────────────────────────────
 const KINDS = ['claude','openai','groq','gemini','cli','ollama'];
-let globalAgentConfigs = [];
 let projectAgentConfigs = [];
-let editingAgentId = null; // String format: 'global-<id>' or 'project-<id>'
+let editingAgentId = null;
 let editingAgentData = {};
 
 async function loadAgentConfig() {
   const res = await fetch('/agents').then(r=>r.json());
-  globalAgentConfigs = res.global || [];
-  projectAgentConfigs = res.project || [];
+  projectAgentConfigs = res.agents || [];
   renderAgentCards();
 }
 
@@ -17,12 +15,7 @@ function renderAgentCards() {
   if (!container) return;
   const expandedCapacityIds = [...container.querySelectorAll('.agent-capacity-details:not([hidden])')].map(el => el.id);
 
-  const scopeLabel = document.getElementById('scopeLabel');
-  if (projectOpen) {
-    scopeLabel.textContent = `Project Scope: ${escHtml(currentProjectPath.split('/').pop())}`;
-  } else {
-    scopeLabel.textContent = `Global Scope (No Project Open)`;
-  }
+
 
   let html = '';
 
@@ -65,8 +58,8 @@ function renderAgentCards() {
   renderAgentEditor();
 }
 
-function renderSingleCard(cfg, idx, isGlobal) {
-  const uid = (isGlobal ? 'global-' : 'project-') + cfg.id;
+function renderSingleCard(cfg, idx) {
+  const uid = cfg.id;
   const isSelected = editingAgentId === uid;
     const isCoordinator = cfg.extra?.is_coordinator;
     const initial = (cfg.name || '?').charAt(0).toUpperCase();
@@ -76,14 +69,11 @@ function renderSingleCard(cfg, idx, isGlobal) {
     }
     
     let actionButtons = '';
-    actionButtons += `<button class="agent-health-refresh" onclick="refreshAgentHealth('${uid}', ${isGlobal}, ${idx})" title="Check health" aria-label="Check ${escAttr(cfg.name || 'agent')} health">↻</button>`;
+    actionButtons += `<button class="agent-health-refresh" onclick="refreshAgentHealth('${uid}', ${idx})" title="Check health" aria-label="Check ${escAttr(cfg.name || 'agent')} health">↻</button>`;
     const isPaused = cfg.is_paused;
     const pauseBadge = isPaused ? '<span class="agent-scope-badge danger" style="background:var(--red);color:white;border-color:var(--red);">Paused</span>' : '';
 
-    if (isGlobal) {
-      if (projectOpen) {
-        actionButtons += `
-          <button class="btn btn-secondary" onclick="overrideForProject('${cfg.id}')" style="padding:4px 10px;font-size:11px">Customize for Project</button>
+    ')" style="padding:4px 10px;font-size:11px">Customize for Project</button>
           <button class="btn btn-secondary" onclick="startEditAgent('${uid}', true, ${idx})" style="padding:4px 10px;font-size:11px">Edit Global</button>
         `;
       } else {
@@ -103,9 +93,7 @@ function renderSingleCard(cfg, idx, isGlobal) {
       `;
     }
 
-    const badge = isGlobal 
-      ? '<span class="agent-scope-badge global">Global Team</span>'
-      : '<span class="agent-scope-badge project">Project Override</span>';
+    
     const badgeHTML = pauseBadge + badge;
 
     const statusInfo = agentHealthStatus[uid] || { status: isPaused ? 'paused' : 'testing', error: '' };
@@ -182,8 +170,7 @@ function renderAgentEditor() {
   if (layout) layout.classList.add('editor-open');
 
   const data = editingAgentData;
-  const isGlobal = editingAgentId.startsWith('global-');
-  const agentId = editingAgentId.replace(/^(global|project)-/, '');
+  const agentId = editingAgentId;
   const isNew = agentId.startsWith('new-');
   const isCli = data.kind === 'cli';
   const isOllama = data.kind === 'ollama';
@@ -194,7 +181,7 @@ function renderAgentEditor() {
 
   panel.innerHTML = `
     <div class="agent-editor-header">
-      <div><span class="agent-editor-eyebrow">${isGlobal ? 'Global team' : 'Project team'}</span><h3>${isNew ? 'Add agent' : 'Edit agent'}</h3></div>
+      <div><span class="agent-editor-eyebrow">Project team</span><h3>${isNew ? 'Add agent' : 'Edit agent'}</h3></div>
       <button class="agent-editor-close" onclick="cancelEditAgent()" aria-label="Close editor">×</button>
     </div>
     <div class="agent-editor-form" data-form-type="other">
@@ -219,7 +206,7 @@ function renderAgentEditor() {
       </div></details>` : ''}
       <label class="agent-coordinator-option"><input type="checkbox" ${data.extra?.is_coordinator ? 'checked' : ''} onchange="editingAgentData.extra.is_coordinator=this.checked"><span><strong>Team coordinator</strong><small>Manages the debate and execution loop.</small></span></label>
     </div>
-    <div class="agent-form-actions"><button class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button class="btn btn-primary" onclick="saveAgent('${agentId}', ${isGlobal})">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
+    <div class="agent-form-actions"><button class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button class="btn btn-primary" onclick="saveAgent('${agentId}')">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
   const form = panel.querySelector('.agent-editor-form');
   if (form) form.scrollTop = previousScrollTop;
 }
@@ -348,9 +335,9 @@ function setEditingExtra(key, value) {
   }
 }
 
-function startEditAgent(uid, isGlobal, idx) {
+function startEditAgent(uid, idx) {
   editingAgentId = uid;
-  const arr = isGlobal ? globalAgentConfigs : projectAgentConfigs;
+  const arr = projectAgentConfigs;
   editingAgentData = JSON.parse(JSON.stringify(arr[idx]));
   if (!editingAgentData.extra) editingAgentData.extra = {};
   renderAgentCards();
@@ -374,7 +361,7 @@ function cancelEditAgent() {
   renderAgentCards();
 }
 
-async function saveAgent(agentId, isGlobal) {
+async function saveAgent(agentId) {
   if (!editingAgentData.name || !editingAgentData.name.trim()) {
     notify('Agent name is required.', true);
     return;
@@ -400,7 +387,7 @@ async function saveAgent(agentId, isGlobal) {
 
   // If this agent is coordinator, clear coordinator status on others locally
   if (payload.extra?.is_coordinator) {
-    const arr = isGlobal ? globalAgentConfigs : projectAgentConfigs;
+    const arr = projectAgentConfigs;
     arr.forEach(a => {
       if (a.id !== agentId) {
         if (!a.extra) a.extra = {};
@@ -429,7 +416,7 @@ async function saveAgent(agentId, isGlobal) {
     notify(`Agent "${payload.name}" saved successfully.`);
     editingAgentId = null;
     editingAgentData = {};
-    const uid = (isGlobal ? 'global-' : 'project-') + (data.agent?.id || agentId);
+    const uid = data.agent?.id || agentId;
     delete agentHealthStatus[uid];
     await loadAgentConfig();
     fetchAgentStatus();
@@ -484,8 +471,8 @@ async function checkAgentHealth(cfg, uid) {
   }
 }
 
-window.refreshAgentHealth = async function(uid, isGlobal, idx) {
-  const configs = isGlobal ? globalAgentConfigs : projectAgentConfigs;
+window.refreshAgentHealth = async function(uid, idx) {
+  const configs = projectAgentConfigs;
   const cfg = configs[idx];
   if (!cfg) return;
   agentHealthStatus[uid] = {status: 'testing', error: '', checked_at: new Date().toISOString()};
@@ -496,9 +483,9 @@ window.refreshAgentHealth = async function(uid, isGlobal, idx) {
   notify(result.status === 'success' ? `${cfg.name} is healthy.` : friendlyProviderError(result.error), result.status !== 'success');
 };
 
-async function deleteAgent(agentId, isGlobal) {
+async function deleteAgent(agentId) {
   if (!confirm("Are you sure you want to delete this agent?")) return;
-  const url = isGlobal ? `/agents/global/${agentId}` : `/agents/${agentId}`;
+  const url = `/agents/${agentId}`;
   try {
     const response = await fetch(url, { method: 'DELETE' });
     if (!response.ok) {
@@ -515,33 +502,7 @@ async function deleteAgent(agentId, isGlobal) {
   }
 }
 
-function overrideForProject(agentId) {
-  const source = globalAgentConfigs.find(a => a.id === agentId);
-  if (!source) return;
-
-  const tempId = 'new-' + Date.now();
-  const clone = JSON.parse(JSON.stringify(source));
-  clone.id = tempId;
-  if (!clone.extra) clone.extra = {};
-
-  projectAgentConfigs.push(clone);
-  editingAgentId = `project-${tempId}`;
-  editingAgentData = clone;
-  renderAgentCards();
-  notify(`Customizing "${source.name}" locally for this project.`);
-}
-
-async function promoteToGlobal(agentId) {
-  const source = projectAgentConfigs.find(a => a.id === agentId);
-  if (!source) return;
-
-  const clone = JSON.parse(JSON.stringify(source));
-  clone.id = 'new-' + Date.now();
-
-  try {
-    const response = await fetch('/agents/global', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+,
       body: JSON.stringify(clone)
     });
     if (!response.ok) {
@@ -557,6 +518,10 @@ async function promoteToGlobal(agentId) {
 }
 
 function addNewAgentCard() {
+  if (!projectOpen) {
+    notify('Please open a project first.', true);
+    return;
+  }
   if (editingAgentId && editingAgentId.includes('new-')) {
     notify('Please save or cancel the current new agent form first.', true);
     return;
@@ -575,14 +540,8 @@ function addNewAgentCard() {
     extra: { is_coordinator: false }
   };
 
-  if (projectOpen) {
-    projectAgentConfigs.push(newAgent);
-    editingAgentId = `project-${tempId}`;
-  } else {
-    globalAgentConfigs.push(newAgent);
-    editingAgentId = `global-${tempId}`;
-  }
-
+  projectAgentConfigs.push(newAgent);
+  editingAgentId = tempId;
   editingAgentData = newAgent;
   renderAgentCards();
 }
@@ -677,8 +636,8 @@ async function deleteMCPServer(id) {
   }
 }
 
-async function togglePauseAgent(id, isGlobal, idx) {
-  const configs = isGlobal ? globalAgentConfigs : projectAgentConfigs;
+async function togglePauseAgent(id, idx) {
+  const configs = projectAgentConfigs;
   const cfg = configs[idx];
   if (!cfg || cfg.id !== id) return;
 
@@ -686,7 +645,7 @@ async function togglePauseAgent(id, isGlobal, idx) {
   cfg.is_paused = !originalPause;
 
   try {
-    const url = isGlobal ? `/agents/global/${id}` : `/agents/${id}`;
+    const url = `/agents/${id}`;
     const res = await fetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

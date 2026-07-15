@@ -127,10 +127,7 @@ class AppState:
 
     @property
     def merged_configs(self) -> list[dict]:
-        # If project has its own agents, use ONLY those. Otherwise, fallback to global.
-        if self.configs:
-            return list(self.configs)
-        return load_global_agents()
+        return list(self.configs)
 
 
 def close_sse_connections() -> int:
@@ -333,28 +330,7 @@ def session_heartbeat(session: Session = Depends(get_session)):
     return {"ok": True}
 
 
-GLOBAL_AGENTS_PATH = Path.home() / ".designflow" / "global_agents.json"
 
-def load_global_agents() -> list[dict]:
-    GLOBAL_AGENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not GLOBAL_AGENTS_PATH.exists():
-        return []
-    try:
-        configs = json.loads(GLOBAL_AGENTS_PATH.read_text())
-        for c in configs:
-            c["api_key"] = decrypt_key(c.get("api_key", ""))
-        return configs
-    except Exception:
-        return []
-
-def save_global_agents(configs: list[dict]):
-    GLOBAL_AGENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    configs_copy = []
-    for original in configs:
-        c = dict(original)
-        c["api_key"] = encrypt_key(c.get("api_key", ""))
-        configs_copy.append(c)
-    GLOBAL_AGENTS_PATH.write_text(json.dumps(configs_copy, indent=2))
 
 
 
@@ -591,9 +567,7 @@ def live_agents_all_sessions(agent_id: str):
 @app.get("/agents")
 def list_agents(state: AppState = Depends(get_state)):
     return {
-        "global": load_global_agents(),
-        "project": state.configs,
-        "merged": state.merged_configs,
+        "agents": state.configs,
         "kinds": list(AGENT_KINDS.keys())
     }
 
@@ -675,70 +649,7 @@ def delete_agent(agent_id: str, state: AppState = Depends(get_state)):
     return {"ok": True}
 
 
-@app.get("/agents/global")
-def list_global_agents(state: AppState = Depends(get_state)):
-    return {"agents": load_global_agents()}
 
-
-@app.post("/agents/global")
-def add_global_agent(body: AgentConfigIn, session: Session = Depends(get_session)):
-
-    if session.role != "admin":
-        raise HTTPException(403, "Only admins can modify global agents")
-
-    configs = load_global_agents()
-    config = body.model_dump()
-    config["id"] = str(uuid.uuid4())[:8]
-    configs.append(config)
-    save_global_agents(configs)
-    return {"ok": True, "agent": config}
-
-
-@app.delete("/agents/global/{agent_id}")
-def delete_global_agent(agent_id: str, session: Session = Depends(get_session)):
-
-    if session.role != "admin":
-        raise HTTPException(403, "Only admins can modify global agents")
-
-    configs = load_global_agents()
-    configs = [c for c in configs if c["id"] != agent_id]
-    save_global_agents(configs)
-    return {"ok": True}
-
-
-@app.put("/agents/global/{agent_id}")
-def update_global_agent(agent_id: str, body: AgentConfigIn, session: Session = Depends(get_session)):
-
-    if session.role != "admin":
-        raise HTTPException(403, "Only admins can modify global agents")
-
-    configs = load_global_agents()
-    for index, current in enumerate(configs):
-        if current["id"] == agent_id:
-            updated = body.model_dump()
-            updated["id"] = agent_id
-            
-            if not updated.get("api_key") or updated.get("api_key") == "****":
-                updated["api_key"] = current.get("api_key", "")
-
-            if updated.get("is_paused") and not current.get("is_paused"):
-                for s, active in live_agents_all_sessions(agent_id):
-                    _reassign_agent_if_paused(s, active, agent_id)
-            else:
-                for s, active in live_agents_all_sessions(agent_id):
-                    if updated["kind"] != current["kind"] or updated["name"] != current["name"]:
-                        raise HTTPException(
-                            400, "An active agent's name and kind cannot change; stop the run first"
-                        )
-                    try:
-                        active.reconfigure(to_agent_config(updated, None))
-                    except Exception as exc:
-                        raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
-
-            configs[index] = updated
-            save_global_agents(configs)
-            return {"ok": True, "agent": updated}
-    raise HTTPException(404, "Global agent not found")
 
 
 @app.post("/agents/test")

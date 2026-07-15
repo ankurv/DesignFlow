@@ -1129,19 +1129,16 @@ async function fetchAgentStatus() {
   (res.agents || []).forEach(agent => {
     const baseId = String(agent.base_id || agent.id || '');
     if (!baseId) return;
-    ['global-', 'project-'].forEach(prefix => {
-      const uid = prefix + baseId;
-      const current = agentCapacityStatus[uid] || {total_tokens:0, cost_usd:0, pricing_known:true};
-      current.total_tokens += Number(agent.total_tokens || 0);
-      current.cost_usd += Number(agent.cost_usd || 0);
-      current.pricing_known = current.pricing_known && agent.pricing_known !== false;
-      if (agent.retry_at) current.retry_at = agent.retry_at;
-      if (agent.status === 'error') {
-        current.runtime_status = 'error';
-        current.error = agent.error_message || 'Agent execution failed';
-      }
-      agentCapacityStatus[uid] = current;
-    });
+    const current = agentCapacityStatus[baseId] || {total_tokens:0, cost_usd:0, pricing_known:true};
+    current.total_tokens += Number(agent.total_tokens || 0);
+    current.cost_usd += Number(agent.cost_usd || 0);
+    current.pricing_known = current.pricing_known && agent.pricing_known !== false;
+    if (agent.retry_at) current.retry_at = agent.retry_at;
+    if (agent.status === 'error') {
+      current.runtime_status = 'error';
+      current.error = agent.error_message || 'Agent execution failed';
+    }
+    agentCapacityStatus[baseId] = current;
   });
   const failedTurn = res.failed_turn || {};
   const retryBtn = document.getElementById('retryBtn');
@@ -1152,18 +1149,15 @@ async function fetchAgentStatus() {
   }
   if (failedTurn.agent_id) {
     const failedBaseId = String(failedTurn.agent_id);
-    ['global-', 'project-'].forEach(prefix => {
-      const uid = prefix + failedBaseId;
-      const current = agentCapacityStatus[uid] || {};
-      current.runtime_status = 'error';
-      current.error_code = failedTurn.error_code || '';
-      current.error = failedTurn.public_error || failedTurn.error || 'Agent execution failed';
-      agentCapacityStatus[uid] = current;
-    });
+    const current = agentCapacityStatus[failedBaseId] || {};
+    current.runtime_status = 'error';
+    current.error_code = failedTurn.error_code || '';
+    current.error = failedTurn.public_error || failedTurn.error || 'Agent execution failed';
+    agentCapacityStatus[failedBaseId] = current;
   }
   if (!visibleAgents.length) {
     const configured = await fetch('/agents').then(r=>r.json());
-    visibleAgents = (configured.merged || []).map(a => ({...a, status:'idle', total_tokens:0,
+    visibleAgents = (configured.agents || []).map(a => ({...a, status:'idle', total_tokens:0,
       input_tokens:0, cached_input_tokens:0, output_tokens:0, cost_usd:0, pricing_known:false}));
   }
   const list = document.getElementById('agentList');

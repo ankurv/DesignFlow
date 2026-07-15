@@ -152,8 +152,8 @@ async function loadPresetTeam() {
     return;
   }
 
-  const isGlobal = !projectOpen;
-  const url = isGlobal ? '/agents/global' : '/agents';
+  
+  const url = '/agents';
 
   let agents = [];
   if (val === 'cloud') {
