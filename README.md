@@ -85,6 +85,12 @@ Exactly one checkpoint per run may be active, option answers are validated trans
 and stale submissions are rejected by checkpoint ID. `QUESTIONS.md` is now only a readable
 projection of the active database row and is never parsed by the server runtime.
 
+Each project also receives an editable `.designflow/product_capabilities.json` catalog.
+DesignFlow evaluates its commercial, operational, delivery, security, and experience
+capabilities during discovery and synthesis. Set an entry's `mode` to `include` or
+`exclude` to override automatic relevance judgment, add project-specific entries, or
+remove entries that should not be considered. Existing project catalogs are never overwritten.
+
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ### 2. Setup a Project Folder
