@@ -65,6 +65,81 @@ class AuditLogTests(unittest.TestCase):
 
 
 class StructuredCheckpointTests(unittest.TestCase):
+    def test_resuming_run_preserves_identity_start_time_and_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("run-stable", "Build it")
+            before = store.recent_runs()[0]
+            store.finish_run("run-stable", "stopped", [{
+                "total_tokens": 25, "cached_input_tokens": 5,
+                "cost_usd": 0.01, "pricing_known": True,
+            }])
+            store.resume_run("run-stable")
+            after = store.recent_runs()[0]
+            self.assertEqual(after["run_id"], "run-stable")
+            self.assertEqual(after["started_at"], before["started_at"])
+            self.assertEqual(after["total_tokens"], 25)
+            self.assertEqual(after["status"], "running")
+            self.assertIsNone(after["completed_at"])
+            store.close()
+
+    def test_resuming_logbook_appends_without_overwriting_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.begin_logbook_run("run-stable", "Original task")
+            transcript = workspace.root / "logbook" / "run-stable.md"
+            original = transcript.read_text()
+            workspace.finish_logbook_run("run-stable", "stopped")
+            workspace.resume_logbook_run("run-stable")
+            resumed = transcript.read_text()
+            self.assertIn("Original task", resumed)
+            self.assertIn("## Resumed", resumed)
+            self.assertTrue(resumed.startswith(original.split("## Transcript")[0]))
+
+    def test_server_orchestrator_persists_bundled_checkpoint_text_in_sqlite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Build a service")
+            store = ProjectStore(workspace.root)
+            store.start_run("run-structured", "Build a service")
+            orchestrator = Orchestrator([], workspace, store=store, run_id="run-structured")
+            bundled = """Decision 1: Which transport should clients use?
+- [A] HTTP
+- [B] Local socket
+
+Decision 2: How long should events be retained?
+- [A] 7 days
+- [B] 30 days
+"""
+            self.assertTrue(orchestrator._enqueue_checkpoint_text(bundled))
+            checkpoints = store.run_checkpoints("run-structured")
+            self.assertEqual([item["status"] for item in checkpoints], ["active", "pending"])
+            projection = workspace.read("questions")
+            self.assertIn("Which transport", projection)
+            self.assertNotIn("How long should", projection)
+            store.close()
+
+    def test_resume_cannot_bypass_active_structured_checkpoint(self):
+        from fastapi import HTTPException
+        from backend.server import AppState, resume_run
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = AppState()
+            state.store = ProjectStore(Path(directory))
+            state.run_id = "run-paused"
+            state.store.start_run(state.run_id, "Build a service")
+            state.store.enqueue_checkpoint(
+                state.run_id, "approval", "Which transport should clients use?", "Affects deployment.",
+                [{"label": "A", "summary": "HTTP"}, {"label": "B", "summary": "Local socket"}],
+            )
+            state.orchestrator = SimpleNamespace(failed_turn=None, resume=lambda: None, stop=lambda: None)
+            state.status = "paused"
+            state.awaiting_input = True
+            with self.assertRaises(HTTPException) as raised:
+                resume_run(None, state)
+            self.assertEqual(raised.exception.status_code, 409)
+            state.close()
+
     def test_bold_unbulleted_legacy_decisions_split_and_convert(self):
         legacy = """# Decision Checkpoint
 

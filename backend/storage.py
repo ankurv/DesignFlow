@@ -281,6 +281,22 @@ class ProjectStore:
                 (run_id, idea, "running", now),
             )
 
+    def resume_run(self, run_id: str):
+        """Reopen an existing logical run without replacing its identity or metrics."""
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "UPDATE runs SET status='running', completed_at=NULL WHERE run_id=?", (run_id,)
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Saved run no longer exists")
+
+    def latest_run_id(self) -> str:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        return str(row["run_id"]) if row else ""
+
     def finish_run(self, run_id: str, status: str, agents: list[dict]):
         now = datetime.now(timezone.utc).isoformat()
         tokens = sum(int(agent.get("total_tokens", 0) or 0) for agent in agents)

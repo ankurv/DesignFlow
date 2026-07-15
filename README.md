@@ -43,7 +43,7 @@ See [DesignFlow Architecture](docs/ARCHITECTURE.md) for the system, workflow, co
   - 🔵 **Testing**: Dynamic validation in progress.
   - 🟢 **Success**: Credentials and routing verified.
   - 🔴 **Failed**: Credentials rejected (hovering shows the detailed error message).
-- **Context-Aware Override Scoping**: Instantly configure global agent templates or project-specific overrides. Project overrides take precedence.
+- **Project-Scoped Agents**: Configure only the agents each project needs; credentials and routing stay local to that project.
 
 ### 4. Bounded Context & Token Optimization
 
@@ -81,7 +81,7 @@ optional `username`, `action`, `result`, and `limit` filters. Events are retaine
 Decision checkpoints are stored as structured rows in each project's SQLite database.
 Exactly one checkpoint per run may be active, option answers are validated transactionally,
 and stale submissions are rejected by checkpoint ID. `QUESTIONS.md` is now only a readable
-compatibility projection; legacy Markdown checkpoints are migrated into SQLite when opened.
+projection of the active database row and is never parsed by the server runtime.
 
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 

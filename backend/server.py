@@ -830,6 +830,10 @@ async def start_run(
         saved_goal
         and saved_goal == product_goal
     )
+    saved_run_id = str((saved_state or {}).get("run_id", "")).strip()
+    if resumes_saved_run and not saved_run_id and state.store:
+        persisted_checkpoint = state.store.latest_current_checkpoint()
+        saved_run_id = str(persisted_checkpoint.get("run_id", "")) or state.store.latest_run_id()
     task = body.idea.strip() if (brief or saved_goal) else ""
     if not product_goal:
         raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
@@ -868,14 +872,20 @@ async def start_run(
         raise HTTPException(400, f"Could not initialize agent team: {exc}") from exc
 
     state.event_log.clear()
-    state.run_id = str(uuid.uuid4())[:8]
+    state.run_id = saved_run_id if resumes_saved_run and saved_run_id else str(uuid.uuid4())[:8]
     state.current_idea = product_goal
     state.status = "running"
     state.last_transition = "run_started"
     state.awaiting_input = False
     if state.store:
-        state.store.start_run(state.run_id, task or product_goal)
-    state.workspace.begin_logbook_run(state.run_id, task or product_goal)
+        if resumes_saved_run and saved_run_id:
+            state.store.resume_run(state.run_id)
+        else:
+            state.store.start_run(state.run_id, task or product_goal)
+    if resumes_saved_run and saved_run_id:
+        state.workspace.resume_logbook_run(state.run_id)
+    else:
+        state.workspace.begin_logbook_run(state.run_id, task or product_goal)
     if state.debug_observer:
         state.debug_observer.start_run(state.run_id, task or product_goal, body.mode)
 
@@ -985,6 +995,8 @@ def resume_run(body: Optional[ResumeBody] = None, state: AppState = Depends(get_
         return {"ok": True, "status": state.status}
     if state.status != "paused" or not state.orchestrator:
         raise HTTPException(409, "There is no paused workflow to resume")
+    if state.awaiting_input and state.store and state.store.current_checkpoint(state.run_id):
+        raise HTTPException(409, "Answer the active decision checkpoint before resuming")
     if body and body.max_tokens is not None:
         state.orchestrator.max_tokens = body.max_tokens
     state.orchestrator.resume()

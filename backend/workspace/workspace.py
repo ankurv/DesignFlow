@@ -487,6 +487,28 @@ class Workspace:
             index.write_text(content)
         self._active_logbook_run_id = safe_id
 
+    def resume_logbook_run(self, run_id: str) -> None:
+        """Continue the same transcript instead of overwriting it on restart."""
+        safe_id = self._safe_run_id(run_id)
+        resumed = datetime.now(timezone.utc).isoformat()
+        transcript = self.root / "logbook" / f"{safe_id}.md"
+        if transcript.exists():
+            content = transcript.read_text(errors="replace")
+            content = re.sub(
+                r"^- \*\*Status:\*\* .*$", "- **Status:** running", content,
+                count=1, flags=re.MULTILINE,
+            )
+            transcript.write_text(content.rstrip() + f"\n\n## Resumed\n\n- **At:** {resumed}\n")
+        index = self._file("logbook")
+        if index.exists():
+            content = index.read_text(errors="replace")
+            content = re.sub(
+                rf"(<!-- run:{re.escape(safe_id)} -->[^\n]*status:) [A-Za-z_]+",
+                rf"\1 running", content, count=1,
+            )
+            index.write_text(content)
+        self._active_logbook_run_id = safe_id
+
     def reconcile_interrupted_logbook_runs(self) -> list[str]:
         """Mark transcripts left running by an ungraceful process exit."""
         index = self._file("logbook")

@@ -367,14 +367,17 @@ class Orchestrator:
 
     async def steer(self, message: str, username: str = "human"):
         """Inject a human message that all agents will see next turn."""
-        pending_question = self.ws.read("questions").strip()
+        # File-backed behavior remains only for embedded/legacy callers that
+        # have no ProjectStore. Server runtimes always use the structured
+        # checkpoint answer endpoint and never parse QUESTIONS.md here.
+        pending_question = self.ws.read("questions").strip() if not self.store else ""
         event_kind = "user_decision" if pending_question and pending_question != "(empty)" else "user_steering"
         self.ws.add_context_event(event_kind, message, self.phase.value, "user")
         if pending_question and pending_question != "(empty)":
             self._user_checkpoint_count += 1
             self._checkpoint_has_more = self.ws.record_checkpoint_answer(pending_question, message)
         await self._steer_queue.put(message)
-        if not pending_question or pending_question == "(empty)":
+        if not self.store and (not pending_question or pending_question == "(empty)"):
             self.ws.clear_questions()
         self.ws.reset_context_tracking()
         self._context_invocations.clear()
@@ -979,10 +982,8 @@ class Orchestrator:
         if self.require_approval and not question and self._discovery_questions_asked == 0:
             question = self._deterministic_discovery_question()
         if question and self.require_approval:
-            if self.store and self.run_id:
-                payload = self._pending_discovery_checkpoint or self._checkpoint_payload_from_text(question)
-                self.store.enqueue_checkpoint(self.run_id, **payload)
-            self.ws.write("questions", f"# Clarifying Question\n\n{question}")
+            payload = self._pending_discovery_checkpoint or self._checkpoint_payload_from_text(question)
+            self._enqueue_checkpoint_payloads([payload])
             self.post_approval_phase = OrchestratorPhase.DISCOVERY
             self.phase = OrchestratorPhase.APPROVAL
         else:
@@ -1028,6 +1029,50 @@ class Orchestrator:
             "rationale": rationale, "recommendation": recommendation,
             "blocking": True, "options": options,
         }
+
+    @staticmethod
+    def _checkpoint_projection(checkpoint: dict) -> str:
+        parts = [checkpoint.get("question", "")]
+        if checkpoint.get("rationale"):
+            parts.append(f"Why this matters: {checkpoint['rationale']}")
+        options = []
+        for option in checkpoint.get("options", []):
+            consequence = f" — {option['consequence']}" if option.get("consequence") else ""
+            recommended = " (Recommended)" if option.get("recommended") else ""
+            options.append(f"- [{option['label']}] {option['summary']}{consequence}{recommended}")
+        if options:
+            parts.append("\n".join(options))
+        if checkpoint.get("recommendation"):
+            parts.append(f"Recommendation: {checkpoint['recommendation']}")
+        return "\n\n".join(part for part in parts if part)
+
+    def _enqueue_checkpoint_payloads(self, payloads: list[dict]) -> bool:
+        """Persist checkpoints first; QUESTIONS.md is only the active-row projection."""
+        if not self.store or not self.run_id:
+            # Embedded callers without a ProjectStore retain the legacy file
+            # adapter; server-managed projects never take this branch.
+            projections = [self._checkpoint_projection(payload) for payload in payloads if payload.get("options")]
+            if not projections:
+                return False
+            self.ws.write("questions", "# Decision Checkpoint\n\n" + "\n\n".join(projections))
+            self.ws.normalize_checkpoint_queue()
+            return True
+        inserted = []
+        for payload in payloads:
+            if payload.get("question") and payload.get("options"):
+                inserted.append(self.store.enqueue_checkpoint(self.run_id, **payload))
+        if not inserted:
+            return False
+        current = self.store.current_checkpoint(self.run_id)
+        self.ws.write("questions", "# Decision Checkpoint\n\n" + self._checkpoint_projection(current))
+        return True
+
+    def _enqueue_checkpoint_text(self, text: str) -> bool:
+        payloads = [
+            self._checkpoint_payload_from_text(question)
+            for question in self.ws.split_checkpoint_questions(text)
+        ]
+        return self._enqueue_checkpoint_payloads(payloads)
 
     async def _run_drafting_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "drafting", "status": "running", "step": step}))
@@ -1118,8 +1163,7 @@ class Orchestrator:
         if self._is_none_text(decision):
             decision = ""
 
-        if decision:
-            self.ws.write("questions", f"# Decision Checkpoint\n\n{decision}")
+        if decision and self._enqueue_checkpoint_text(decision):
             self.post_approval_phase = OrchestratorPhase.COMPLETE
             self.phase = OrchestratorPhase.APPROVAL
         else:
@@ -1137,9 +1181,11 @@ class Orchestrator:
                     "- [B] Request another focused refinement pass\n\n"
                     "Recommendation: A — proceed while treating Known Unknowns and Discovery Checkpoints as required follow-up work."
                 )
-                self.ws.write("questions", f"# Decision Checkpoint\n\n{checkpoint}")
-                self.post_approval_phase = OrchestratorPhase.COMPLETE
-                self.phase = OrchestratorPhase.APPROVAL
+                if self._enqueue_checkpoint_text(checkpoint):
+                    self.post_approval_phase = OrchestratorPhase.COMPLETE
+                    self.phase = OrchestratorPhase.APPROVAL
+                else:
+                    self.phase = OrchestratorPhase.COMPLETE
             else:
                 self.phase = OrchestratorPhase.COMPLETE
         self.save_state()
@@ -1150,7 +1196,6 @@ class Orchestrator:
             self.post_approval_phase = None
             self.save_state()
             return
-        self.ws.normalize_checkpoint_queue()
         self._emit(Event(EventKind.PHASE, data={"phase": "approval", "status": "waiting_for_approval", "step": step}))
         self.pause()
         await self._wait_if_paused()
@@ -1163,7 +1208,7 @@ class Orchestrator:
             self.ws.append("logbook", new_steering, "User", "Provided approval/clarification")
             self._pending_user_input = "\n".join(filter(None, (self._pending_user_input, new_steering)))
         self._user_checkpoint_count += 1
-        if self._checkpoint_has_more or self.ws.read("questions").strip() not in {"", "(empty)"}:
+        if self._checkpoint_has_more:
             self._checkpoint_has_more = False
             self.phase = OrchestratorPhase.APPROVAL
         else:
@@ -1202,6 +1247,7 @@ class Orchestrator:
             next_action=self._context_next_action(),
         )
         state = {
+            "run_id": self.run_id,
             "idea": self.idea,
             "task": self.task,
             "mode": self.mode,
