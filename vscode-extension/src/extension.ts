@@ -92,6 +92,25 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
             overflow-x: auto;
             white-space: pre-wrap;
         }
+        #checkpoint {
+            display: none;
+            margin: 0 16px 12px;
+            padding: 14px;
+            border: 2px solid var(--vscode-focusBorder, #8b97ff);
+            border-radius: 8px;
+            background: var(--vscode-editorWidget-background, #111827);
+            color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+        }
+        #checkpoint.visible { display: block; }
+        #checkpointLabel { color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+        #checkpointQuestion { margin: 8px 0 14px; line-height: 1.6; font-size: 14px; font-weight: 650; }
+        #checkpointOptions { display: flex; flex-direction: column; gap: 7px; }
+        #checkpointOptions button { min-height: 42px; text-align: left; padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.45; }
+        #checkpointOptions button.recommended { background: var(--vscode-button-background, #4f5bd5); color: var(--vscode-button-foreground, #fff); border: 2px solid var(--vscode-focusBorder, #aeb7ff); }
+        #checkpointOptions button.secondary { background: var(--vscode-button-secondaryBackground, #1e293b); color: var(--vscode-button-secondaryForeground, #f1f5f9); border: 1px solid var(--vscode-contrastBorder, #64748b); }
+        #checkpointOptions button:focus-visible, #composer button:focus-visible, #composer input:focus-visible { outline: 3px solid var(--vscode-focusBorder, #c7d2fe); outline-offset: 2px; }
+        #checkpointOptions button:disabled { opacity: .72; cursor: wait; }
+        #checkpointHint { margin-top: 10px; color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 12px; line-height: 1.45; }
         #composer {
             display: flex;
             gap: 8px;
@@ -133,6 +152,12 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
     <div id="feed">
         <div class="feed-item" id="statusMsg">Connecting to DesignFlow backend...</div>
     </div>
+    <section id="checkpoint" aria-live="polite">
+        <div id="checkpointLabel">Decision checkpoint · one question at a time</div>
+        <div id="checkpointQuestion"></div>
+        <div id="checkpointOptions"></div>
+        <div id="checkpointHint">Choose an option, or select Other to type your own answer.</div>
+    </section>
     
     <div id="composer">
         <input type="text" id="steerInput" placeholder="Ask agents to design something..." disabled onkeydown="if(event.key === 'Enter') sendSteer()">
@@ -157,6 +182,84 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
         const feed = document.getElementById('feed');
         const steerInput = document.getElementById('steerInput');
         const sendBtn = document.getElementById('sendBtn');
+        const checkpoint = document.getElementById('checkpoint');
+        const checkpointQuestion = document.getElementById('checkpointQuestion');
+        const checkpointOptions = document.getElementById('checkpointOptions');
+        const checkpointHint = document.getElementById('checkpointHint');
+        let awaitingDecision = false;
+        let currentPhaseStatus = '';
+
+        function parseCheckpoint(content) {
+            const lines = String(content || '').split('\\n');
+            const options = [];
+            let firstOption = -1;
+            let recommendation = '';
+            for (let i = 0; i < lines.length; i++) {
+                const match = lines[i].match(/^\\s*-\\s*\\[([A-Z])\\]\\s+(.+)$/);
+                if (match && options.length < 5) {
+                    if (firstOption < 0) firstOption = i;
+                    options.push({ label: match[1], text: match[2].trim() });
+                } else if (firstOption >= 0 && options.length) {
+                    const rec = lines[i].match(/recommendation\\s*[:\\-]\\s*([A-Z])/i);
+                    if (rec) recommendation = rec[1].toUpperCase();
+                }
+            }
+            const question = lines.slice(0, firstOption < 0 ? lines.length : firstOption)
+                .filter(line => !/^#/.test(line.trim()))
+                .join(' ').trim();
+            return { question, options, recommendation };
+        }
+
+        async function showCheckpoint() {
+            const headers = {};
+            if (sessionId) headers['X-DesignFlow-Session'] = sessionId;
+            const res = await fetch(serverUrl + '/workspace/file/questions', { headers });
+            if (!res.ok) return;
+            // Prevent race conditions during event replay
+            if (currentPhaseStatus !== 'waiting_for_approval') return;
+            
+            const data = await res.json();
+            const parsed = parseCheckpoint(data.content);
+            if (!parsed.question || !parsed.options.length) return;
+            awaitingDecision = true;
+            checkpointQuestion.textContent = parsed.question;
+            checkpointOptions.innerHTML = '';
+            parsed.options.forEach(option => {
+                const button = document.createElement('button');
+                const recommended = parsed.recommendation === option.label;
+                button.className = recommended ? 'recommended' : 'secondary';
+                button.textContent = option.label + ' — ' + (recommended ? 'Recommended · ' : '') + option.text;
+                button.onclick = () => submitDecision(option.label + ' — ' + option.text);
+                checkpointOptions.appendChild(button);
+            });
+            const other = document.createElement('button');
+            other.className = 'secondary';
+            other.textContent = 'O — Other…';
+            other.onclick = () => {
+                steerInput.value = '';
+                steerInput.placeholder = 'Type your own answer…';
+                steerInput.focus();
+            };
+            checkpointOptions.appendChild(other);
+            checkpoint.classList.add('visible');
+            steerInput.placeholder = 'Or type your own answer…';
+            sendBtn.textContent = 'Submit decision';
+        }
+
+        async function submitDecision(answer) {
+            Array.from(checkpointOptions.querySelectorAll('button')).forEach(button => button.disabled = true);
+            checkpointHint.textContent = 'Submitting your decision…';
+            steerInput.value = answer;
+            await sendSteer();
+        }
+
+        function hideCheckpoint() {
+            awaitingDecision = false;
+            checkpoint.classList.remove('visible');
+            checkpointHint.textContent = 'Choose an option, or select Other to type your own answer.';
+            sendBtn.textContent = 'Send';
+            steerInput.placeholder = 'Ask agents to design something...';
+        }
 
         function appendMessage(agent, text, isError = false) {
             const div = document.createElement('div');
@@ -226,6 +329,13 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
                     } else if (ev.kind === 'steer') {
                         // User prompt
                         appendMessage('You', ev.data.message);
+                    } else if (ev.kind === 'phase') {
+                        currentPhaseStatus = ev.data.status;
+                        if (ev.data.status === 'waiting_for_approval') {
+                            showCheckpoint();
+                        } else if (awaitingDecision) {
+                            hideCheckpoint();
+                        }
                     }
                 };
                 
@@ -262,13 +372,17 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
                     res = await fetch(serverUrl + '/run/start', {
                         method: 'POST',
                         headers: headers,
-                        body: JSON.stringify({ idea: val })
+                    body: JSON.stringify({ idea: val, mode: 'auto' })
                     });
                 }
                 
                 if (!res.ok) {
                     const data = await res.json().catch(()=>({}));
                     appendMessage('System Error', data.detail || 'Failed to send prompt', true);
+                } else if (awaitingDecision) {
+                    const resume = await fetch(serverUrl + '/run/resume', { method: 'POST', headers: headers });
+                    if (!resume.ok) throw new Error('Decision was saved, but the workflow could not resume.');
+                    hideCheckpoint();
                 }
             } catch (err) {
                 appendMessage('System Error', err.message, true);
