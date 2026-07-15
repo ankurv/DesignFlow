@@ -147,12 +147,16 @@ async function loadPresetTeam() {
   const select = document.getElementById('presetSelect');
   const val = select.value;
   if (!val) return;
-  if (!confirm(`Are you sure you want to load the ${val === 'cloud' ? 'Standard Cloud' : val === 'local' ? 'Fully Local' : 'Dual Agent'} preset team? This will add preset agents to your active scope.`)) {
+  if (!projectOpen) {
+    notify('Open a project before loading a team preset.', true);
+    select.value = '';
+    return;
+  }
+  if (!confirm(`Load the ${val === 'cloud' ? 'Standard Cloud' : val === 'local' ? 'Fully Local' : 'Dual Agent'} preset team into this project?`)) {
     select.value = '';
     return;
   }
 
-  
   const url = '/agents';
 
   let agents = [];

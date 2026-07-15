@@ -27,7 +27,6 @@ from .agents.providers import AGENT_KINDS, create_agent, discover_models
 from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
-from .crypto import encrypt_key, decrypt_key
 from .errors import classify_provider_error
 
 logger = logging.getLogger(__name__)
@@ -574,6 +573,8 @@ def list_agents(state: AppState = Depends(get_state)):
 
 @app.post("/agents")
 def add_agent(body: AgentConfigIn, state: AppState = Depends(get_state)):
+    if not state.store:
+        raise HTTPException(400, "Open a project before adding an agent")
     if state.status in {"running", "paused", "needs_attention"}:
         raise HTTPException(400, "Stop the active run before adding an agent")
     config = body.model_dump()

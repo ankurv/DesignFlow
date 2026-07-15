@@ -853,11 +853,11 @@ async function startRun(prompt) {
   }
 
   const agents = await fetch('/agents').then(r=>r.json());
-  const mergedAgents = agents.merged || [];
-  if (!mergedAgents.length) { notify('Add at least one agent in the Agents tab', true); return; }
+  const configuredAgents = agents.agents || [];
+  if (!configuredAgents.length) { notify('Add at least one agent in the Agents tab', true); return; }
 
   // Assign colors
-  mergedAgents.forEach(a => {
+  configuredAgents.forEach(a => {
     if (!agentColors[a.name]) agentColors[a.name] = COLORS[colorIdx++ % COLORS.length];
   });
   // Auto routes basic questions to one model and substantive design work to the team.

@@ -18,36 +18,12 @@ function renderAgentCards() {
 
 
   let html = '';
-
-  // Render Global List (Only if no project is open)
   if (!projectOpen) {
-    html += `<h3 style="margin-top:10px;margin-bottom:12px;font-size:12.5px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid var(--border);padding-bottom:6px">Global Team Templates</h3>`;
-    if (!globalAgentConfigs.length) {
-      html += `<div style="color:var(--muted);font-size:12.5px;font-style:italic;margin-bottom:20px;padding:8px 0">No global agents configured.</div>`;
-    } else {
-      globalAgentConfigs.forEach((cfg, idx) => {
-        html += renderSingleCard(cfg, idx, true);
-      });
-    }
-  }
-
-  // Render Project List (Only if project is open)
-  if (projectOpen) {
-    html += `<h3 style="margin-top:10px;margin-bottom:12px;font-size:12.5px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid var(--border);padding-bottom:6px">Project Team</h3>`;
-    if (!projectAgentConfigs.length) {
-      html += `<div style="color:var(--muted);font-size:12.5px;font-style:italic;margin-bottom:10px;padding:8px 0">No project agents configured. Inheriting global team:</div>`;
-      if (!globalAgentConfigs.length) {
-        html += `<div style="color:var(--muted);font-size:12.5px;font-style:italic;margin-bottom:20px;padding:8px 0">No global agents configured either.</div>`;
-      } else {
-        globalAgentConfigs.forEach((cfg, idx) => {
-          html += renderSingleCard(cfg, idx, true); // true to render them as global/read-only or editable if we want
-        });
-      }
-    } else {
-      projectAgentConfigs.forEach((cfg, idx) => {
-        html += renderSingleCard(cfg, idx, false);
-      });
-    }
+    html = '<div class="panel-empty-message"><h3>Open a project to configure agents</h3><p>Each project has its own team, models, credentials, and specialties.</p><button class="btn btn-primary" onclick="openProject()">Open project</button></div>';
+  } else if (!projectAgentConfigs.length) {
+    html = '<div class="panel-empty-message"><h3>No agents configured</h3><p>Add the first agent for this project to start a run.</p><button class="btn btn-primary" onclick="addNewAgentCard()">＋ Add agent</button></div>';
+  } else {
+    html = projectAgentConfigs.map((cfg, idx) => renderSingleCard(cfg, idx)).join('');
   }
 
   container.innerHTML = html;
@@ -73,28 +49,13 @@ function renderSingleCard(cfg, idx) {
     const isPaused = cfg.is_paused;
     const pauseBadge = isPaused ? '<span class="agent-scope-badge danger" style="background:var(--red);color:white;border-color:var(--red);">Paused</span>' : '';
 
-    ')" style="padding:4px 10px;font-size:11px">Customize for Project</button>
-          <button class="btn btn-secondary" onclick="startEditAgent('${uid}', true, ${idx})" style="padding:4px 10px;font-size:11px">Edit Global</button>
-        `;
-      } else {
-        actionButtons += `
-          <button class="btn btn-secondary" onclick="startEditAgent('${uid}', true, ${idx})" style="padding:4px 10px;font-size:11px">Edit</button>
-        `;
-      }
-      actionButtons += `
-        <button class="btn ${isPaused ? 'btn-primary' : 'btn-secondary'}" onclick="togglePauseAgent('${cfg.id}', true, ${idx})" style="padding:4px 10px;font-size:11px">${isPaused ? 'Resume' : 'Pause'}</button>
-        <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}', true)" style="padding:4px 10px;font-size:11px">Delete</button>
-      `;
-    } else {
-      actionButtons += `
-        <button class="btn btn-secondary" onclick="startEditAgent('${uid}', false, ${idx})" style="padding:4px 10px;font-size:11px">Edit</button>
-        <button class="btn ${isPaused ? 'btn-primary' : 'btn-secondary'}" onclick="togglePauseAgent('${cfg.id}', false, ${idx})" style="padding:4px 10px;font-size:11px">${isPaused ? 'Resume' : 'Pause'}</button>
-        <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}', false)" style="padding:4px 10px;font-size:11px">Delete</button>
-      `;
-    }
+    actionButtons += `
+      <button class="btn btn-secondary" onclick="startEditAgent('${uid}', ${idx})" style="padding:4px 10px;font-size:11px">Edit</button>
+      <button class="btn ${isPaused ? 'btn-primary' : 'btn-secondary'}" onclick="togglePauseAgent('${cfg.id}', ${idx})" style="padding:4px 10px;font-size:11px">${isPaused ? 'Resume' : 'Pause'}</button>
+      <button class="btn btn-danger" onclick="deleteAgent('${cfg.id}')" style="padding:4px 10px;font-size:11px">Delete</button>
+    `;
 
-    
-    const badgeHTML = pauseBadge + badge;
+    const badgeHTML = pauseBadge;
 
     const statusInfo = agentHealthStatus[uid] || { status: isPaused ? 'paused' : 'testing', error: '' };
     if (!agentHealthStatus[uid] && !isPaused) {
@@ -344,17 +305,8 @@ function startEditAgent(uid, idx) {
 }
 
 function cancelEditAgent() {
-  if (editingAgentId) {
-    const parts = editingAgentId.split('-');
-    const scope = parts[0];
-    const idVal = parts.slice(1).join('-');
-    if (idVal.startsWith('new-')) {
-      if (scope === 'global') {
-        globalAgentConfigs = globalAgentConfigs.filter(a => a.id !== idVal);
-      } else {
-        projectAgentConfigs = projectAgentConfigs.filter(a => a.id !== idVal);
-      }
-    }
+  if (editingAgentId?.startsWith('new-')) {
+    projectAgentConfigs = projectAgentConfigs.filter(agent => agent.id !== editingAgentId);
   }
   editingAgentId = null;
   editingAgentData = {};
@@ -396,9 +348,7 @@ async function saveAgent(agentId) {
     });
   }
 
-  const url = isGlobal 
-    ? (isNew ? '/agents/global' : `/agents/global/${agentId}`)
-    : (isNew ? '/agents' : `/agents/${agentId}`);
+  const url = isNew ? '/agents' : `/agents/${agentId}`;
   const method = isNew ? 'POST' : 'PUT';
 
   try {
@@ -502,20 +452,7 @@ async function deleteAgent(agentId) {
   }
 }
 
-,
-      body: JSON.stringify(clone)
-    });
-    if (!response.ok) {
-      const data = await response.json();
-      notify(data.detail || 'Failed to copy to global team.', true);
-      return;
-    }
-    notify(`Copied "${source.name}" to the Global Team list.`);
-    await loadAgentConfig();
-  } catch (err) {
-    console.error("Failed to promote agent", err);
-  }
-}
+
 
 function addNewAgentCard() {
   if (!projectOpen) {

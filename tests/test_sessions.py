@@ -792,66 +792,17 @@ Decision 2: Choose retention.
             "We no longer want to support multi tenancy."
         ))
 
-    def test_global_agents_endpoints(self):
+    def test_agents_endpoint_requires_project_for_writes(self):
         from fastapi.testclient import TestClient
         import backend.server
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            orig_path = backend.server.GLOBAL_AGENTS_PATH
-            backend.server.GLOBAL_AGENTS_PATH = Path(tmpdir) / "global_agents.json"
-
-            try:
-                client = TestClient(backend.server.app)
-                res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-                self.assertEqual(res.status_code, 200)
-                res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-                self.assertEqual(res.status_code, 200)
-
-                res = client.get("/agents/global")
-                self.assertEqual(res.status_code, 200)
-                self.assertEqual(res.json(), {"agents": []})
-
-                agent_payload = {
-                    "name": "Global Bot",
-                    "kind": "openai",
-                    "role": "helper",
-                    "model": "gpt-4o",
-                    "api_key": "my-secret-key-xyz",
-                    "system_prompt": "hello",
-                    "max_history_turns": 20,
-                    "extra": {"is_coordinator": True}
-                }
-                res = client.post("/agents/global", json=agent_payload)
-                self.assertEqual(res.status_code, 200)
-                data = res.json()
-                self.assertTrue(data["ok"])
-                agent_id = data["agent"]["id"]
-                self.assertEqual(data["agent"]["name"], "Global Bot")
-                self.assertEqual(data["agent"]["extra"].get("is_coordinator"), True)
-
-                # Verify file on disk is encrypted
-                raw_file_content = backend.server.GLOBAL_AGENTS_PATH.read_text()
-                self.assertNotIn("my-secret-key-xyz", raw_file_content)
-                self.assertIn("gAAAA", raw_file_content) # Fernet signature
-
-                # Verify API returns decrypted value
-                res = client.get("/agents/global")
-                self.assertEqual(res.status_code, 200)
-                agents = res.json()["agents"]
-                self.assertEqual(len(agents), 1)
-                self.assertEqual(agents[0]["id"], agent_id)
-                self.assertEqual(agents[0]["api_key"], "my-secret-key-xyz")
-
-                res = client.delete(f"/agents/global/{agent_id}")
-                self.assertEqual(res.status_code, 200)
-                self.assertTrue(res.json()["ok"])
-
-                res = client.get("/agents/global")
-                self.assertEqual(res.status_code, 200)
-                self.assertEqual(res.json(), {"agents": []})
-
-            finally:
-                backend.server.GLOBAL_AGENTS_PATH = orig_path
+        client = TestClient(backend.server.app)
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        self.assertEqual(res.status_code, 200)
+        payload = {"name": "Project Bot", "kind": "openai", "role": "helper"}
+        res = client.post("/agents", json=payload)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("project", res.json()["detail"].lower())
 
     def test_project_store_encryption(self):
         from backend.storage import ProjectStore
@@ -994,48 +945,18 @@ Decision 2: Choose retention.
             Orchestrator._synthesis_score(cheap_manager),
         )
 
-    def test_global_plus_project_configs(self):
+    def test_project_agent_create_update_and_list(self):
         from fastapi.testclient import TestClient
         import backend.server
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_path = backend.server.GLOBAL_AGENTS_PATH
-            backend.server.GLOBAL_AGENTS_PATH = Path(tmpdir) / "global_agents.json"
-
-            try:
-                client = TestClient(backend.server.app)
-                res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-                self.assertEqual(res.status_code, 200)
-
-                # 1. Create a Global Agent
-                global_agent = {
+            client = TestClient(backend.server.app)
+            res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+            self.assertEqual(res.status_code, 200)
+            res = client.post("/project/open", json={"path": tmpdir})
+            self.assertEqual(res.status_code, 200)
+            local_agent = {
                     "name": "Standard Dev",
-                    "kind": "openai",
-                    "role": "developer",
-                    "model": "gpt-4o",
-                    "api_key": "global-secret",
-                    "system_prompt": "global system",
-                    "max_history_turns": 20,
-                    "extra": {}
-                }
-                res = client.post("/agents/global", json=global_agent)
-                self.assertEqual(res.status_code, 200)
-                global_id = res.json()["agent"]["id"]
-
-                # 2. Update Global Agent via PUT
-                global_agent["system_prompt"] = "updated global system"
-                res = client.put(f"/agents/global/{global_id}", json=global_agent)
-                self.assertEqual(res.status_code, 200)
-                self.assertEqual(res.json()["agent"]["system_prompt"], "updated global system")
-
-                # 3. Simulate opening a project and adding a project-level agent via POST /agents
-                payload = {"path": tmpdir}
-                res = client.post("/project/open", json=payload)
-                self.assertEqual(res.status_code, 200)
-                session_cookie = client.cookies.get("session_id")
-                client.cookies.set("session_id", session_cookie)
-                local_agent = {
-                    "name": "Standard Dev",  # Name collision!
                     "kind": "openai",
                     "role": "developer",
                     "model": "gpt-4o-mini",
@@ -1044,30 +965,22 @@ Decision 2: Choose retention.
                     "max_history_turns": 20,
                     "extra": {}
                 }
-                res = client.post("/agents", json=local_agent)
-                self.assertEqual(res.status_code, 200)
-                local_id = res.json()["agent"]["id"]
+            res = client.post("/agents", json=local_agent)
+            self.assertEqual(res.status_code, 200)
+            local_id = res.json()["agent"]["id"]
 
-                # Test PUT /agents/{agent_id}
-                local_agent["system_prompt"] = "updated local system"
-                res = client.put(f"/agents/{local_id}", json=local_agent)
-                self.assertEqual(res.status_code, 200)
-                self.assertEqual(res.json()["agent"]["system_prompt"], "updated local system")
+            local_agent["system_prompt"] = "updated local system"
+            res = client.put(f"/agents/{local_id}", json=local_agent)
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["agent"]["system_prompt"], "updated local system")
 
-                # 4. GET /agents should list both and resolve merged correctly
-                res = client.get("/agents")
-                self.assertEqual(res.status_code, 200)
-                data = res.json()
-                self.assertEqual(len(data["global"]), 1)
-                self.assertEqual(len(data["project"]), 1)
-                self.assertEqual(len(data["merged"]), 1)
-
-                # Local override should win
-                self.assertEqual(data["merged"][0]["model"], "gpt-4o-mini")
-                self.assertEqual(data["merged"][0]["system_prompt"], "updated local system")
-
-            finally:
-                backend.server.GLOBAL_AGENTS_PATH = orig_path
+            res = client.get("/agents")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(len(data["agents"]), 1)
+            self.assertEqual(data["agents"][0]["model"], "gpt-4o-mini")
+            self.assertNotIn("global", data)
+            self.assertNotIn("merged", data)
 
     def test_agent_probe_endpoint(self):
         from fastapi.testclient import TestClient
@@ -1902,7 +1815,7 @@ Decision 2: Choose retention.
             self.assertEqual(res.status_code, 200)
             self.assertIn("Use FastAPI", res.json()["content"])
 
-    def test_global_agent_inheritance_exclusive(self):
+    def test_empty_project_does_not_inherit_agents(self):
         from fastapi.testclient import TestClient
         import backend.server
         client = TestClient(backend.server.app)
@@ -1911,62 +1824,27 @@ Decision 2: Choose retention.
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
-            global_agents_file = td_path / "global_agents.json"
-            global_agents = [{
-                "id": "global_1",
-                "name": "GlobalAgent",
+            res = client.post("/project/open", json={"path": str(td_path / "project")})
+            self.assertEqual(res.status_code, 200)
+            res = client.get("/agents")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["agents"], [])
+
+            local_agent = {
+                "name": "LocalAgent",
                 "kind": "openai",
-                "role": "GlobalRole",
+                "role": "LocalRole",
                 "model": "gpt-4",
-                "api_key": backend.crypto.encrypt_key("global_secret"),
-                "base_url": "",
-                "cli_command": "",
-                "system_prompt": "global system",
+                "api_key": "local_secret",
+                "system_prompt": "local system",
                 "max_history_turns": 20,
                 "extra": {}
-            }]
-            global_agents_file.write_text(json.dumps(global_agents))
-
-            orig_path = backend.server.GLOBAL_AGENTS_PATH
-            backend.server.GLOBAL_AGENTS_PATH = global_agents_file
-
-            try:
-                # Open empty project
-                res = client.post("/project/open", json={"path": str(td_path / "project")})
-                self.assertEqual(res.status_code, 200)
-
-                # Fetch agents. Should inherit global agent
-                res = client.get("/agents")
-                self.assertEqual(res.status_code, 200)
-                data = res.json()
-                self.assertEqual(len(data["project"]), 0)
-                self.assertEqual(len(data["merged"]), 1)
-                self.assertEqual(data["merged"][0]["name"], "GlobalAgent")
-
-                # Create a local agent
-                local_agent = {
-                    "name": "LocalAgent",
-                    "kind": "openai",
-                    "role": "LocalRole",
-                    "model": "gpt-4",
-                    "api_key": "local_secret",
-                    "system_prompt": "local system",
-                    "max_history_turns": 20,
-                    "extra": {}
-                }
-                res = client.post("/agents", json=local_agent)
-                self.assertEqual(res.status_code, 200)
-
-                # Fetch agents again. Local agents exist, so global agent should NOT be inherited!
-                res = client.get("/agents")
-                self.assertEqual(res.status_code, 200)
-                data = res.json()
-                self.assertEqual(len(data["project"]), 1)
-                self.assertEqual(len(data["merged"]), 1)
-                self.assertEqual(data["merged"][0]["name"], "LocalAgent")
-
-            finally:
-                backend.server.GLOBAL_AGENTS_PATH = orig_path
+            }
+            res = client.post("/agents", json=local_agent)
+            self.assertEqual(res.status_code, 200)
+            res = client.get("/agents")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual([agent["name"] for agent in res.json()["agents"]], ["LocalAgent"])
 
 
 class FrontendPrivacyTests(unittest.TestCase):
