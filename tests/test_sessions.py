@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from backend.agents.base import AgentBase, AgentConfig, Message, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
-from backend.orchestrator import EventKind, Orchestrator, OrchestratorPhase
+from backend.orchestrator import COORDINATOR_SYSTEM, EventKind, Orchestrator, OrchestratorPhase
 from backend.errors import classify_provider_error
 from backend.debug_observer import DebugObserver
 from backend.audit import AuditLog
@@ -425,6 +425,11 @@ flowchart TD
 ## Notes
 Initial architecture.
 
+## Product Operations & Evolution
+- Version releases and database migrations with rollback-safe compatibility checks.
+- Audit important administrative actions with privacy-aware retention.
+- Use structured application logs, monitoring, and failure diagnostics proportionate to this small deployment.
+
 ## Known Unknowns & Validation Plan
 - Validate the storage choice with representative data before implementation.
 """
@@ -435,6 +440,97 @@ VALID_DECISIONS = """## Accepted Decisions
 ## Trade-offs
 - Revisit the database choice after measuring representative concurrency and query patterns.
 """
+
+
+class CrossCuttingDesignTests(unittest.TestCase):
+    def test_planning_validation_requires_product_operations_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("decisions", VALID_DECISIONS)
+            workspace.write("design", VALID_DESIGN)
+            self.assertFalse(any("Product Operations" in error for error in workspace.validate_planning_artifacts()))
+
+            incomplete = re.sub(
+                r"\n## Product Operations & Evolution[\s\S]*?(?=\n## Known Unknowns)", "", VALID_DESIGN,
+            )
+            workspace.write("design", incomplete)
+            self.assertTrue(any("Product Operations" in error for error in workspace.validate_planning_artifacts()))
+
+    def test_coordinator_requires_user_aligned_cross_cutting_design(self):
+        self.assertIn("Product Operations & Evolution Must Be Evaluated, Not Forced", COORDINATOR_SYSTEM)
+        self.assertIn("user's hosting model", COORDINATOR_SYSTEM)
+        self.assertIn("never force enterprise infrastructure onto a small MVP", COORDINATOR_SYSTEM)
+        self.assertIn("may explicitly exclude any or all", COORDINATOR_SYSTEM)
+
+    def test_explicit_user_opt_out_satisfies_evaluation_without_forcing_implementation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("decisions", VALID_DECISIONS)
+            design = re.sub(
+                r"## Product Operations & Evolution[\s\S]*?(?=\n## Known Unknowns)",
+                """## Product Operations & Evolution
+- **Versioning and upgrades — not required by user:** This is a disposable isolated prototype.
+- **Audit trail — not required by user:** No users, administrators, or retained data exist.
+- **Operational logging and monitoring — not required by user:** Console diagnostics are sufficient for this experiment.
+""",
+                VALID_DESIGN,
+            )
+            workspace.write("design", design)
+            errors = workspace.validate_planning_artifacts()
+            self.assertFalse(any("Product Operations" in error for error in errors), errors)
+
+
+class ProductCapabilityCatalogTests(unittest.TestCase):
+    def test_new_project_gets_editable_commercial_capability_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            path = workspace.root / "product_capabilities.json"
+            catalog = json.loads(path.read_text())
+            items = catalog["capabilities"]
+            ids = {item["id"] for item in items}
+            self.assertGreaterEqual(len(items), 50)
+            self.assertEqual(len(ids), len(items))
+            self.assertTrue({"auto"} >= {item["mode"] for item in items})
+            for required in (
+                "commerce.payments", "delivery.compose", "ops.audit", "ops.logging",
+                "identity.authentication", "data.backup_restore", "security.privacy",
+                "api.webhooks", "ai.model_ops",
+            ):
+                self.assertIn(required, ids)
+
+    def test_catalog_is_seeded_once_and_manual_changes_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            path = workspace.root / "product_capabilities.json"
+            catalog = json.loads(path.read_text())
+            catalog["capabilities"] = [{
+                "id": "custom.robot", "category": "Custom", "name": "Robot controller",
+                "description": "Control a local robot.", "signals": ["robot"],
+                "mode": "include", "notes": "Required by the user",
+            }]
+            path.write_text(json.dumps(catalog, indent=2))
+            workspace.ensure()
+            preserved = json.loads(path.read_text())
+            self.assertEqual([item["id"] for item in preserved["capabilities"]], ["custom.robot"])
+
+    def test_catalog_modes_and_user_notes_reach_ai_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            path = workspace.root / "product_capabilities.json"
+            catalog = json.loads(path.read_text())
+            catalog["capabilities"][0]["mode"] = "exclude"
+            catalog["capabilities"][0]["notes"] = "Disposable experiment"
+            path.write_text(json.dumps(catalog))
+            context = workspace.scoped_context(["capabilities"])
+            self.assertIn("PRODUCT_CAPABILITIES.json", context)
+            self.assertIn("mode=exclude", context)
+            self.assertIn("user notes: Disposable experiment", context)
+            self.assertIn("commerce.payments", context)
 
 
 class SessionTests(unittest.TestCase):

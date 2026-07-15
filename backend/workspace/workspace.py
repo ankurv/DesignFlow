@@ -98,6 +98,10 @@ class Workspace:
         ignore = self.root / ".gitignore"
         if not ignore.exists():
             ignore.write_text("*\n!.gitignore\n")
+        capabilities = self.root / "product_capabilities.json"
+        if not capabilities.exists():
+            bundled = Path(__file__).resolve().parents[1] / "product_capabilities.json"
+            capabilities.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
 
     def brief(self) -> str:
         if self.brief_path.exists():
@@ -141,13 +145,37 @@ class Workspace:
         names = {
             "design": "DESIGN.md", "plan": "PLAN.md",
             "decisions": "DECISIONS.md",
-            "questions": "QUESTIONS.md", "logbook": "LOGBOOK.md", "context": "CONTEXT.md"
+            "questions": "QUESTIONS.md", "logbook": "LOGBOOK.md", "context": "CONTEXT.md",
+            "capabilities": "product_capabilities.json",
         }
         return self.root / names[key]
 
     def read(self, key: str) -> str:
         path = self._file(key)
         return path.read_text(errors="replace") if path.exists() else "(empty)"
+
+    def capabilities_context(self, compact: bool = False) -> str:
+        """Render the editable JSON catalog compactly so every entry reaches the model."""
+        raw = self.read("capabilities")
+        try:
+            catalog = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return "Catalog error: product_capabilities.json is not valid JSON."
+        lines = [str(catalog.get("instructions", "")).strip()]
+        for item in catalog.get("capabilities", []):
+            signals = ", ".join(str(value) for value in item.get("signals", []))
+            notes = str(item.get("notes", "")).strip()
+            line = (
+                f"- {item.get('id', '')} [mode={item.get('mode', 'auto')}] {item.get('name', '')}"
+            )
+            if not compact and item.get("description"):
+                line += f": {item.get('description')}"
+            if not compact and signals:
+                line += f" | signals: {signals}"
+            if notes:
+                line += f" | user notes: {notes}"
+            lines.append(line)
+        return "\n".join(filter(None, lines))
 
     def write(self, key: str, content: str):
         self.ensure()
@@ -630,7 +658,11 @@ class Workspace:
     def scoped_context(self, roles: Optional[list[str]] = None) -> str:
         requested = roles or self.FILES
         keys = [key for key in requested if key not in {"src", "src_index"}]
-        out = [f"=== {key.upper()}.md ===\n{self.read(key)}" for key in keys]
+        out = [
+            f"=== {'PRODUCT_CAPABILITIES.json' if key == 'capabilities' else key.upper() + '.md'} ===\n"
+            f"{self.capabilities_context(compact=True) if key == 'capabilities' else self.read(key)}"
+            for key in keys
+        ]
 
         if roles is None or "src_index" in requested:
             out.append(f"=== PROJECT_FILES.md ===\n{self.src_index()}")
@@ -705,7 +737,9 @@ class Workspace:
             content = self.read(key)
             checksum = self._md5(content)
             if seen.get(key) != checksum:
-                out.append(f"=== {key.upper()}.md (updated) ===\n{content}")
+                label = "PRODUCT_CAPABILITIES.json" if key == "capabilities" else f"{key.upper()}.md"
+                rendered = self.capabilities_context(compact=True) if key == "capabilities" else content
+                out.append(f"=== {label} (updated) ===\n{rendered}")
                 seen[key] = checksum
 
         if roles is None or "src_index" in requested:
@@ -755,6 +789,24 @@ class Workspace:
 
         if not self._has_markdown_h2(design, "Known Unknowns & Validation Plan"):
             errors.append("DESIGN.md must include a 'Known Unknowns & Validation Plan' section.")
+
+        operations = re.search(
+            r"^##\s*Product Operations & Evolution\s*$([\s\S]*?)(?=^##\s|\Z)",
+            design, re.MULTILINE | re.IGNORECASE,
+        )
+        if not operations:
+            errors.append("DESIGN.md must include a 'Product Operations & Evolution' section.")
+        else:
+            coverage = operations.group(1).lower()
+            missing = []
+            if not re.search(r"\b(?:version|upgrade|migration|rollback|compatib)", coverage):
+                missing.append("versioning and safe upgrades")
+            if not re.search(r"\b(?:audit|accountability|action history)", coverage):
+                missing.append("auditability and retention/privacy")
+            if not re.search(r"\b(?:log|observab|monitor|diagnostic)", coverage):
+                missing.append("operational logging and diagnostics")
+            if missing:
+                errors.append("DESIGN.md Product Operations & Evolution must cover: " + ", ".join(missing) + ".")
 
         decision_body = re.sub(r"^#.*$", "", decisions, flags=re.MULTILINE).strip()
         if decisions == "(empty)" or len(decision_body) < 40:

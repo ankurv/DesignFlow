@@ -214,10 +214,11 @@ Guidelines for Design & Architectural Gathering:
 10. **Known Unknowns Are Required**: DESIGN.md MUST contain a dedicated "## Known Unknowns & Validation Plan" section. Record uncertain assumptions, provider/framework details that need verification, product questions deferred to implementation, and the cheapest way to validate each one. Do not hide uncertainty behind confident prose.
 11. **Implementation Discovery**: PLAN.md MUST contain a "## Discovery Checkpoints" section. Identify the points where the coding agent should pause, test a spike, inspect real data, or ask the user before locking in an implementation choice.
 12. **Concrete Technical Depth**: Where relevant, cover API payload/response/error shapes, schema constraints and indexes, state transitions, failure and recovery behavior, security boundaries, observability, external-provider degradation, and test strategy. Mark non-applicable areas instead of inventing unnecessary architecture.
-13. **Canonical Artifacts**: Treat DESIGN.md, PLAN.md, and DECISIONS.md in the DesignFlow workspace as the only canonical planning artifacts. Consolidate contradictions instead of producing parallel or duplicate design documents.
-14. **Specialist Coverage Before Completion**: For a multi-agent team, consult at least three distinct, relevant specialists before completion (or every available specialist when fewer than three exist). Give each specialist a bounded technical question; do not summon agents merely to repeat the whole plan.
-15. **Debate Before Agreement**: Material choices such as platform, data ownership, authentication, privacy, deployment, external providers, consistency, cost, or irreversible scope must include at least two credible options, explicit trade-offs, and a recommendation. Ask a second specialist to challenge high-impact recommendations when an appropriate specialist is available.
-16. **User Confirmation On Complex Choices**: Before marking a multi-agent planning run complete, pause at least once for the user to confirm a material product or architecture choice. Ask exactly ONE decision per checkpoint with 2-3 concise options, recommend one, explain consequences, and allow a custom answer. Never bundle several unrelated questions into one pause; ask the next material question only after the user answers the current one. Do not ask the user to approve trivial implementation details.
+13. **Product Operations & Evolution Must Be Evaluated, Not Forced**: Every DESIGN.md must evaluate (a) release/API/data versioning and safe upgrades or rollback, (b) which user or administrative actions require an audit trail and the privacy/retention boundary, and (c) application logging, monitoring, and failure diagnostics. Tailor these mechanisms to the user's hosting model, compliance needs, privacy expectations, scale, and operating capacity. Prefer a simple safe default when requirements are absent. The user may explicitly exclude any or all of these concerns for an isolated experiment or disposable idea; that directive is authoritative. Record each exclusion and its rationale in Product Operations & Evolution, mark it not required for the current scope, and do not add related implementation tasks. Ask only when a choice materially changes cost, privacy, operability, or product behavior; never force enterprise infrastructure onto a small MVP.
+14. **Canonical Artifacts**: Treat DESIGN.md, PLAN.md, and DECISIONS.md in the DesignFlow workspace as the only canonical planning artifacts. Consolidate contradictions instead of producing parallel or duplicate design documents.
+15. **Specialist Coverage Before Completion**: For a multi-agent team, consult at least three distinct, relevant specialists before completion (or every available specialist when fewer than three exist). Give each specialist a bounded technical question; do not summon agents merely to repeat the whole plan.
+16. **Debate Before Agreement**: Material choices such as platform, data ownership, authentication, privacy, deployment, external providers, consistency, cost, or irreversible scope must include at least two credible options, explicit trade-offs, and a recommendation. Ask a second specialist to challenge high-impact recommendations when an appropriate specialist is available.
+17. **User Confirmation On Complex Choices**: Before marking a multi-agent planning run complete, pause at least once for the user to confirm a material product or architecture choice. Ask exactly ONE decision per checkpoint with 2-3 concise options, recommend one, explain consequences, and allow a custom answer. Never bundle several unrelated questions into one pause; ask the next material question only after the user answers the current one. Do not ask the user to approve trivial implementation details.
 
 Structured workflow description:
 1. **Dynamic Summoning (Strict Needs-Based)**: You have access to a large pool of specialized experts. You MUST selectively summon them by setting ## NEXT_AGENT ONLY if their specific expertise is strictly required by the project scope. Do not summon UI agents for backend projects, or database architects for static sites, etc. If multiple competing roles are available for a required domain, force them to rigorously debate trade-offs.
@@ -279,7 +280,7 @@ Respond in this EXACT format:
 <CONTINUE, COMPLETE, or PAUSE_FOR_INPUT>
 (Note: When a coherent planning baseline is ready, set VERDICT to COMPLETE. This means ready to begin iterative implementation, not final specification certainty. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
 
-SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification."""
+SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Evaluate proportionate release/version upgrade safety, auditability, and operational logging based on the user's stated deployment, privacy, retention, and operating preferences. Explicit user exclusions are authoritative: document the excluded concern and rationale, and omit its implementation work. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification."""
 
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
@@ -835,7 +836,7 @@ class Orchestrator:
             return ""
         if self._adaptive_discovery_unavailable:
             return self._deterministic_discovery_question()
-        context = self.ws.scoped_context(["design", "plan", "decisions", "questions", "src_index"])
+        context = self.ws.scoped_context(["design", "plan", "decisions", "questions", "capabilities", "src_index"])
         if len(context) > 14000:
             context = context[:14000].rstrip() + "\n[context truncated]"
         prompt = (
@@ -843,6 +844,12 @@ class Orchestrator:
             "identify the single highest-impact unresolved question whose answer could materially change the architecture. "
             "Do not ask anything answerable from the repository or already confirmed. Do not ask implementation trivia, "
             "bundle topics, or assume deployment, scale, security, data, integration, operational, budget, or team constraints. "
+            "Treat release/version upgrades, auditability, and operational logging as required design coverage. Infer a "
+            "proportionate default from project evidence, but ask when the implementation materially depends on the user's "
+            "hosting, privacy, retention, compliance, or operational preferences. "
+            "Do not ask about or reintroduce a concern the user explicitly excluded; record that override instead. "
+            "Use PRODUCT_CAPABILITIES.json as an editable evaluation catalog: mode=include is mandatory, mode=exclude "
+            "is an authoritative opt-out, and mode=auto requires relevance judgment. Missing entries are out of scope. "
             "Write for a project owner who has not seen the agents' discussion. The question must be a complete, "
             "plain-language sentence ending in '?', name the component or user interaction being decided, and never "
             "use an internal heading such as 'Decision 12: Delivery Contract'. The reason must explain the current "
@@ -1083,6 +1090,7 @@ class Orchestrator:
         prompt = (
             f"Product Idea: {self.idea}\n{steer_block}\n"
             f"Current user request: {self.task or 'Develop the product goal into a credible planning baseline.'}\n"
+            f"Editable capability evaluation catalog:\n{self.ws.capabilities_context(compact=True)}\n\n"
             f"Draft the initial architecture and implementation plan.\n"
             f"Output `## DESIGN_UPDATE`, `## PLAN_UPDATE`, and `## DECISIONS_UPDATE` with complete initial drafts.\n"
             f"DECISIONS_UPDATE must record every material choice already adopted in the design, including status "
@@ -1146,6 +1154,8 @@ class Orchestrator:
 
         prompt = (
             f"Use the complete unresolved peer critiques in CONTEXT.md and update DESIGN.md and PLAN.md.\n{steer_block}\n"
+            f"Reconcile the design against this editable capability evaluation catalog:\n"
+            f"{self.ws.capabilities_context(compact=True)}\n\n"
             f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
             f"Treat explicit current user directives as authoritative. Mark conflicting older decisions Superseded "
             f"instead of silently deleting history, and remove their consequences from DESIGN.md and PLAN.md.\n"
