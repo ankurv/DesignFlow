@@ -193,9 +193,54 @@ Decision 2: How long should events be retained?
             self.assertEqual(answered["status"], "answered")
             self.assertEqual(next_checkpoint["id"], second["id"])
             self.assertEqual(next_checkpoint["status"], "active")
+            decision = store.decision(first["decision_id"])
+            self.assertEqual(decision["status"], "confirmed")
+            self.assertEqual(decision["chosen_option"], "A — Cloud")
+            self.assertEqual(decision["answered_by"], "admin")
+            self.assertEqual([event["action"] for event in decision["history"]], ["proposed", "confirmed"])
             with self.assertRaises(ValueError):
                 store.answer_checkpoint("run-1", first["id"], "admin", custom_answer="stale")
             store.close()
+
+    def test_custom_checkpoint_answer_is_recorded_in_decision_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            checkpoint = store.enqueue_checkpoint(
+                "run-custom", "approval", "Where should data be stored?", "Controls operations.",
+                [{"label": "A", "summary": "SQLite"}, {"label": "B", "summary": "Postgres"}],
+            )
+            store.answer_checkpoint(
+                "run-custom", checkpoint["id"], "alice", custom_answer="Use DuckDB for the first release",
+            )
+            decision = store.decision(checkpoint["decision_id"])
+            self.assertEqual(decision["chosen_option"], "Use DuckDB for the first release")
+            self.assertEqual(decision["status"], "confirmed")
+            self.assertEqual(len(store.run_decisions("run-custom")), 1)
+            store.close()
+
+    def test_existing_checkpoint_is_backfilled_into_decision_ledger_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory)
+            store = ProjectStore(metadata)
+            checkpoint = store.enqueue_checkpoint(
+                "run-legacy", "approval", "Choose the delivery contract?", "Controls durability.",
+                [{"label": "A", "summary": "Fast"}, {"label": "B", "summary": "Durable"}],
+            )
+            store.answer_checkpoint("run-legacy", checkpoint["id"], "alice", custom_answer="Fast for MVP")
+            decision_id = checkpoint["decision_id"]
+            with store._db:
+                store._db.execute("UPDATE decision_checkpoints SET decision_id=NULL WHERE id=?", (checkpoint["id"],))
+                store._db.execute("DELETE FROM decision_history WHERE decision_id=?", (decision_id,))
+                store._db.execute("DELETE FROM decisions WHERE id=?", (decision_id,))
+            store.close()
+
+            reopened = ProjectStore(metadata)
+            restored_checkpoint = reopened.checkpoint(checkpoint["id"])
+            restored = reopened.decision(restored_checkpoint["decision_id"])
+            self.assertEqual(restored["status"], "confirmed")
+            self.assertEqual(restored["chosen_option"], "Fast for MVP")
+            self.assertEqual(len(restored["history"]), 2)
+            reopened.close()
 
     def test_checkpoint_survives_store_restart(self):
         with tempfile.TemporaryDirectory() as directory:

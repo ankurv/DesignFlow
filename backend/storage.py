@@ -95,6 +95,7 @@ class ProjectStore:
                     answered_by TEXT NOT NULL DEFAULT '',
                     selected_option_id TEXT,
                     custom_answer TEXT NOT NULL DEFAULT '',
+                    decision_id TEXT,
                     UNIQUE(run_id, sequence)
                 );
                 CREATE TABLE IF NOT EXISTS decision_options (
@@ -112,6 +113,29 @@ class ProjectStore:
                     ON decision_checkpoints(run_id) WHERE status = 'active';
                 CREATE INDEX IF NOT EXISTS idx_checkpoint_run_status
                     ON decision_checkpoints(run_id, status, sequence);
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    chosen_option TEXT NOT NULL DEFAULT '',
+                    rationale TEXT NOT NULL DEFAULT '',
+                    answered_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id, created_at);
+                CREATE TABLE IF NOT EXISTS decision_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    decision_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    value TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_decision_history
+                    ON decision_history(decision_id, id);
                 """
             )
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
@@ -119,13 +143,77 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0")
             if "pricing_complete" not in columns:
                 self._db.execute("ALTER TABLE runs ADD COLUMN pricing_complete INTEGER NOT NULL DEFAULT 1")
+            checkpoint_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(decision_checkpoints)").fetchall()
+            }
+            if "decision_id" not in checkpoint_columns:
+                self._db.execute("ALTER TABLE decision_checkpoints ADD COLUMN decision_id TEXT")
+            self._backfill_checkpoint_decisions()
+
+    def _backfill_checkpoint_decisions(self):
+        """Give pre-ledger checkpoints durable decisions without parsing Markdown artifacts."""
+        rows = self._db.execute(
+            "SELECT * FROM decision_checkpoints WHERE decision_id IS NULL OR decision_id='' ORDER BY created_at"
+        ).fetchall()
+        for checkpoint in rows:
+            decision_id = str(uuid.uuid4())
+            chosen = str(checkpoint["custom_answer"] or "").strip()
+            if not chosen and checkpoint["selected_option_id"]:
+                option = self._db.execute(
+                    "SELECT label, summary FROM decision_options WHERE id=?",
+                    (checkpoint["selected_option_id"],),
+                ).fetchone()
+                if option:
+                    chosen = f"{option['label']} — {option['summary']}"
+            confirmed = checkpoint["status"] == "answered"
+            status = "confirmed" if confirmed else "proposed"
+            updated_at = checkpoint["answered_at"] or checkpoint["created_at"]
+            actor = checkpoint["answered_by"] or "DesignFlow"
+            self._db.execute(
+                """INSERT INTO decisions(
+                   id, run_id, title, status, chosen_option, rationale, answered_by, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (decision_id, checkpoint["run_id"], checkpoint["question"], status, chosen,
+                 checkpoint["rationale"], checkpoint["answered_by"], checkpoint["created_at"], updated_at),
+            )
+            self._db.execute(
+                """INSERT INTO decision_history(decision_id, timestamp, actor, action, value)
+                   VALUES (?, ?, 'DesignFlow', 'proposed', ?)""",
+                (decision_id, checkpoint["created_at"], checkpoint["question"]),
+            )
+            if confirmed:
+                self._db.execute(
+                    """INSERT INTO decision_history(decision_id, timestamp, actor, action, value)
+                       VALUES (?, ?, ?, 'confirmed', ?)""",
+                    (decision_id, updated_at, actor, chosen),
+                )
+            self._db.execute(
+                "UPDATE decision_checkpoints SET decision_id=? WHERE id=?",
+                (decision_id, checkpoint["id"]),
+            )
 
     def enqueue_checkpoint(self, run_id: str, phase: str, question: str, rationale: str,
                            options: list[dict], recommendation: str = "", dimension: str = "",
-                           blocking: bool = True) -> dict:
+                           blocking: bool = True, decision_id: str = "") -> dict:
         checkpoint_id = str(uuid.uuid4())
+        decision_id = decision_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._db:
+            existing_decision = self._db.execute(
+                "SELECT 1 FROM decisions WHERE id=?", (decision_id,)
+            ).fetchone()
+            if not existing_decision:
+                self._db.execute(
+                    """INSERT INTO decisions(
+                       id, run_id, title, status, rationale, created_at, updated_at)
+                       VALUES (?, ?, ?, 'proposed', ?, ?, ?)""",
+                    (decision_id, run_id, question, rationale, now, now),
+                )
+                self._db.execute(
+                    """INSERT INTO decision_history(decision_id, timestamp, actor, action, value)
+                       VALUES (?, ?, 'DesignFlow', 'proposed', ?)""",
+                    (decision_id, now, question),
+                )
             row = self._db.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM decision_checkpoints WHERE run_id=?",
                 (run_id,),
@@ -138,9 +226,9 @@ class ProjectStore:
             self._db.execute(
                 """INSERT INTO decision_checkpoints(
                    id, run_id, sequence, phase, dimension, question, rationale, recommendation,
-                   blocking, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   blocking, status, created_at, decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (checkpoint_id, run_id, sequence, phase, dimension, question, rationale,
-                 recommendation, int(blocking), status, now),
+                 recommendation, int(blocking), status, now, decision_id),
             )
             for index, option in enumerate(options):
                 option_id = str(option.get("id") or uuid.uuid4())
@@ -229,16 +317,48 @@ class ProjectStore:
                    selected_option_id=?, custom_answer=? WHERE id=?""",
                 (now, answered_by, option_id or None, custom_answer.strip(), checkpoint_id),
             )
+            chosen = custom_answer.strip() if custom_answer.strip() else f"{option['label']} — {option['summary']}"
+            if checkpoint["decision_id"]:
+                self._db.execute(
+                    """UPDATE decisions SET status='confirmed', chosen_option=?, answered_by=?, updated_at=?
+                       WHERE id=?""",
+                    (chosen, answered_by, now, checkpoint["decision_id"]),
+                )
+                self._db.execute(
+                    """INSERT INTO decision_history(decision_id, timestamp, actor, action, value)
+                       VALUES (?, ?, ?, 'confirmed', ?)""",
+                    (checkpoint["decision_id"], now, answered_by, chosen),
+                )
             next_row = self._db.execute(
                 "SELECT id FROM decision_checkpoints WHERE run_id=? AND status='pending' ORDER BY sequence LIMIT 1",
                 (run_id,),
             ).fetchone()
             if next_row:
                 self._db.execute("UPDATE decision_checkpoints SET status='active' WHERE id=?", (next_row["id"],))
-        answer = custom_answer.strip() if custom_answer.strip() else f"{option['label']} — {option['summary']}"
+        answer = chosen
         answered = self.checkpoint(checkpoint_id)
         answered["answer"] = answer
         return answered, self.checkpoint(next_row["id"]) if next_row else {}
+
+    def decision(self, decision_id: str) -> dict:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM decisions WHERE id=?", (decision_id,)).fetchone()
+            if not row:
+                return {}
+            history = self._db.execute(
+                "SELECT timestamp, actor, action, value FROM decision_history WHERE decision_id=? ORDER BY id",
+                (decision_id,),
+            ).fetchall()
+        result = dict(row)
+        result["history"] = [dict(item) for item in history]
+        return result
+
+    def run_decisions(self, run_id: str) -> list[dict]:
+        with self._lock:
+            ids = [row["id"] for row in self._db.execute(
+                "SELECT id FROM decisions WHERE run_id=? ORDER BY created_at", (run_id,)
+            ).fetchall()]
+        return [self.decision(decision_id) for decision_id in ids]
 
     def run_checkpoints(self, run_id: str) -> list[dict]:
         with self._lock:
