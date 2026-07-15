@@ -1854,6 +1854,13 @@ class FrontendPrivacyTests(unittest.TestCase):
         self.assertNotIn("/home/", html)
         self.assertIn('placeholder="/path/to/your/project"', html)
 
+    def test_visual_design_action_submits_hidden_prompt_directly(self):
+        workspace_js = (Path(__file__).parents[1] / "frontend" / "js" / "workspace.js").read_text()
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("await startRun(prompt, {hiddenPrompt: true})", workspace_js)
+        self.assertNotIn("steerInput.value = \"Update DESIGN.md directly", workspace_js)
+        self.assertIn("!options.hiddenPrompt", api_js)
+
     def test_project_binding_reconnects_event_stream(self):
         state_js = (Path(__file__).parents[1] / "frontend" / "js" / "state.js").read_text()
         api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
@@ -1900,6 +1907,13 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertTrue(Orchestrator._should_run_team_workflow(
             "Debate the options, then update DESIGN.md", "auto"
         ))
+
+    def test_latest_task_controls_routing_for_existing_project(self):
+        saved_goal = "Design a distributed logging platform"
+        task = "Update DESIGN.md to add a Mermaid architecture diagram"
+        request = Orchestrator._effective_request(saved_goal, task)
+        self.assertEqual(request, task)
+        self.assertFalse(Orchestrator._should_run_team_workflow(request, "auto"))
 
     def test_provider_errors_prefer_structured_status_codes(self):
         forbidden = RuntimeError("a very long provider response")

@@ -840,7 +840,7 @@ function escAttr(s) {
 
 // ── Run controls ─────────────────────────────────────────────────────────────
 // ── Run controls ─────────────────────────────────────────────────────────────
-async function startRun(prompt) {
+async function startRun(prompt, options = {}) {
   let idea = prompt;
   if (idea === undefined) {
     idea = document.getElementById('steerInput').value.trim();
@@ -849,12 +849,12 @@ async function startRun(prompt) {
 
   if (!projectOpen) {
     const opened = await openProject();
-    if (!opened) return;
+    if (!opened) return false;
   }
 
   const agents = await fetch('/agents').then(r=>r.json());
   const configuredAgents = agents.agents || [];
-  if (!configuredAgents.length) { notify('Add at least one agent in the Agents tab', true); return; }
+  if (!configuredAgents.length) { notify('Add at least one agent in the Agents tab', true); return false; }
 
   // Assign colors
   configuredAgents.forEach(a => {
@@ -886,11 +886,13 @@ async function startRun(prompt) {
   const data = await res.json();
   if (res.ok && data.ok) {
     document.getElementById('runId').textContent = data.run_id;
-    if (idea) appendUserPrompt(idea);
+    if (idea && !options.hiddenPrompt) appendUserPrompt(idea);
     if (data.resumed) notify('Continuing the previous design run.');
     updateStatus('running');
+    return true;
   } else {
     notify(data.detail || 'Failed to start', true);
+    return false;
   }
 }
 

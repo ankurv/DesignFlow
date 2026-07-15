@@ -440,6 +440,11 @@ class Orchestrator:
         return bool(artifact and edit)
 
     @staticmethod
+    def _effective_request(idea: str, task: str) -> str:
+        """Use the latest instruction for routing while retaining the saved product goal."""
+        return (task or "").strip() or (idea or "").strip()
+
+    @staticmethod
     def _should_run_team_workflow(text: str, mode: str) -> bool:
         """Route ordinary questions to one agent and substantive planning work to the team."""
         normalized = " ".join((text or "").lower().split())
@@ -468,6 +473,7 @@ class Orchestrator:
         self._running = True
         self.idea = idea
         self.task = task.strip()
+        request_text = self._effective_request(idea, self.task)
         if self.task and self._is_explicit_user_correction(self.task):
             self.ws.add_context_event("user_decision", self.task, "discovery", "user")
             self.ws.record_user_directive(self.task)
@@ -478,7 +484,7 @@ class Orchestrator:
                 # older or legacy run in the same project.
                 self.ws.clear_questions()
 
-        local_response = self._local_command_response(idea)
+        local_response = self._local_command_response(request_text)
         if local_response:
             self._emit(Event(EventKind.TURN_END, agent="DesignFlow", data={
                 "turn_id": "local-command", "attempt": 1, "step": 0,
@@ -517,17 +523,17 @@ class Orchestrator:
 
         # Parse explicit @mentions first
         target_agent = None
-        prompt_text = idea
-        match = re.search(r'@(\w+)', idea)
+        prompt_text = request_text
+        match = re.search(r'@(\w+)', request_text)
         if match:
             mention = match.group(1).lower()
             names = {agent.name.lower(): agent for agent in self.agents}
             matched_name = mention if mention in names else next(iter(get_close_matches(mention, names, n=1, cutoff=0.82)), "")
             if matched_name:
                 target_agent = names[matched_name]
-                prompt_text = re.sub(rf'@{match.group(1)}\s*', '', idea, flags=re.IGNORECASE).strip()
+                prompt_text = re.sub(rf'@{match.group(1)}\s*', '', request_text, flags=re.IGNORECASE).strip()
 
-        team_workflow = self._should_run_team_workflow(idea, self.mode)
+        team_workflow = self._should_run_team_workflow(request_text, self.mode)
 
         # Basic questions use one capable agent. Team planning is reserved for
         # explicit design/build/debate work, and @mentions always stay direct.
@@ -549,12 +555,19 @@ class Orchestrator:
                 context = context[:12000].rstrip() + "\n\n[context truncated]"
             artifact_update = self._is_targeted_artifact_update(prompt_text)
             if artifact_update:
+                mermaid_update = bool(re.search(r"\bmermaid\b", prompt_text, re.IGNORECASE))
+                output_instruction = (
+                    "Return only a `## DESIGN_APPEND` section containing a titled architecture-diagram section "
+                    "and the fenced Mermaid block. Do not repeat the existing document."
+                    if mermaid_update else
+                    "Return the complete updated document under the matching `## DESIGN_UPDATE`, "
+                    "`## PLAN_UPDATE`, or `## DECISIONS_UPDATE` header."
+                )
                 prompt = (
                     f"Targeted Artifact Edit.\n"
                     f"User Prompt: {prompt_text}\n"
                     f"Execute this bounded edit yourself. Do not debate, consult peers, ask for approval, or broaden the scope.\n"
-                    f"Preserve all correct existing content and return the complete updated document under the matching "
-                    f"`## DESIGN_UPDATE`, `## PLAN_UPDATE`, or `## DECISIONS_UPDATE` header.\n"
+                    f"Preserve all correct existing content. {output_instruction}\n"
                     f"For Mermaid, use valid fenced `mermaid` blocks with short, readable labels.\n"
                     f"Relevant workspace context:\n{context}\n"
                 )

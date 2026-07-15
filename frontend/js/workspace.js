@@ -490,13 +490,33 @@ function renderHistory(runs) {
   </div>`).join('');
 }
 
-window.generateVisualDesign = function() {
-  const steerInput = document.getElementById('steerInput');
-  if (steerInput) {
-    steerInput.value = "Update DESIGN.md directly: preserve its existing content and add a clear Mermaid architecture diagram based on the current project. This is a bounded document edit; use one agent and do not start a debate.";
-    if (window.sendSteer) window.sendSteer();
+window.generateVisualDesign = async function() {
+  const prompt = "Update DESIGN.md directly: preserve its existing content and add a clear Mermaid architecture diagram based on the current project. This is a bounded document edit; use one agent and do not start a debate.";
+  const button = document.querySelector('[onclick="generateVisualDesign()"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Starting…';
+  }
+  try {
+    const statusRes = await fetch('/run/status');
+    if (!statusRes.ok) throw new Error('Could not read run status');
+    const status = (await statusRes.json()).status || 'idle';
+    if (!['idle', 'done', 'error'].includes(status)) {
+      notify('Finish or stop the active run before generating a visual design.', true);
+      return;
+    }
+    const started = await startRun(prompt, {hiddenPrompt: true});
+    if (!started) return;
+    notify('Visual design generation started. DESIGN.md will update automatically.');
     const architectTab = Array.from(document.querySelectorAll('.tab')).find(t => t.textContent.includes('Architect Dashboard'));
     if (architectTab) architectTab.click();
     if (typeof loadWsFile === 'function') loadWsFile('cockpit');
+  } catch (err) {
+    notify(err.message || 'Could not start visual design generation.', true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Generate Visual Design';
+    }
   }
 };
