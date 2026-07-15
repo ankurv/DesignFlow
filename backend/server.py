@@ -852,7 +852,6 @@ async def start_run(
 
     agents = []
     try:
-        from .orchestrator import SPECIALIZED_PERSONAS
         base_configs = [c for c in state.merged_configs if not c.get("is_paused")]
         if not base_configs:
             raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
