@@ -72,8 +72,7 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
             padding: 12px;
             border-radius: 6px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            font-size: 13px;
-            line-height: 1.4;
+            line-height: 1.5;
         }
         .feed-item.error {
             border-color: var(--vscode-errorForeground);
@@ -102,15 +101,15 @@ function getWebviewContent(serverUrl: string, username?: string, password?: stri
             color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
         }
         #checkpoint.visible { display: block; }
-        #checkpointLabel { color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-        #checkpointQuestion { margin: 8px 0 14px; line-height: 1.6; font-size: 14px; font-weight: 650; }
+        #checkpointLabel { color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 0.9em; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+        #checkpointQuestion { margin: 8px 0 14px; line-height: 1.6; font-size: 1.1em; font-weight: 650; }
         #checkpointOptions { display: flex; flex-direction: column; gap: 7px; }
-        #checkpointOptions button { min-height: 42px; text-align: left; padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1.45; }
+        #checkpointOptions button { min-height: 42px; text-align: left; padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 1em; line-height: 1.5; }
         #checkpointOptions button.recommended { background: var(--vscode-button-background, #4f5bd5); color: var(--vscode-button-foreground, #fff); border: 2px solid var(--vscode-focusBorder, #aeb7ff); }
         #checkpointOptions button.secondary { background: var(--vscode-button-secondaryBackground, #1e293b); color: var(--vscode-button-secondaryForeground, #f1f5f9); border: 1px solid var(--vscode-contrastBorder, #64748b); }
         #checkpointOptions button:focus-visible, #composer button:focus-visible, #composer input:focus-visible { outline: 3px solid var(--vscode-focusBorder, #c7d2fe); outline-offset: 2px; }
         #checkpointOptions button:disabled { opacity: .72; cursor: wait; }
-        #checkpointHint { margin-top: 10px; color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 12px; line-height: 1.45; }
+        #checkpointHint { margin-top: 10px; color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground)); font-size: 0.9em; line-height: 1.5; }
         #composer {
             display: flex;
             gap: 8px;
