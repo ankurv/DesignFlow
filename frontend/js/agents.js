@@ -21,7 +21,7 @@ function renderAgentCards() {
   if (!projectOpen) {
     html = '<div class="panel-empty-message"><h3>Open a project to configure agents</h3><p>Each project has its own team, models, credentials, and specialties.</p><button class="btn btn-primary" onclick="openProject()">Open project</button></div>';
   } else if (!projectAgentConfigs.length) {
-    html = '<div class="panel-empty-message"><h3>No agents configured</h3><p>Add the first agent for this project to start a run.</p><button class="btn btn-primary" onclick="addNewAgentCard()">＋ Add agent</button></div>';
+    html = '<div class="panel-empty-message"><h3>No agents configured</h3><p>Use “Add Agent” above to create the first agent for this project.</p></div>';
   } else {
     html = projectAgentConfigs.map((cfg, idx) => renderSingleCard(cfg, idx)).join('');
   }
