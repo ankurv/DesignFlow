@@ -146,55 +146,6 @@ ROLE_NEEDS = {
     "marketing_beta": ["design", "plan", "decisions"],
 }
 
-SPECIALIST_SECTION_KEYWORDS = {
-    "product_manager": (["summary", "goal", "requirements", "scope", "unknown"], ["requirements", "goals", "phases", "discovery"]),
-    "product_strategist": (["summary", "goal", "requirements", "scope"], ["requirements", "goals", "discovery"]),
-    "architect_alpha": (["architecture", "challenge", "reliability", "scalability"], ["requirements", "phases", "testing"]),
-    "architect_beta": (["architecture", "challenge", "reliability", "scalability"], ["requirements", "phases", "testing"]),
-    "api_designer": (["protocol", "api", "format", "configuration"], ["api", "sdk", "protocol", "phases"]),
-    "data_architect": (["schema", "data", "storage", "configuration"], ["database", "storage", "migration", "phases"]),
-    "security_auditor": (["security", "access", "tenant", "reliability"], ["security", "testing", "phases"]),
-    "red_team": (["security", "failure", "reliability", "challenge"], ["testing", "security", "phases"]),
-    "cloud_architect": (["architecture", "scalability", "reliability", "deployment"], ["deployment", "operations", "testing", "phases"]),
-    "devops_engineer": (["architecture", "reliability", "deployment", "observability"], ["deployment", "operations", "testing", "phases"]),
-    "ui_designer": (["interface", "interaction", "workflow", "feedback"], ["frontend", "interface", "phases"]),
-    "ux_simplifier": (["interface", "interaction", "workflow", "user"], ["frontend", "workflow", "phases"]),
-    "workflow_designer": (["workflow", "interaction", "failure", "recovery"], ["workflow", "testing", "phases"]),
-    "researcher": (["unknown", "validation", "architecture", "challenge"], ["discovery", "testing", "phases"]),
-}
-
-SPECIALIST_SIGNALS = {
-    "architecture": ({"architecture", "system", "service", "scale", "performance", "distributed", "concurrency", "recovery", "failure"}, {"architect_alpha", "architect_beta"}),
-    "product": ({"product", "user", "mvp", "feature", "market", "workflow"}, {"product_manager", "product_strategist"}),
-    "ux": ({"ui", "ux", "screen", "dashboard", "website", "mobile", "frontend", "visual"}, {"ux_simplifier", "ui_designer", "workflow_designer"}),
-    "data": ({"data", "database", "schema", "query", "storage", "migration", "analytics"}, {"data_architect"}),
-    "security": ({"auth", "security", "privacy", "payment", "secret", "permission", "tenant", "compliance"}, {"security_auditor", "red_team"}),
-    "api": ({"api", "rest", "graphql", "webhook", "integration", "client", "backend", "framework", "language", "sdk"}, {"api_designer"}),
-    "operations": ({"cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability", "logging", "log", "runtime"}, {"cloud_architect", "devops_engineer"}),
-    "research": ({"existing", "repository", "codebase", "legacy", "migration", "refactor"}, {"researcher"}),
-    "growth": ({"sales", "marketing", "pricing", "growth", "acquisition", "seo"}, {"sales_alpha", "sales_beta", "marketing_alpha", "marketing_beta"}),
-}
-
-SPECIALIZED_PERSONAS = {
-    "architect_alpha": "You are ARCHITECT ALPHA. Propose robust, scalable system designs. Vigorously debate competing designs and highlight their flaws while defending your own.",
-    "architect_beta": "You are ARCHITECT BETA. Propose alternative, highly-optimized system designs. Challenge Architect Alpha's assumptions and fight for a superior approach.",
-    "researcher": "You are the RESEARCHER. Read existing workspace files to ground the debate in reality. Fact-check the Architects to ensure they do not hallucinate APIs or codebase assumptions.",
-    "red_team": "You are the RED TEAM agent. Your sole purpose is to hunt for edge-cases, race conditions, security vulnerabilities, and ways to break the proposed design.",
-    "ux_simplifier": "You are the UX SIMPLIFIER. You fiercely advocate for the external user. You must aggressively fight to simplify complex UI flows, remove unnecessary features, and ensure the system is intuitive.",
-    "ui_designer": "You are the UI DESIGNER. Focus on visual hierarchy, layout clarity, affordances, states, feedback, density, and readability. Challenge designs that are cluttered, ambiguous, or visually noisy, and propose cleaner interaction surfaces.",
-    "workflow_designer": "You are the WORKFLOW DESIGNER. Focus on end-to-end user journeys, re-entry after failure, iteration loops, approvals, empty states, and operational usability. You must make sure the product feels smooth over repeated real-world use, not just the happy path.",
-    "cloud_architect": "You are the CLOUD ARCHITECT. Focus strictly on scalability, database indexing, infrastructure bottlenecks, and deployment environments.",
-    "product_manager": "You are the PRODUCT MANAGER. You enforce MVP constraints and fight YAGNI (You Aren't Gonna Need It). You ensure the team is only building what is strictly necessary to validate the idea and get to market fast.",
-    "product_strategist": "You are the PRODUCT STRATEGIST. Focus on product framing, user value, positioning, differentiation, and what the product promise should actually be. Challenge solutions that are technically elegant but weak in user value or narrative clarity.",
-    "data_architect": "You are the DATA ARCHITECT. Focus purely on schema design, normalization vs. denormalization, migration strategies, and complex query performance.",
-    "security_auditor": "You are the SECURITY AUDITOR. Enforce secure defaults (OWASP Top 10). Ensure that proper authentication, data encryption at rest, and input sanitization are baked into the architecture.",
-    "devops_engineer": "You are the DEVOPS ENGINEER. Plan the deployment pipelines, containerization (Docker/Kubernetes), and observability. Ensure logging, monitoring, and rollback strategies are part of the plan.",
-    "api_designer": "You are the API DESIGNER. Focus purely on the communication layer. Ensure REST/GraphQL endpoints are intuitive, stateless, properly versioned, and standardized.",
-    "sales_alpha": "You are SALES STRATEGIST ALPHA. Pitch aggressive, high-growth go-to-market strategies and pricing models. Vigorously debate competing sales strategies and defend your approach.",
-    "sales_beta": "You are SALES STRATEGIST BETA. Pitch alternative, calculated go-to-market strategies (e.g. product-led growth vs sales-led). Challenge Sales Alpha's assumptions and fight for a superior approach.",
-    "marketing_alpha": "You are MARKETING EXPERT ALPHA. Focus on brand positioning, viral loops, and aggressive user acquisition. Vigorously debate competing marketing plans and defend your approach.",
-    "marketing_beta": "You are MARKETING EXPERT BETA. Focus on long-term SEO, content marketing, and community building. Challenge Marketing Alpha's short-term strategies and fight for a superior approach."
-}
 
 COORDINATOR_SYSTEM = """You are the COORDINATOR of an autonomous software architecture and design team.
 Your SOLE goal is to coordinate the team's agents to turn a high-level goal into a credible planning baseline: a comprehensive DESIGN.md, a crisp PLAN.md implementation checklist, and a DECISIONS.md ledger of the key choices. The artifacts should give a coding agent a strong starting point, but MUST NOT claim to be a final or perfectly complete implementation specification.
@@ -303,6 +254,7 @@ class Orchestrator:
     ):
         self.agents = agents
         self.ws = workspace
+        self._personas, self._signals, self._keywords = self.ws.parse_personas()
         self.store = store
         self.run_id = run_id
         self._cb = event_cb
@@ -645,7 +597,7 @@ class Orchestrator:
             identity = f"{agent.name} {agent.config.role}".lower()
             score = sum(3 for word in words if len(word) > 3 and word in identity)
             domains = []
-            for domain, (signals, names) in SPECIALIST_SIGNALS.items():
+            for domain, (signals, names) in self._signals.items():
                 if agent.name.lower() in names and words.intersection(signals):
                     score += 6 + len(words.intersection(signals))
                     if task_words.intersection(signals):
@@ -1776,7 +1728,7 @@ class Orchestrator:
         return context
 
     def _agent_context(self, agent: AgentBase) -> str:
-        design_keywords, plan_keywords = SPECIALIST_SECTION_KEYWORDS.get(
+        design_keywords, plan_keywords = self._keywords.get(
             agent.name.lower(),
             (["architecture", "requirements", "reliability"], ["requirements", "phases", "testing"]),
         )

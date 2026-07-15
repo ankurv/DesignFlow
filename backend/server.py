@@ -858,7 +858,8 @@ async def start_run(
             raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
 
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
-        for i, (role, system_prompt) in enumerate(SPECIALIZED_PERSONAS.items()):
+        personas, _, _ = state.workspace.parse_personas()
+        for i, (role, system_prompt) in enumerate(personas.items()):
             base_config = base_configs[i % len(base_configs)]
             expert = base_config.copy()
             expert["model"] = model_for_virtual_agent(base_config, i, len(base_configs))
@@ -872,7 +873,7 @@ async def start_run(
 
         # 2. Also include any custom agents the user explicitly defined
         for config in state.merged_configs:
-            if config["name"] not in SPECIALIZED_PERSONAS and not config.get("is_paused"):
+            if config["name"] not in personas and not config.get("is_paused"):
                 agents.append(create_agent(to_agent_config(config, state)))
     except Exception as exc:
         raise HTTPException(400, f"Could not initialize agent team: {exc}") from exc

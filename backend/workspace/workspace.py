@@ -102,6 +102,11 @@ class Workspace:
         if not capabilities.exists():
             bundled = Path(__file__).resolve().parents[1] / "product_capabilities.json"
             capabilities.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
+            
+        personas = self.root / "agent_personas.json"
+        if not personas.exists():
+            bundled = Path(__file__).resolve().parents[1] / "agent_personas.json"
+            personas.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
 
     def brief(self) -> str:
         if self.brief_path.exists():
@@ -147,6 +152,7 @@ class Workspace:
             "decisions": "DECISIONS.md",
             "questions": "QUESTIONS.md", "logbook": "LOGBOOK.md", "context": "CONTEXT.md",
             "capabilities": "product_capabilities.json",
+            "personas": "agent_personas.json",
         }
         return self.root / names[key]
 
@@ -176,6 +182,35 @@ class Workspace:
                 line += f" | user notes: {notes}"
             lines.append(line)
         return "\n".join(filter(None, lines))
+
+    def parse_personas(self) -> tuple[dict[str, str], dict[str, tuple[set[str], set[str]]], dict[str, tuple[list[str], list[str]]]]:
+        """Parse agent_personas.json into the dicts used by the orchestrator."""
+        self.ensure()
+        raw = self.read("personas")
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {}, {}, {}
+        
+        personas = {}
+        signals = {}
+        keywords = {}
+        for p in data.get("personas", []):
+            pid = p.get("id")
+            if not pid:
+                continue
+            personas[pid] = p.get("prompt", "")
+            
+            cat = p.get("category", "unknown")
+            sig_set = set(p.get("signals", []))
+            if cat not in signals:
+                signals[cat] = (set(), set())
+            signals[cat][0].update(sig_set)
+            signals[cat][1].add(pid)
+            
+            keywords[pid] = (p.get("design_focus", []), p.get("plan_focus", []))
+            
+        return personas, signals, keywords
 
     def write(self, key: str, content: str):
         self.ensure()
