@@ -41,7 +41,7 @@
 <div class="project-strip" style="padding: 10px 24px;">
   <span class="project-label" style="font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;">Current Project:</span>
   <span class="project-state" id="projectState" style="font-size: 13px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
-  <button class="btn btn-secondary" id="openProjectBtn" onclick="openProject()" style="padding: 6px 12px; font-size: 12px; border-radius: 20px;">
+  <button class="btn btn-secondary btn-sm" id="openProjectBtn" onclick="openProject()" style="border-radius: 20px;">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:2px"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
     Switch Project
   </button>
@@ -73,7 +73,7 @@
         </div>
           <div style="display:flex; gap:12px; align-items:center;">
           <input type="text" id="maxTokensInput" name="run_max_tokens" value="100000" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="width:120px; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg); color:var(--text); font-family:var(--mono); text-align:right;">
-          <button class="btn btn-secondary" onclick="updateTokens()" style="padding:8px 16px;">Save</button>
+          <button class="btn btn-secondary" onclick="updateTokens()">Save</button>
         </div>
       </div>
       
@@ -96,7 +96,7 @@
       <h3 style="margin-top:0; font-size:15px; margin-bottom:16px;">Change My Password</h3>
       <div style="display:flex; gap:12px; align-items:center;">
         <input type="text" id="newPassword" name="account_new_password" class="masked-input" placeholder="Enter new password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:300px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
-        <button class="btn btn-secondary" onclick="changeMyPassword()" style="padding:10px 20px;">Update Password</button>
+        <button class="btn btn-secondary btn-lg" onclick="changeMyPassword()">Update Password</button>
       </div>
     </div>
     
@@ -119,7 +119,7 @@
       <div style="display:flex; gap:12px; align-items:center;">
         <input type="text" id="newUsername" name="member_username" placeholder="Username" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
         <input type="text" id="newUserPassword" name="member_new_password" class="masked-input" placeholder="Temporary password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" style="flex:1; max-width:200px; padding:10px 14px; border-radius:var(--radius); border:1px solid var(--border); background:var(--bg); color:var(--text);">
-        <button class="btn btn-primary" onclick="addUser()" style="padding:8px 14px;">Create User</button>
+        <button class="btn btn-primary" onclick="addUser()">Create User</button>
       </div>
     </div>
   </div>
@@ -225,7 +225,7 @@
         <button class="ws-file-btn" onclick="loadWsFile('logbook')" id="wsbtn-logbook">📖 LOGBOOK.md</button>
         <div style="display:flex; justify-content:space-between; align-items:center; margin:16px 0 8px">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Project files</div>
-          <button class="btn btn-secondary" onclick="createNewFile()" style="padding:5px 9px; font-size:10.5px">+ New File</button>
+          <button class="btn btn-secondary btn-sm" onclick="createNewFile()">+ New File</button>
         </div>
         <button class="ws-file-btn" onclick="loadWsFile('DESIGNFLOW.md')" id="wsbtn-brief">🎯 DESIGNFLOW.md</button>
         <div id="srcFileList" style="display:flex;flex-direction:column;gap:3px"></div>
@@ -238,9 +238,9 @@
           <div id="workflowShortcutSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔁 Iterate After You Hit an Issue</h4>
             <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('resolve_issue')" style="padding:6px 12px; font-size:12px">Turn an issue into a plan fix</button>
-              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('redebate_decision')" style="padding:6px 12px; font-size:12px">Challenge a prior decision</button>
-              <button class="btn btn-secondary" onclick="applyWorkflowTemplate('refine_plan')" style="padding:6px 12px; font-size:12px">Refine only the current plan</button>
+              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('resolve_issue')">Turn an issue into a plan fix</button>
+              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('redebate_decision')">Challenge a prior decision</button>
+              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('refine_plan')">Refine only the current plan</button>
             </div>
             <div style="font-size:13px; color:var(--muted); line-height:1.7;">Use these shortcuts to keep the design loop lightweight: preserve the current design, point to the specific issue you hit, and ask the team to revise only the affected parts with a short change summary.</div>
           </div>
@@ -282,7 +282,7 @@
             <span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.06em">Active Scope</span>
             <span id="scopeLabel" style="font-family:var(--heading-font); font-size:15px; font-weight:700; color:var(--accent2)">Global Scope (No Project Open)</span>
           </div>
-          <button class="btn btn-primary" onclick="addNewAgentCard()" style="font-size:12px; padding:6px 12px">＋ Add Agent</button>
+          <button class="btn btn-primary btn-sm" onclick="addNewAgentCard()">＋ Add Agent</button>
         </div>
         <div class="agent-cards" id="agentCardsContainer"></div>
       </section>
@@ -301,7 +301,7 @@
       <div id="mcpConfigSection">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
           <h2 style="margin:0;">MCP Servers (Local Tools)</h2>
-          <button class="btn btn-primary" onclick="document.getElementById('mcpAddForm').style.display='flex'" style="font-size:12px; padding:6px 12px">＋ Add Server</button>
+          <button class="btn btn-primary btn-sm" onclick="document.getElementById('mcpAddForm').style.display='flex'">＋ Add Server</button>
         </div>
         <p class="muted-note" style="margin-bottom:16px;">Configure Model Context Protocol (MCP) servers to give agents access to external tools. Servers configured here will be available to Claude agents in this project.</p>
         
@@ -310,7 +310,7 @@
         <div id="mcpAddForm" style="display:none; flex-direction:column; gap:8px; background:var(--bg2); padding:16px; border-radius:var(--radius); border:1px solid var(--border)">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div style="font-size:13px; font-weight:600;">Add New MCP Server</div>
-            <button class="btn btn-secondary" style="padding:4px 8px; font-size:11px" onclick="document.getElementById('mcpAddForm').style.display='none'">Cancel</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('mcpAddForm').style.display='none'">Cancel</button>
           </div>
           <input type="text" id="mcpName" placeholder="Name (e.g. filesystem)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
           <input type="text" id="mcpCommand" placeholder="Command or SSE URL (e.g. npx or http://localhost:8000/sse)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
@@ -362,7 +362,7 @@
       <input type="password" id="loginPassword" name="current-password" autocomplete="current-password" spellcheck="false" style="width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); box-sizing:border-box;" onkeydown="if(event.key==='Enter') submitLogin()">
     </div>
     <div id="loginError" style="color:#ff6b6b; font-size:12px; text-align:center; min-height:15px;"></div>
-    <button class="btn btn-primary" onclick="submitLogin()" style="width:100%; padding:10px 12px; font-size:12.5px;">Login</button>
+    <button class="btn btn-primary btn-lg" onclick="submitLogin()" style="width:100%;">Login</button>
   </div>
 </div>
 
@@ -373,7 +373,7 @@
         <h2 style="margin:0; color:var(--text); font-family:var(--heading-font);">Open a project</h2>
         <p style="margin:8px 0 0; color:var(--muted); line-height:1.6;">Enter the absolute path to the repository or product folder you want DesignFlow to use.</p>
       </div>
-      <button class="btn btn-secondary" onclick="closeProjectModal()" style="padding:6px 10px;">Close</button>
+      <button class="btn btn-secondary" onclick="closeProjectModal()">Close</button>
     </div>
     <input type="text" id="projectPathInput" name="project_path" placeholder="/path/to/your/project" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" onkeydown="if(event.key==='Enter') submitProjectPath()" style="width:100%; padding:14px 16px; border-radius:12px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px;">
     <div id="recentProjectsModal" class="recent-projects-shell recent-projects-modal" style="display:none;">

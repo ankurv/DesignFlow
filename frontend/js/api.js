@@ -658,7 +658,7 @@ function appendFeed(ev) {
         </div>
         <div class="feed-text" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
           <span class="feed-summary" style="flex: 1">${escHtml(summary)}</span>
-          ${detail ? `<button class="btn btn-secondary" style="padding: 2px 7px; font-size: 11px; font-weight: bold; line-height: 1; border-radius: 4px;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
+          ${detail ? `<button class="btn btn-secondary btn-sm" style="padding: 2px 7px; font-weight: bold; line-height: 1;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
         </div>
         ${detail ? `<div class="feed-detail markdown-body" style="display: ${ev.data.verdict === 'PAUSE_FOR_INPUT' ? 'block' : 'none'}; margin-top: 8px;">${parseMarkdown(detail)}</div>` : ''}
       </div>
@@ -1388,8 +1388,8 @@ async function loadUsers() {
                 <td style="padding:10px;">${u.username}</td>
                 <td style="padding:10px;">${u.role}</td>
                 <td style="padding:10px;">
-                  <button class="btn btn-secondary" onclick="resetUserPassword('${u.username}')">Reset Password</button>
-                  ${u.username === 'admin' ? '' : `<button class="btn" style="background:#dc3545; color:white;" onclick="deleteUser('${u.username}')">Delete</button>`}
+                  <button class="btn btn-secondary btn-sm" onclick="resetUserPassword('${u.username}')">Reset Password</button>
+                  ${u.username === 'admin' ? '' : `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.username}')">Delete</button>`}
                 </td>
               </tr>
             `;
