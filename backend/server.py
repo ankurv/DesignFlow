@@ -28,6 +28,7 @@ from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
 from .errors import classify_provider_error
+from .debug_observer import DebugObserver
 
 logger = logging.getLogger(__name__)
 SSE_SHUTDOWN = object()
@@ -69,6 +70,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DesignFlow", version="1.1.0", lifespan=lifespan)
 app.state.shutting_down = False
 app.state.request_shutdown = None
+app.state.debug_observer_enabled = False
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -90,6 +92,7 @@ class AppState:
         self.awaiting_input = False
         self.current_idea = ""
         self.last_transition = "initialized"
+        self.debug_observer: Optional[DebugObserver] = None
 
     def open_project(self, path: str) -> Workspace:
         if self.status in {"running", "paused", "needs_attention"}:
@@ -99,8 +102,11 @@ class AppState:
         workspace.reconcile_interrupted_logbook_runs()
         if self.store:
             self.store.close()
+        if self.debug_observer:
+            self.debug_observer.close()
         self.workspace = workspace
         self.store = ProjectStore(workspace.root)
+        self.debug_observer = DebugObserver(workspace.root) if getattr(app.state, "debug_observer_enabled", False) else None
         self.configs = self.store.load_agents()
         self.event_log.clear()
         self.orchestrator = None
@@ -123,6 +129,9 @@ class AppState:
         if self.store:
             self.store.close()
             self.store = None
+        if self.debug_observer:
+            self.debug_observer.close()
+            self.debug_observer = None
 
     @property
     def merged_configs(self) -> list[dict]:
@@ -352,6 +361,8 @@ def broadcast(event: Event, state):
     elif event.kind in {EventKind.DONE, EventKind.ERROR}:
         state.awaiting_input = False
     state.event_log.append(data)
+    if state.debug_observer:
+        state.debug_observer.observe({**data, "run_id": state.run_id})
     if state.store:
         state.store.append_event(state.run_id, data)
         if event.kind == EventKind.TURN_END and state.orchestrator:
@@ -571,6 +582,22 @@ def list_agents(state: AppState = Depends(get_state)):
     }
 
 
+@app.get("/debug/insights")
+def debug_insights(state: AppState = Depends(get_state)):
+    if not getattr(app.state, "debug_observer_enabled", False):
+        return {"enabled": False, "insights": []}
+    if not state.workspace:
+        return {"enabled": True, "insights": [], "message": "Open a project to collect diagnostics"}
+    path = state.workspace.root / "debug" / "insights.json"
+    if not path.exists():
+        return {"enabled": True, "insights": [], "message": "No workflow events observed yet"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"enabled": True, "insights": [], "message": "Diagnostics are being updated"}
+    return {"enabled": True, **payload}
+
+
 @app.post("/agents")
 def add_agent(body: AgentConfigIn, state: AppState = Depends(get_state)):
     if not state.store:
@@ -778,6 +805,8 @@ async def start_run(
     if state.store:
         state.store.start_run(state.run_id, task or product_goal)
     state.workspace.begin_logbook_run(state.run_id, task or product_goal)
+    if state.debug_observer:
+        state.debug_observer.start_run(state.run_id, task or product_goal, body.mode)
 
     state.orchestrator = Orchestrator(
         agents=agents,

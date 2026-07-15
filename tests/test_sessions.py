@@ -14,6 +14,7 @@ from backend.agents.base import AgentBase, AgentConfig, Message, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
 from backend.orchestrator import EventKind, Orchestrator, OrchestratorPhase
 from backend.errors import classify_provider_error
+from backend.debug_observer import DebugObserver
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
 
@@ -1914,6 +1915,22 @@ class DeterministicRoutingTests(unittest.TestCase):
         request = Orchestrator._effective_request(saved_goal, task)
         self.assertEqual(request, task)
         self.assertFalse(Orchestrator._should_run_team_workflow(request, "auto"))
+
+    def test_debug_observer_is_enabled_by_command_line_argument(self):
+        from run import build_parser
+        self.assertFalse(build_parser().parse_args([]).debug_observer)
+        self.assertTrue(build_parser().parse_args(["--debug-observer"]).debug_observer)
+
+    def test_debug_observer_redacts_and_reports_missing_design_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            observer = DebugObserver(Path(directory), max_events=20)
+            observer.start_run("run-1", "Generate a Mermaid visual design with sk-secret123456", "auto")
+            observer.observe({"kind": "done", "data": {"api_key": "sk-secret123456"}})
+            observer.close()
+            events = (Path(directory) / "debug" / "events.jsonl").read_text()
+            insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())
+            self.assertNotIn("sk-secret123456", events)
+            self.assertTrue(any(item["code"] == "missing_requested_artifact" for item in insights["insights"]))
 
     def test_provider_errors_prefer_structured_status_codes(self):
         forbidden = RuntimeError("a very long provider response")

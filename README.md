@@ -68,6 +68,10 @@ python3 -m pip install -r requirements.txt
 python3 run.py --port 8000
 ```
 
+For passive, project-local workflow diagnostics during development, start with
+`python3 run.py --port 8000 --debug-observer`. The observer is disabled by default,
+redacts sensitive values, and writes suggestions under `.designflow/debug/`.
+
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ### 2. Setup a Project Folder

@@ -437,6 +437,7 @@ async function loadWsFile(key) {
 
 async function refreshWorkspace() {
   const ws = await fetch('/workspace').then(r=>r.json());
+  refreshDebugInsights();
 
   const briefButton = document.getElementById('wsbtn-brief');
   if (briefButton) {
@@ -467,6 +468,26 @@ async function refreshWorkspace() {
     }
   }
   await loadWsFile(currentWsKey);
+}
+
+async function refreshDebugInsights() {
+  const section = document.getElementById('debugInsightsSection');
+  const container = document.getElementById('debugInsightsContainer');
+  if (!section || !container) return;
+  try {
+    const data = await fetch('/debug/insights').then(response => response.json());
+    section.style.display = data.enabled ? 'flex' : 'none';
+    if (!data.enabled) return;
+    const insights = data.insights || [];
+    container.innerHTML = insights.length ? insights.map(item => `
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg2)">
+        <div style="font-size:11px;text-transform:uppercase;color:var(--muted);margin-bottom:5px">${escHtml(item.severity || 'info')} · ${escHtml(item.code || 'observation')}</div>
+        <div style="color:var(--text);font-size:13px;line-height:1.5">${escHtml(item.evidence || '')}</div>
+        <div style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-top:6px">${escHtml(item.suggestion || '')}</div>
+      </div>`).join('') : `<div style="color:var(--muted);font-size:13px">${escHtml(data.message || 'No improvement suggestions yet.')}</div>`;
+  } catch (err) {
+    section.style.display = 'none';
+  }
 }
 
 async function loadRunHistory() {
