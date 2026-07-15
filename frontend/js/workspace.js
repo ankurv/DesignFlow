@@ -493,7 +493,7 @@ function renderHistory(runs) {
 window.generateVisualDesign = function() {
   const steerInput = document.getElementById('steerInput');
   if (steerInput) {
-    steerInput.value = "Review the current project state and update DESIGN.md to include a comprehensive visual architecture diagram using Mermaid.js.";
+    steerInput.value = "Update DESIGN.md directly: preserve its existing content and add a clear Mermaid architecture diagram based on the current project. This is a bounded document edit; use one agent and do not start a debate.";
     if (window.sendSteer) window.sendSteer();
     const architectTab = Array.from(document.querySelectorAll('.tab')).find(t => t.textContent.includes('Architect Dashboard'));
     if (architectTab) architectTab.click();

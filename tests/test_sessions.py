@@ -1893,6 +1893,14 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertFalse(Orchestrator._should_run_team_workflow("Design a system", "direct"))
         self.assertTrue(Orchestrator._should_run_team_workflow("What is this?", "debate"))
 
+    def test_targeted_artifact_edits_use_one_agent(self):
+        prompt = "Update DESIGN.md to include a Mermaid architecture diagram."
+        self.assertTrue(Orchestrator._is_targeted_artifact_update(prompt))
+        self.assertFalse(Orchestrator._should_run_team_workflow(prompt, "auto"))
+        self.assertTrue(Orchestrator._should_run_team_workflow(
+            "Debate the options, then update DESIGN.md", "auto"
+        ))
+
     def test_provider_errors_prefer_structured_status_codes(self):
         forbidden = RuntimeError("a very long provider response")
         forbidden.status_code = 403

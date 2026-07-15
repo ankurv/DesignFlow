@@ -432,6 +432,14 @@ class Orchestrator:
         return ""
 
     @staticmethod
+    def _is_targeted_artifact_update(text: str) -> bool:
+        """Recognize bounded edits to existing planning artifacts."""
+        normalized = " ".join((text or "").lower().split())
+        artifact = re.search(r"\b(?:design|plan|decisions)\.md\b", normalized)
+        edit = re.search(r"\b(?:add|append|include|insert|update|edit|fix|refresh|generate|create)\b", normalized)
+        return bool(artifact and edit)
+
+    @staticmethod
     def _should_run_team_workflow(text: str, mode: str) -> bool:
         """Route ordinary questions to one agent and substantive planning work to the team."""
         normalized = " ".join((text or "").lower().split())
@@ -441,6 +449,8 @@ class Orchestrator:
             return False
         if re.search(r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized):
             return True
+        if Orchestrator._is_targeted_artifact_update(normalized):
+            return False
         strong_planning_request = re.search(
             r"^(?:please\s+)?(?:build|design|architect|plan|create|develop|redesign|refactor|re-architect)\b",
             normalized,
@@ -537,15 +547,29 @@ class Orchestrator:
             context = self.ws.scoped_context(["design", "plan", "decisions"])
             if len(context) > 12000:
                 context = context[:12000].rstrip() + "\n\n[context truncated]"
-            prompt = (
-                f"Conversational Turn.\n"
-                f"User Prompt: {prompt_text}\n"
-                f"Answer the question directly and concisely. Do not start a design debate.\n"
-                f"Relevant workspace context (if any):\n{context}\n"
-            )
+            artifact_update = self._is_targeted_artifact_update(prompt_text)
+            if artifact_update:
+                prompt = (
+                    f"Targeted Artifact Edit.\n"
+                    f"User Prompt: {prompt_text}\n"
+                    f"Execute this bounded edit yourself. Do not debate, consult peers, ask for approval, or broaden the scope.\n"
+                    f"Preserve all correct existing content and return the complete updated document under the matching "
+                    f"`## DESIGN_UPDATE`, `## PLAN_UPDATE`, or `## DECISIONS_UPDATE` header.\n"
+                    f"For Mermaid, use valid fenced `mermaid` blocks with short, readable labels.\n"
+                    f"Relevant workspace context:\n{context}\n"
+                )
+            else:
+                prompt = (
+                    f"Conversational Turn.\n"
+                    f"User Prompt: {prompt_text}\n"
+                    f"Answer the question directly and concisely. Do not start a design debate.\n"
+                    f"Relevant workspace context (if any):\n{context}\n"
+                )
 
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
             self._record_turn_usage(target_agent, "direct")
+            if artifact_update:
+                self._apply_coordinator_agent_response(target_agent.name, response)
             self.ws.append("logbook", response, target_agent.name, "Turn completed")
 
             self._emit(Event(EventKind.TURN_END, agent=target_agent.name, data={
