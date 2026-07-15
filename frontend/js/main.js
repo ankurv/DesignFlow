@@ -84,6 +84,12 @@ setInterval(() => {
 // expires the binding and stops the project after the collaboration grace period.
 setInterval(() => {
   if (sessionStorage.getItem('designflow_session_id')) {
-    fetch('/session/heartbeat', {method: 'POST'}).catch(() => {});
+    fetch('/session/heartbeat', {method: 'POST'})
+      .then(res => {
+        if (res.status === 401) {
+          sessionStorage.removeItem('designflow_session_id');
+        }
+      })
+      .catch(() => {});
   }
 }, 20000);

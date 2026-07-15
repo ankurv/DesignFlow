@@ -45,3 +45,5 @@ debug_run.py
 test_mcp_server.py
 test_shutdown.py
 test_global_agents.json
+server.log
+server.pid
