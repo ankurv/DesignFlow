@@ -290,7 +290,7 @@
   .feed-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
   .feed { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
   
-  .feed-item { border-radius: var(--radius); padding: 14px 16px;
+  .feed-item { border-radius: var(--radius); padding: 16px 20px;
                border: 1px solid var(--border); background: var(--bg2);
                box-shadow: 0 4px 12px rgba(0,0,0,0.15); transition: border-color 0.2s; }
   .feed-item:hover { border-color: var(--border2); }
@@ -320,7 +320,7 @@
   }
   .feed-meta { display: flex; flex-direction: column; flex: 1; gap: 2px; }
   .feed-header-line { display: flex; align-items: center; justify-content: space-between; }
-  .feed-agent-details { display: flex; align-items: center; gap: 8px; }
+  .feed-agent-details { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .feed-agent { font-size: var(--fs-md); font-weight: 700; color: var(--text); }
   .feed-provider { font-size: var(--fs-xs); color: var(--text-muted); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .feed-kind  { font-size: var(--fs-xs); color: var(--muted); background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 8px; }
@@ -356,7 +356,7 @@
   /* ── Workspace panel ── */
   .ws-layout { display: flex; flex: 1; overflow: hidden; }
   .ws-sidebar { width: 240px; border-right: 1px solid var(--border); overflow-y: auto;
-                flex-shrink: 0; padding: 16px; background: var(--bg2); }
+                flex-shrink: 0; padding:  20px; background: var(--bg2); }
   
   .ws-file-btn { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px 12px;
                  background: transparent; border: 1px solid transparent; border-radius: var(--radius);
@@ -479,7 +479,7 @@
                 transition: transform 0.2s, border-color 0.2s; }
   .agent-card:hover { transform: translateY(-1px); border-color: var(--border2); }
   .agent-card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-  .agent-card-name { font-family: var(--heading-font); font-weight: 700; font-size: var(--fs-xl); flex: 1; color: var(--text); }
+  .agent-card-name { font-family: var(--heading-font); font-weight: 700; font-size: var(--fs-xl); flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .agent-card-kind { font-size: var(--fs-xs); font-weight: 600; color: var(--accent2); background: rgba(99,102,241,0.08);
                      padding: 3px 10px; border-radius: 20px; border: 1px solid rgba(99,102,241,0.15); text-transform: uppercase; }
   
@@ -515,7 +515,7 @@
   
   .history-layout { flex: 1; overflow-y: auto; padding: 32px; max-width: 980px; }
   .history-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(280px,1fr)); gap: 16px; margin-top: 20px; }
-  .run-card { border: 1px solid var(--border); background: var(--bg2); border-radius: 16px; padding: 16px;
+  .run-card { border: 1px solid var(--border); background: var(--bg2); border-radius: 16px; padding:  20px;
               box-shadow: 0 4px 14px rgba(0,0,0,0.15); transition: all 0.2s; }
   .run-card:hover { border-color: var(--border2); transform: translateY(-2px); }
   .run-card-title { font-family: var(--heading-font); font-size: var(--fs-lg); font-weight: 700; margin-bottom: 8px; white-space: nowrap;
@@ -757,7 +757,7 @@
 }
 .mermaid {
   background: transparent;
-  padding: 16px;
+  padding:  20px;
   border-radius: 8px;
   margin: 12px 0;
   display: flex;
@@ -1422,14 +1422,7 @@ body.project-open .cockpit-export-btn { display: inline-flex; }
   flex-shrink: 0;
   align-items: center;
 }
-.cockpit-composer-row #steerInput {
-  border-radius: 14px;
-  border: 1px solid #64748b;
-  background: #111827;
-  color: var(--text);
-  padding: 12px 14px;
-  min-width: 0;
-}
+.cockpit-composer-row #steerInput { flex: 1; min-width: 0; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg2); color: var(--text); outline: none; transition: border-color 0.2s; }
 .discussion-composer .btn,
 .discussion-composer .cockpit-inline-action { white-space: nowrap; }
 
