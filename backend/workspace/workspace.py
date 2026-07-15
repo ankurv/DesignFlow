@@ -183,18 +183,19 @@ class Workspace:
             lines.append(line)
         return "\n".join(filter(None, lines))
 
-    def parse_personas(self) -> tuple[dict[str, str], dict[str, tuple[set[str], set[str]]], dict[str, tuple[list[str], list[str]]]]:
+    def parse_personas(self) -> tuple[dict[str, str], dict[str, tuple[set[str], set[str]]], dict[str, tuple[list[str], list[str]]], dict[str, list[str]]]:
         """Parse agent_personas.json into the dicts used by the orchestrator."""
         self.ensure()
         raw = self.read("personas")
         try:
             data = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
-            return {}, {}, {}
+            return {}, {}, {}, {}
         
         personas = {}
         signals = {}
         keywords = {}
+        allowed_mcp = {}
         for p in data.get("personas", []):
             pid = p.get("id")
             if not pid:
@@ -209,8 +210,9 @@ class Workspace:
             signals[cat][1].add(pid)
             
             keywords[pid] = (p.get("design_focus", []), p.get("plan_focus", []))
+            allowed_mcp[pid] = p.get("allowed_mcp_servers", [])
             
-        return personas, signals, keywords
+        return personas, signals, keywords, allowed_mcp
 
     def write(self, key: str, content: str):
         self.ensure()

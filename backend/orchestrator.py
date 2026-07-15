@@ -254,7 +254,7 @@ class Orchestrator:
     ):
         self.agents = agents
         self.ws = workspace
-        self._personas, self._signals, self._keywords = self.ws.parse_personas()
+        self._personas, self._signals, self._keywords, self._allowed_mcp_servers = self.ws.parse_personas()
         self.store = store
         self.run_id = run_id
         self._cb = event_cb
@@ -1525,10 +1525,16 @@ class Orchestrator:
                         asyncio.get_running_loop()
                     )
                     return future.result()
+                    
+                agent_allowed_servers = self._allowed_mcp_servers.get(agent.name.lower(), [])
+                if "*" in agent_allowed_servers:
+                    agent_mcp_tools = self.mcp_tools
+                else:
+                    agent_mcp_tools = [t for t in self.mcp_tools if t.get("server") in agent_allowed_servers]
 
                 response = await asyncio.to_thread(
                     agent.send, prompt, effective_system, ephemeral_context,
-                    mcp_tools=self.mcp_tools, tool_handler=call_mcp_tool
+                    mcp_tools=agent_mcp_tools, tool_handler=call_mcp_tool
                 )
                 self._failed_turn = None
                 return response

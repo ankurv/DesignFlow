@@ -224,19 +224,64 @@ class OpenAIAgent(AgentBase):
             self._configure_client()
 
     def _raw_send(self, messages: list[dict], system: str, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> tuple[str, Usage]:
+        import json
         from typing import Callable
+        
+        tools = []
+        if mcp_tools:
+            for t in mcp_tools:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": t["inputSchema"]
+                    }
+                })
+                
         if "integrate.api.nvidia.com" in (self.config.base_url or ""):
-            request_messages = ([{"role": "system", "content": system}] if system else []) + messages
-            response = self._client.chat.completions.create(
-                model=self.config.model,
-                messages=request_messages,
-                max_tokens=self.config.extra.get("max_tokens", 2000),
-            )
-            raw = response.usage
-            return response.choices[0].message.content or "", Usage(
-                input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
-                output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
-            )
+            request_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
+            
+            while True:
+                kwargs = {
+                    "model": self.config.model,
+                    "messages": request_messages,
+                    "max_tokens": self.config.extra.get("max_tokens", 2000),
+                }
+                if tools:
+                    kwargs["tools"] = tools
+                    
+                response = self._client.chat.completions.create(**kwargs)
+                raw = response.usage
+                
+                msg = response.choices[0].message
+                if getattr(msg, "tool_calls", None):
+                    assistant_msg = {"role": "assistant", "content": msg.content or "", "tool_calls": []}
+                    for tc in msg.tool_calls:
+                        assistant_msg["tool_calls"].append({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                        })
+                    request_messages.append(assistant_msg)
+                    
+                    for tc in msg.tool_calls:
+                        try:
+                            args = json.loads(tc.function.arguments)
+                            res = tool_handler(tc.function.name, args)
+                        except Exception as e:
+                            res = str(e)
+                        request_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": str(res)
+                        })
+                else:
+                    return msg.content or "", Usage(
+                        input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
+                        output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+                    )
+
         kwargs = {
             "model": self.config.model or "gpt-4o",
             "input": messages[-1]["content"],
@@ -246,12 +291,18 @@ class OpenAIAgent(AgentBase):
             "store": True,
             "prompt_cache_key": f"designflow-{self._session_id}",
         }
+        if tools:
+            kwargs["tools"] = tools
+            
         compact_threshold = int(self.config.extra.get("compact_threshold", 0) or 0)
         if compact_threshold:
             kwargs["context_management"] = [{
                 "type": "compaction",
                 "compact_threshold": compact_threshold,
             }]
+            
+        # The responses API currently doesn't easily support iterative tool calling in this tight loop
+        # so we will just invoke it natively and let the user handle it or ignore tools for this specific beta API
         response = self._client.responses.create(**kwargs)
         self._response_id = response.id
         raw = response.usage
@@ -294,26 +345,74 @@ class GroqAgent(AgentBase):
         if (config.api_key, config.base_url) != previous:
             self._configure_client()
 
-    def _raw_send(self, messages: list[dict], system: str, *args, **kwargs) -> tuple[str, Usage]:
-        groq_messages = ([{"role": "system", "content": system}] if system else []) + messages
-        request = {
-            "model": self.config.model or "llama-3.3-70b-versatile",
-            "messages": groq_messages,
-            "max_tokens": int(self.config.extra.get("max_tokens", 2000) or 2000),
-        }
-        if "temperature" in self.config.extra:
-            request["temperature"] = float(self.config.extra["temperature"])
+    def _raw_send(self, messages: list[dict], system: str, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> tuple[str, Usage]:
+        import json
+        groq_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
+        
+        tools = []
+        if mcp_tools:
+            for t in mcp_tools:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": t["inputSchema"]
+                    }
+                })
 
-        response = self._client.chat.completions.create(**request)
-        raw = getattr(response, "usage", None)
-        prompt_details = getattr(raw, "prompt_tokens_details", None)
-        usage = Usage(
-            input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
-            cached_input_tokens=int(getattr(prompt_details, "cached_tokens", 0) or 0),
-            output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
-        )
-        content = response.choices[0].message.content or ""
-        return content, usage
+        total_input = 0
+        total_cached = 0
+        total_output = 0
+
+        while True:
+            request = {
+                "model": self.config.model or "llama-3.3-70b-versatile",
+                "messages": groq_messages,
+                "max_tokens": int(self.config.extra.get("max_tokens", 2000) or 2000),
+            }
+            if "temperature" in self.config.extra:
+                request["temperature"] = float(self.config.extra["temperature"])
+            if tools:
+                request["tools"] = tools
+
+            response = self._client.chat.completions.create(**request)
+            raw = getattr(response, "usage", None)
+            prompt_details = getattr(raw, "prompt_tokens_details", None)
+            
+            total_input += int(getattr(raw, "prompt_tokens", 0) or 0)
+            total_cached += int(getattr(prompt_details, "cached_tokens", 0) or 0)
+            total_output += int(getattr(raw, "completion_tokens", 0) or 0)
+
+            msg = response.choices[0].message
+            if getattr(msg, "tool_calls", None):
+                assistant_msg = {"role": "assistant", "content": msg.content or "", "tool_calls": []}
+                for tc in msg.tool_calls:
+                    assistant_msg["tool_calls"].append({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                    })
+                groq_messages.append(assistant_msg)
+                
+                for tc in msg.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        res = tool_handler(tc.function.name, args)
+                    except Exception as e:
+                        res = str(e)
+                    groq_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": str(res)
+                    })
+            else:
+                usage = Usage(
+                    input_tokens=total_input,
+                    cached_input_tokens=total_cached,
+                    output_tokens=total_output,
+                )
+                return msg.content or "", usage
 
 
 class GeminiAgent(AgentBase):

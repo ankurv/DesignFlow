@@ -7,171 +7,553 @@
       "category": "architecture",
       "name": "Architect Alpha",
       "prompt": "You are ARCHITECT ALPHA. Propose robust, scalable system designs. Vigorously debate competing designs and highlight their flaws while defending your own.",
-      "signals": ["architecture", "system", "service", "scale", "performance", "distributed", "concurrency", "recovery", "failure"],
-      "design_focus": ["architecture", "challenge", "reliability", "scalability"],
-      "plan_focus": ["requirements", "phases", "testing"]
+      "signals": [
+        "architecture",
+        "system",
+        "service",
+        "scale",
+        "performance",
+        "distributed",
+        "concurrency",
+        "recovery",
+        "failure"
+      ],
+      "design_focus": [
+        "architecture",
+        "challenge",
+        "reliability",
+        "scalability"
+      ],
+      "plan_focus": [
+        "requirements",
+        "phases",
+        "testing"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "architect_beta",
       "category": "architecture",
       "name": "Architect Beta",
       "prompt": "You are ARCHITECT BETA. Propose alternative, highly-optimized system designs. Challenge Architect Alpha's assumptions and fight for a superior approach.",
-      "signals": ["architecture", "system", "service", "scale", "performance", "distributed", "concurrency", "recovery", "failure"],
-      "design_focus": ["architecture", "challenge", "reliability", "scalability"],
-      "plan_focus": ["requirements", "phases", "testing"]
+      "signals": [
+        "architecture",
+        "system",
+        "service",
+        "scale",
+        "performance",
+        "distributed",
+        "concurrency",
+        "recovery",
+        "failure"
+      ],
+      "design_focus": [
+        "architecture",
+        "challenge",
+        "reliability",
+        "scalability"
+      ],
+      "plan_focus": [
+        "requirements",
+        "phases",
+        "testing"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "researcher",
       "category": "research",
       "name": "Researcher",
       "prompt": "You are the RESEARCHER. Read existing workspace files to ground the debate in reality. Fact-check the Architects to ensure they do not hallucinate APIs or codebase assumptions.",
-      "signals": ["existing", "repository", "codebase", "legacy", "migration", "refactor"],
-      "design_focus": ["unknown", "validation", "architecture", "challenge"],
-      "plan_focus": ["discovery", "testing", "phases"]
+      "signals": [
+        "existing",
+        "repository",
+        "codebase",
+        "legacy",
+        "migration",
+        "refactor"
+      ],
+      "design_focus": [
+        "unknown",
+        "validation",
+        "architecture",
+        "challenge"
+      ],
+      "plan_focus": [
+        "discovery",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "red_team",
       "category": "security",
       "name": "Red Team",
       "prompt": "You are the RED TEAM agent. Your sole purpose is to hunt for edge-cases, race conditions, security vulnerabilities, and ways to break the proposed design.",
-      "signals": ["auth", "security", "privacy", "payment", "secret", "permission", "tenant", "compliance"],
-      "design_focus": ["security", "failure", "reliability", "challenge"],
-      "plan_focus": ["testing", "security", "phases"]
+      "signals": [
+        "auth",
+        "security",
+        "privacy",
+        "payment",
+        "secret",
+        "permission",
+        "tenant",
+        "compliance"
+      ],
+      "design_focus": [
+        "security",
+        "failure",
+        "reliability",
+        "challenge"
+      ],
+      "plan_focus": [
+        "testing",
+        "security",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "security_auditor",
       "category": "security",
       "name": "Security Auditor",
       "prompt": "You are the SECURITY AUDITOR. Enforce secure defaults (OWASP Top 10). Ensure that proper authentication, data encryption at rest, and input sanitization are baked into the architecture.",
-      "signals": ["auth", "security", "privacy", "payment", "secret", "permission", "tenant", "compliance"],
-      "design_focus": ["security", "access", "tenant", "reliability"],
-      "plan_focus": ["security", "testing", "phases"]
+      "signals": [
+        "auth",
+        "security",
+        "privacy",
+        "payment",
+        "secret",
+        "permission",
+        "tenant",
+        "compliance"
+      ],
+      "design_focus": [
+        "security",
+        "access",
+        "tenant",
+        "reliability"
+      ],
+      "plan_focus": [
+        "security",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "ux_simplifier",
       "category": "ux",
       "name": "UX Simplifier",
       "prompt": "You are the UX SIMPLIFIER. You fiercely advocate for the external user. You must aggressively fight to simplify complex UI flows, remove unnecessary features, and ensure the system is intuitive.",
-      "signals": ["ui", "ux", "screen", "dashboard", "website", "mobile", "frontend", "visual"],
-      "design_focus": ["interface", "interaction", "workflow", "user"],
-      "plan_focus": ["frontend", "workflow", "phases"]
+      "signals": [
+        "ui",
+        "ux",
+        "screen",
+        "dashboard",
+        "website",
+        "mobile",
+        "frontend",
+        "visual"
+      ],
+      "design_focus": [
+        "interface",
+        "interaction",
+        "workflow",
+        "user"
+      ],
+      "plan_focus": [
+        "frontend",
+        "workflow",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "ui_designer",
       "category": "ux",
       "name": "UI Designer",
       "prompt": "You are the UI DESIGNER. Focus on visual hierarchy, layout clarity, affordances, states, feedback, density, and readability. Challenge designs that are cluttered, ambiguous, or visually noisy, and propose cleaner interaction surfaces.",
-      "signals": ["ui", "ux", "screen", "dashboard", "website", "mobile", "frontend", "visual"],
-      "design_focus": ["interface", "interaction", "workflow", "feedback"],
-      "plan_focus": ["frontend", "interface", "phases"]
+      "signals": [
+        "ui",
+        "ux",
+        "screen",
+        "dashboard",
+        "website",
+        "mobile",
+        "frontend",
+        "visual"
+      ],
+      "design_focus": [
+        "interface",
+        "interaction",
+        "workflow",
+        "feedback"
+      ],
+      "plan_focus": [
+        "frontend",
+        "interface",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "workflow_designer",
       "category": "ux",
       "name": "Workflow Designer",
       "prompt": "You are the WORKFLOW DESIGNER. Focus on end-to-end user journeys, re-entry after failure, iteration loops, approvals, empty states, and operational usability. You must make sure the product feels smooth over repeated real-world use, not just the happy path.",
-      "signals": ["ui", "ux", "screen", "dashboard", "website", "mobile", "frontend", "visual"],
-      "design_focus": ["workflow", "interaction", "failure", "recovery"],
-      "plan_focus": ["workflow", "testing", "phases"]
+      "signals": [
+        "ui",
+        "ux",
+        "screen",
+        "dashboard",
+        "website",
+        "mobile",
+        "frontend",
+        "visual"
+      ],
+      "design_focus": [
+        "workflow",
+        "interaction",
+        "failure",
+        "recovery"
+      ],
+      "plan_focus": [
+        "workflow",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "cloud_architect",
       "category": "operations",
       "name": "Cloud Architect",
       "prompt": "You are the CLOUD ARCHITECT. Focus purely on cloud infrastructure, managed services (Serverless, PaaS, IaaS), network topology (VPC, API Gateways, Load Balancing, CDN), and Infrastructure as Code. Challenge designs that reinvent the wheel instead of using managed cloud primitives, and ensure the deployment architecture is scalable, cost-effective, and secure.",
-      "signals": ["cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability", "logging", "log", "runtime", "serverless", "terraform", "cdn", "vpc"],
-      "design_focus": ["architecture", "scalability", "reliability", "deployment"],
-      "plan_focus": ["deployment", "operations", "testing", "phases"]
+      "signals": [
+        "cloud",
+        "deploy",
+        "docker",
+        "kubernetes",
+        "aws",
+        "azure",
+        "gcp",
+        "monitor",
+        "reliability",
+        "logging",
+        "log",
+        "runtime",
+        "serverless",
+        "terraform",
+        "cdn",
+        "vpc"
+      ],
+      "design_focus": [
+        "architecture",
+        "scalability",
+        "reliability",
+        "deployment"
+      ],
+      "plan_focus": [
+        "deployment",
+        "operations",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "devops_engineer",
       "category": "operations",
       "name": "DevOps Engineer",
       "prompt": "You are the DEVOPS ENGINEER. Plan the deployment pipelines, containerization (Docker/Kubernetes), and observability. Ensure logging, monitoring, and rollback strategies are part of the plan.",
-      "signals": ["cloud", "deploy", "docker", "kubernetes", "aws", "azure", "gcp", "monitor", "reliability", "logging", "log", "runtime", "serverless", "terraform", "cdn", "vpc"],
-      "design_focus": ["architecture", "reliability", "deployment", "observability"],
-      "plan_focus": ["deployment", "operations", "testing", "phases"]
+      "signals": [
+        "cloud",
+        "deploy",
+        "docker",
+        "kubernetes",
+        "aws",
+        "azure",
+        "gcp",
+        "monitor",
+        "reliability",
+        "logging",
+        "log",
+        "runtime",
+        "serverless",
+        "terraform",
+        "cdn",
+        "vpc"
+      ],
+      "design_focus": [
+        "architecture",
+        "reliability",
+        "deployment",
+        "observability"
+      ],
+      "plan_focus": [
+        "deployment",
+        "operations",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "product_manager",
       "category": "product",
       "name": "Product Manager",
       "prompt": "You are the PRODUCT MANAGER. You enforce MVP constraints and fight YAGNI (You Aren't Gonna Need It). You ensure the team is only building what is strictly necessary to validate the idea and get to market fast.",
-      "signals": ["product", "user", "mvp", "feature", "market", "workflow"],
-      "design_focus": ["summary", "goal", "requirements", "scope", "unknown"],
-      "plan_focus": ["requirements", "goals", "phases", "discovery"]
+      "signals": [
+        "product",
+        "user",
+        "mvp",
+        "feature",
+        "market",
+        "workflow"
+      ],
+      "design_focus": [
+        "summary",
+        "goal",
+        "requirements",
+        "scope",
+        "unknown"
+      ],
+      "plan_focus": [
+        "requirements",
+        "goals",
+        "phases",
+        "discovery"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "product_strategist",
       "category": "product",
       "name": "Product Strategist",
       "prompt": "You are the PRODUCT STRATEGIST. Focus on product framing, user value, positioning, differentiation, and what the product promise should actually be. Challenge solutions that are technically elegant but weak in user value or narrative clarity.",
-      "signals": ["product", "user", "mvp", "feature", "market", "workflow"],
-      "design_focus": ["summary", "goal", "requirements", "scope"],
-      "plan_focus": ["requirements", "goals", "discovery"]
+      "signals": [
+        "product",
+        "user",
+        "mvp",
+        "feature",
+        "market",
+        "workflow"
+      ],
+      "design_focus": [
+        "summary",
+        "goal",
+        "requirements",
+        "scope"
+      ],
+      "plan_focus": [
+        "requirements",
+        "goals",
+        "discovery"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "data_architect",
       "category": "data",
       "name": "Data Architect",
       "prompt": "You are the DATA ARCHITECT. Focus purely on schema design, normalization vs. denormalization, migration strategies, and complex query performance.",
-      "signals": ["data", "database", "schema", "query", "storage", "migration", "analytics"],
-      "design_focus": ["schema", "data", "storage", "configuration"],
-      "plan_focus": ["database", "storage", "migration", "phases"]
+      "signals": [
+        "data",
+        "database",
+        "schema",
+        "query",
+        "storage",
+        "migration",
+        "analytics"
+      ],
+      "design_focus": [
+        "schema",
+        "data",
+        "storage",
+        "configuration"
+      ],
+      "plan_focus": [
+        "database",
+        "storage",
+        "migration",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "database_administrator",
       "category": "data",
       "name": "Database Administrator",
       "prompt": "You are the DATABASE ADMINISTRATOR. Focus on database indexing, query optimization, connection pooling, backup/restore procedures, replica management, and maintaining transactional integrity under high load.",
-      "signals": ["data", "database", "schema", "query", "storage", "migration", "analytics", "index", "transaction"],
-      "design_focus": ["performance", "storage", "reliability", "scale"],
-      "plan_focus": ["database", "operations", "testing", "phases"]
+      "signals": [
+        "data",
+        "database",
+        "schema",
+        "query",
+        "storage",
+        "migration",
+        "analytics",
+        "index",
+        "transaction"
+      ],
+      "design_focus": [
+        "performance",
+        "storage",
+        "reliability",
+        "scale"
+      ],
+      "plan_focus": [
+        "database",
+        "operations",
+        "testing",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "api_designer",
       "category": "api",
       "name": "API Designer",
       "prompt": "You are the API DESIGNER. Focus purely on the communication layer. Ensure REST/GraphQL endpoints are intuitive, stateless, properly versioned, and standardized.",
-      "signals": ["api", "rest", "graphql", "webhook", "integration", "client", "backend", "framework", "language", "sdk"],
-      "design_focus": ["protocol", "api", "format", "configuration"],
-      "plan_focus": ["api", "sdk", "protocol", "phases"]
+      "signals": [
+        "api",
+        "rest",
+        "graphql",
+        "webhook",
+        "integration",
+        "client",
+        "backend",
+        "framework",
+        "language",
+        "sdk"
+      ],
+      "design_focus": [
+        "protocol",
+        "api",
+        "format",
+        "configuration"
+      ],
+      "plan_focus": [
+        "api",
+        "sdk",
+        "protocol",
+        "phases"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     },
     {
       "id": "sales_alpha",
       "category": "growth",
       "name": "Sales Strategist Alpha",
       "prompt": "You are SALES STRATEGIST ALPHA. Pitch aggressive, high-growth go-to-market strategies and pricing models. Vigorously debate competing sales strategies and defend your approach.",
-      "signals": ["sales", "marketing", "pricing", "growth", "acquisition", "seo"],
-      "design_focus": ["summary", "goal"],
-      "plan_focus": ["discovery", "phases"]
+      "signals": [
+        "sales",
+        "marketing",
+        "pricing",
+        "growth",
+        "acquisition",
+        "seo"
+      ],
+      "design_focus": [
+        "summary",
+        "goal"
+      ],
+      "plan_focus": [
+        "discovery",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "sales_beta",
       "category": "growth",
       "name": "Sales Strategist Beta",
       "prompt": "You are SALES STRATEGIST BETA. Pitch alternative, calculated go-to-market strategies (e.g. product-led growth vs sales-led). Challenge Sales Alpha's assumptions and fight for a superior approach.",
-      "signals": ["sales", "marketing", "pricing", "growth", "acquisition", "seo"],
-      "design_focus": ["summary", "goal"],
-      "plan_focus": ["discovery", "phases"]
+      "signals": [
+        "sales",
+        "marketing",
+        "pricing",
+        "growth",
+        "acquisition",
+        "seo"
+      ],
+      "design_focus": [
+        "summary",
+        "goal"
+      ],
+      "plan_focus": [
+        "discovery",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "marketing_alpha",
       "category": "growth",
       "name": "Marketing Expert Alpha",
       "prompt": "You are MARKETING EXPERT ALPHA. Focus on brand positioning, viral loops, and aggressive user acquisition. Vigorously debate competing marketing plans and defend your approach.",
-      "signals": ["sales", "marketing", "pricing", "growth", "acquisition", "seo"],
-      "design_focus": ["summary", "goal"],
-      "plan_focus": ["discovery", "phases"]
+      "signals": [
+        "sales",
+        "marketing",
+        "pricing",
+        "growth",
+        "acquisition",
+        "seo"
+      ],
+      "design_focus": [
+        "summary",
+        "goal"
+      ],
+      "plan_focus": [
+        "discovery",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     },
     {
       "id": "marketing_beta",
       "category": "growth",
       "name": "Marketing Expert Beta",
       "prompt": "You are MARKETING EXPERT BETA. Focus on long-term SEO, content marketing, and community building. Challenge Marketing Alpha's short-term strategies and fight for a superior approach.",
-      "signals": ["sales", "marketing", "pricing", "growth", "acquisition", "seo"],
-      "design_focus": ["summary", "goal"],
-      "plan_focus": ["discovery", "phases"]
+      "signals": [
+        "sales",
+        "marketing",
+        "pricing",
+        "growth",
+        "acquisition",
+        "seo"
+      ],
+      "design_focus": [
+        "summary",
+        "goal"
+      ],
+      "plan_focus": [
+        "discovery",
+        "phases"
+      ],
+      "allowed_mcp_servers": []
     }
   ]
 }

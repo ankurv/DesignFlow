@@ -857,7 +857,7 @@ async def start_run(
             raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
 
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
-        personas, _, _ = state.workspace.parse_personas()
+        personas, _, _, _ = state.workspace.parse_personas()
         for i, (role, system_prompt) in enumerate(personas.items()):
             base_config = base_configs[i % len(base_configs)]
             expert = base_config.copy()
