@@ -314,10 +314,11 @@ class OpenAIAgent(AgentBase):
                 output_tokens=0,
             )
             
-        if "integrate.api.nvidia.com" in (self.config.base_url or ""):
+        # Use standard chat completions for custom/third-party OpenAI-compatible endpoints
+        if self.config.base_url and "api.openai.com" not in self.config.base_url:
             request_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
             kwargs = {
-                "model": self.config.model,
+                "model": self.config.model or "gpt-4o",
                 "messages": request_messages,
                 "max_tokens": self.config.extra.get("max_tokens", 2000),
             }
