@@ -81,6 +81,13 @@ def discover_models(config: AgentConfig) -> list[str]:
         return [config.model] if config.model else []
 
     models = _usable_model_ids(ids)
+    
+    if config.extra.get("prefer_free_models"):
+        def is_free(m: str) -> bool:
+            v = m.lower()
+            return any(x in v for x in (":free", "-free", "llama", "mistral", "mixtral", "gemma", "qwen", "phi", "deepseek"))
+        models.sort(key=lambda x: not is_free(x))
+        
     if config.model and config.model in models:
         models.remove(config.model)
         models.insert(0, config.model)
