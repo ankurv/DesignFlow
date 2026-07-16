@@ -1312,6 +1312,54 @@ def get_file(key: str, state: AppState = Depends(get_state)):
 class FileUpdateBody(BaseModel):
     content: str
 
+class ExportBody(BaseModel):
+    bundled_content: str
+    provider: str
+    model: str
+
+@app.post("/workspace/export")
+async def export_workspace(body: ExportBody, state: AppState = Depends(get_state)):
+    if not state.workspace:
+        raise HTTPException(404, "No active workspace")
+    
+    project_path = state.workspace.project_root
+    if not project_path.exists() or not project_path.is_dir():
+        raise HTTPException(400, "Project path does not exist")
+        
+    project_name = project_path.name or "project"
+    
+    try:
+        config = AgentConfig(provider=body.provider, model=body.model)
+        agent = create_agent(config)
+        prompt = (
+            "You are generating a strict set of agent supervision and architecture rules based on the following project plan.\n\n"
+            f"PROJECT PLAN:\n{body.bundled_content}\n\n"
+            f"Output ONLY the raw Markdown for an AGENTS.md file. It must start with '# Agent Guidelines for this Project'. "
+            f"Do not include markdown code block formatting (```markdown). "
+            f"Include rules for Architecture, Supervision & Feedback. Tell agents they must strictly follow '{project_name}.md'."
+        )
+        agents_md = await agent.generate(prompt)
+    except Exception as e:
+        # Fallback to a rigid template if LLM fails
+        agents_md = (
+            "# Agent Guidelines for this Project\n\n"
+            "## Architecture Rules\n"
+            f"- Please refer to `{project_name}.md` in this directory for the full architecture and implementation plan.\n"
+            f"- DO NOT deviate from the architecture outlined in `{project_name}.md` without explicitly asking the user for permission.\n"
+            f"- Update `{project_name}.md` if any fundamental design decisions change during implementation.\n\n"
+            "## Supervision & Feedback\n"
+            "- If a task requires significantly altering the core structure, you MUST stop and ask the user for explicit approval before proceeding.\n"
+            "- Before introducing any new third-party dependencies, you must justify it and ask the user."
+        )
+
+    plan_file = project_path / f"{project_name}.md"
+    plan_file.write_text(body.bundled_content, encoding="utf-8")
+    
+    agents_file = project_path / "AGENTS.md"
+    agents_file.write_text(agents_md, encoding="utf-8")
+    
+    return {"ok": True, "plan_file": str(plan_file), "agents_file": str(agents_file)}
+
 @app.post("/workspace/file/{key}")
 def update_file(key: str, body: FileUpdateBody, state: AppState = Depends(get_state)):
     if not state.workspace:

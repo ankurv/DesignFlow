@@ -1385,6 +1385,12 @@ function extractLiveInsights(ev) {
 }
 
 async function exportContext() {
+  const btn = document.getElementById('exportPlanBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Exporting...';
+  }
+
   try {
     const planRes = await fetch('/workspace/file/plan');
     const planData = planRes.ok ? await planRes.json() : {content: 'No PLAN.md found.'};
@@ -1394,15 +1400,6 @@ async function exportContext() {
     const decisionsData = decisionsRes.ok ? await decisionsRes.json() : {content: 'No DECISIONS.md found.'};
     const questionsRes = await fetch('/workspace/file/questions');
     const questionsData = questionsRes.ok ? await questionsRes.json() : {content: '(empty)'};
-    const wsRes = await fetch('/workspace');
-    const wsData = wsRes.ok ? await wsRes.json() : {root: 'project'};
-    
-    let projName = "project";
-    const pathStr = wsData.project_path || wsData.root;
-    if (pathStr) {
-        const parts = pathStr.split(/[/\\]/);
-        projName = parts[parts.length - 1] || "project";
-    }
     
     const unresolved = questionsData.content && questionsData.content.trim() !== '(empty)'
       ? `\n\n# Unresolved Questions\n\n${questionsData.content}`
@@ -1423,19 +1420,33 @@ ${planData.content}
 
 ${decisionsData.content}${unresolved}`;
     
-    const blob = new Blob([bundled], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${projName}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    
-    alert(`Planning baseline bundled and downloaded as ${projName}.md!`);
+    const provider = document.getElementById('providerSelect')?.value || 'anthropic';
+    const model = document.getElementById('modelSelect')?.value || 'claude-3-7-sonnet-20250219';
+
+    const res = await fetch('/workspace/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bundled_content: bundled,
+        provider: provider,
+        model: model
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(err);
+    }
+
+    const data = await res.json();
+    alert(`Planning baseline successfully exported directly to your project folder!\n\nPlan: ${data.plan_file}\nRules: ${data.agents_file}`);
   } catch (e) {
-    alert('Failed to export context: ' + e.message);
+    alert('Failed to export plan: ' + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerText = 'Export Plan';
+    }
   }
 }
 

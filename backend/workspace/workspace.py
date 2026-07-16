@@ -649,10 +649,19 @@ class Workspace:
     def _project_files(self, context_only: bool = False):
         if not self.project_root.exists():
             return
+        
+        project_name = self.project_root.name or "project"
+        excluded_files = {"AGENTS.md", f"{project_name}.md"}
+        
         count = 0
         for path in sorted(self.project_root.rglob("*")):
             if not path.is_file():
                 continue
+            
+            # Skip dynamically exported design plans
+            if path.parent == self.project_root and path.name in excluded_files:
+                continue
+                
             relative = path.relative_to(self.project_root)
             if any(part in self.EXCLUDED_PARTS for part in relative.parts):
                 continue
