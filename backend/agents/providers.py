@@ -38,6 +38,11 @@ def discover_models(config: AgentConfig) -> list[str]:
         kwargs = {"api_key": key} if key else {}
         if config.base_url:
             kwargs["base_url"] = config.base_url
+            if "openrouter.ai" in config.base_url:
+                kwargs["default_headers"] = {
+                    "HTTP-Referer": "http://localhost:8000",
+                    "X-Title": "DesignFlow"
+                }
         models = openai.OpenAI(**kwargs).models.list()
         ids = [item.id for item in models.data]
     elif kind == "groq":
@@ -223,6 +228,11 @@ class OpenAIAgent(AgentBase):
             kwargs["api_key"] = key
         if base_url:
             kwargs["base_url"] = base_url
+            if "openrouter.ai" in base_url:
+                kwargs["default_headers"] = {
+                    "HTTP-Referer": "http://localhost:8000",
+                    "X-Title": "DesignFlow"
+                }
             
         self._client = openai.OpenAI(**kwargs)
 

@@ -188,6 +188,7 @@ function detectProviderFromKey(key) {
   if (value.startsWith('gsk_')) return {kind:'groq', label:'Groq', baseUrl:''};
   if (value.startsWith('AIza')) return {kind:'gemini', label:'Google Gemini', baseUrl:''};
   if (value.startsWith('sk-ant-')) return {kind:'claude', label:'Anthropic', baseUrl:''};
+  if (value.startsWith('sk-or-v1-')) return {kind:'openai', label:'OpenRouter', baseUrl:'https://openrouter.ai/api/v1'};
   if (value.startsWith('sk-')) return {kind:'openai', label:'OpenAI', baseUrl:''};
   return null;
 }
