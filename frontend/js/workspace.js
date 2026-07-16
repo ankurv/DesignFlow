@@ -328,7 +328,8 @@ async function loadWsFile(key) {
           : '<div style="color:var(--muted);font-style:italic;">No key decisions captured yet. Ask the team to maintain DECISIONS.md as it debates trade-offs.</div>';
       }
       
-      const mermaidMatches = [...designContent.matchAll(/```mermaid\n([\s\S]*?)```/g)];
+      const combinedForMermaid = designContent + '\n\n' + (planRes.content || '');
+      const mermaidMatches = [...combinedForMermaid.matchAll(/```mermaid\n([\s\S]*?)```/g)];
       
       if (diagramsContainer && mapContainer) {
         mapContainer.style.display = 'flex';
