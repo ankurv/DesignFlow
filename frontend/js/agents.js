@@ -512,7 +512,10 @@ function renderMCPServers() {
   container.innerHTML = mcpServers.map(s => `
     <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:6px; padding:12px; display:flex; justify-content:space-between; align-items:center;">
       <div>
-        <div style="font-weight:600; font-size:14px">${escHtml(s.name)}</div>
+        <div style="font-weight:600; font-size:14px">
+          ${escHtml(s.name)}
+          ${s.username || s.password ? '<span style="font-size:10px; padding:2px 4px; background:var(--bg3); border-radius:4px; margin-left:6px;" title="Authenticated">🔒 Auth</span>' : ''}
+        </div>
         <div style="font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:4px;">
           ${escHtml(s.command)} ${escHtml((s.args||[]).join(' '))}
         </div>
@@ -527,6 +530,8 @@ async function addMCPServer() {
   const command = document.getElementById('mcpCommand').value.trim();
   const argsRaw = document.getElementById('mcpArgs').value.trim();
   const envRaw = document.getElementById('mcpEnv').value.trim();
+  const username = document.getElementById('mcpUsername').value.trim();
+  const password = document.getElementById('mcpPassword').value.trim();
   
   if (!name || !command) {
     notify('Name and command are required.', true);
@@ -545,7 +550,7 @@ async function addMCPServer() {
   const res = await fetch('/mcp', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, command, args, env })
+    body: JSON.stringify({ name, command, args, env, username, password })
   });
   
   if (res.ok) {
@@ -553,6 +558,8 @@ async function addMCPServer() {
     document.getElementById('mcpCommand').value = '';
     document.getElementById('mcpArgs').value = '';
     document.getElementById('mcpEnv').value = '';
+    document.getElementById('mcpUsername').value = '';
+    document.getElementById('mcpPassword').value = '';
     const form = document.getElementById('mcpAddForm');
     if (form) form.style.display = 'none';
     notify('MCP server added');

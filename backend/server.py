@@ -1265,6 +1265,8 @@ class MCPServerIn(BaseModel):
     command: str
     args: list[str] = []
     env: dict = {}
+    username: str = ""
+    password: str = ""
 
 @app.get("/mcp")
 def get_mcp_servers(state: AppState = Depends(get_state)):
@@ -1277,7 +1279,7 @@ def add_mcp_server(body: MCPServerIn, state: AppState = Depends(get_state)):
     if not state.store:
         raise HTTPException(400, "No active workspace")
     server_id = hashlib.md5(f"{body.name}{datetime.now().isoformat()}".encode()).hexdigest()[:8]
-    state.store.add_mcp_server(server_id, body.name, body.command, body.args, body.env)
+    state.store.add_mcp_server(server_id, body.name, body.command, body.args, body.env, body.username, body.password)
     return {"ok": True, "id": server_id}
 
 @app.delete("/mcp/{server_id}")

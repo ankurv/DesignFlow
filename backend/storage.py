@@ -73,7 +73,9 @@ class ProjectStore:
                     name TEXT NOT NULL,
                     command TEXT NOT NULL,
                     args_json TEXT NOT NULL DEFAULT '[]',
-                    env_json TEXT NOT NULL DEFAULT '{}'
+                    env_json TEXT NOT NULL DEFAULT '{}',
+                    username TEXT NOT NULL DEFAULT '',
+                    password TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS key_value (
                     key TEXT PRIMARY KEY,
@@ -157,6 +159,7 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE decisions ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''")
             if "raw_markdown" not in decision_columns:
                 self._db.execute("ALTER TABLE decisions ADD COLUMN raw_markdown TEXT NOT NULL DEFAULT ''")
+            
             self._backfill_checkpoint_decisions()
 
     def _backfill_checkpoint_decisions(self):
@@ -571,12 +574,12 @@ class ProjectStore:
             result.append(item)
         return result
 
-    def add_mcp_server(self, server_id: str, name: str, command: str, args: list[str], env: dict):
+    def add_mcp_server(self, server_id: str, name: str, command: str, args: list[str], env: dict, username: str = "", password: str = ""):
         with self._lock, self._db:
             self._db.execute(
-                """INSERT OR REPLACE INTO mcp_servers (id, name, command, args_json, env_json)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (server_id, name, command, json.dumps(args), json.dumps(env))
+                """INSERT OR REPLACE INTO mcp_servers (id, name, command, args_json, env_json, username, password)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (server_id, name, command, json.dumps(args), json.dumps(env), username, password)
             )
 
     def delete_mcp_server(self, server_id: str):

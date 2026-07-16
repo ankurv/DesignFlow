@@ -320,7 +320,10 @@
           <input type="text" id="mcpCommand" placeholder="Command or SSE URL (e.g. npx or http://localhost:8000/sse)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
           <input type="text" id="mcpArgs" placeholder="Arguments (comma separated, e.g. -y,@modelcontextprotocol/server-filesystem,/Users)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
           <input type="text" id="mcpEnv" placeholder="Env Vars (key=value,key2=value2)" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
-          <button class="btn btn-primary" style="align-self:flex-start;" onclick="addMCPServer()">Save Server</button>
+          <div style="font-size:12px; font-weight:600; margin-top:8px;">Remote SSE Auth (Optional)</div>
+          <input type="text" id="mcpUsername" placeholder="Username" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <input type="password" id="mcpPassword" placeholder="Password" class="input-modern" autocomplete="off" data-lpignore="true" style="width:100%">
+          <button class="btn btn-primary" style="align-self:flex-start; margin-top:8px;" onclick="addMCPServer()">Save Server</button>
         </div>
       </div>
     </div>

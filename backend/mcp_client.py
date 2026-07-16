@@ -3,6 +3,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
+import httpx
 
 class MCPManager:
     """Manages connections to multiple MCP stdio servers and namespaces their tools."""
@@ -17,7 +18,10 @@ class MCPManager:
             cmd = conf["command"]
             try:
                 if cmd.startswith("http://") or cmd.startswith("https://"):
-                    ctx = sse_client(cmd)
+                    username = conf.get("username", "")
+                    password = conf.get("password", "")
+                    auth = httpx.BasicAuth(username, password) if username or password else None
+                    ctx = sse_client(cmd, auth=auth)
                 else:
                     server_params = StdioServerParameters(
                         command=cmd,
