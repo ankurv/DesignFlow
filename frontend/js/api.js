@@ -12,12 +12,22 @@ window.fetch = async function(...args) {
         if (args.length === 1) args.push({ headers: {'X-DesignFlow-Session': tabSession}, credentials: 'same-origin' });
         else args[1].headers = {...(args[1].headers || {}), 'X-DesignFlow-Session': tabSession};
     }
-    const response = await originalFetch(...args);
-    if (response.status === 401 || response.status === 403) {
+    try {
+        const response = await originalFetch(...args);
+        if (response.status === 401 || response.status === 403) {
+            document.getElementById('loginModal').style.display = 'flex';
+        }
+        return response;
+    } catch (error) {
+        // A TypeError here typically means a network error (server is down or killed)
         document.getElementById('loginModal').style.display = 'flex';
-        // We do not set loginError here because a 401 on initial load is expected and isn't an "error" the user made.
+        const errElem = document.getElementById('loginError');
+        if (errElem) {
+            errElem.textContent = "Server is unreachable. Please restart the backend server.";
+            errElem.style.display = 'block';
+        }
+        throw error;
     }
-    return response;
 };
 
 async function submitLogin() {
@@ -1621,13 +1631,18 @@ async function shutdownServer() {
     try {
       const res = await fetch('/admin/shutdown', { method: 'POST' });
       if (res.ok) {
-        alert("Server is shutting down.");
+        document.getElementById('loginModal').style.display = 'flex';
+        const errElem = document.getElementById('loginError');
+        if (errElem) {
+            errElem.textContent = "Server has been shut down.";
+            errElem.style.display = 'block';
+        }
       } else {
         const text = await res.text();
         alert("Failed to shut down: " + text);
       }
     } catch (e) {
-      alert("Error shutting down: " + e.message);
+      // The fetch interceptor already handles network errors and shows the login screen
     }
   }
 }
