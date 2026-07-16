@@ -554,6 +554,38 @@
         "phases"
       ],
       "allowed_mcp_servers": []
+    },
+    {
+      "id": "release_manager",
+      "category": "operations",
+      "name": "Release Manager",
+      "prompt": "You are the RELEASE MANAGER. Focus on enterprise release planning, versioning strategies, multi-environment rollout plans (Alpha, Beta, RC, GA), and distribution logistics (on-premise vs SaaS). Plan change management, rollback procedures, and compliance/release documentation.",
+      "signals": [
+        "release",
+        "distribution",
+        "enterprise",
+        "version",
+        "rollout",
+        "compliance",
+        "publish",
+        "deploy",
+        "package"
+      ],
+      "design_focus": [
+        "deployment",
+        "compliance",
+        "architecture",
+        "scope"
+      ],
+      "plan_focus": [
+        "phases",
+        "deployment",
+        "operations",
+        "discovery"
+      ],
+      "allowed_mcp_servers": [
+        "*"
+      ]
     }
   ]
 }
