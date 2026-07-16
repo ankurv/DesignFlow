@@ -46,7 +46,7 @@ class Workspace:
     EXCLUDED_PARTS = {
         ".designflow", ".git", ".hg", ".svn", "node_modules", "vendor",
         ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-        "dist", "build",
+        "dist", "build", "artifact_history",
     }
     MAX_CONTEXT_FILE_BYTES = 512_000
     MAX_CONTEXT_FILES = 300
@@ -219,6 +219,63 @@ class Workspace:
         self._file(key).write_text(content)
         if key in self.FILES or key == "questions":
             self.refresh_context()
+
+    def _archive_artifact(self, key: str, content: str) -> None:
+        if not content or content == "(empty)":
+            return
+        archive = self.root / "artifact_history" / key
+        archive.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        digest = self._md5(content)[:10]
+        (archive / f"{timestamp}-{digest}.md").write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _markdown_h2_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
+        matches = list(re.finditer(r"(?m)^#{2,3}\s+(.+?)\s*$", content or ""))
+        if not matches:
+            return (content or "").strip(), []
+        preamble = (content or "")[:matches[0].start()].strip()
+        sections = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+            sections.append((match.group(1).strip(), content[match.start():end].strip()))
+        return preamble, sections
+
+    def merge_artifact_update(self, key: str, update: str, title: str) -> tuple[bool, str]:
+        """Merge model updates by H2 section and preserve prior unmatched content."""
+        current = self.read(key)
+        substantive = re.sub(r"(?m)^#{1,6}\s+.*$|^\*\*(?:Idea|Started):\*\*.*$", "", current)
+        substantive = re.sub(r"<!--[\s\S]*?-->", "", substantive).strip()
+        if current == "(empty)" or not substantive:
+            self.write(key, f"# {title}\n\n{update.strip()}\n")
+            return True, "created"
+
+        _, incoming = self._markdown_h2_sections(update)
+        if not incoming:
+            return False, (
+                f"Rejected {key.upper()}.md replacement because it contained no `##` sections. "
+                "Return sectioned updates so existing project detail can be preserved."
+            )
+
+        preamble, existing = self._markdown_h2_sections(current)
+        if not existing:
+            return False, f"Rejected {key.upper()}.md update because the existing document cannot be safely section-merged."
+
+        incoming_by_heading = {heading.casefold(): body for heading, body in incoming}
+        merged = []
+        consumed = set()
+        for heading, body in existing:
+            lookup = heading.casefold()
+            if lookup in incoming_by_heading:
+                merged.append(incoming_by_heading[lookup])
+                consumed.add(lookup)
+            else:
+                merged.append(body)
+        merged.extend(body for heading, body in incoming if heading.casefold() not in consumed)
+        result = "\n\n".join(filter(None, (preamble or f"# {title}", *merged))).rstrip() + "\n"
+        self._archive_artifact(key, current)
+        self.write(key, result)
+        return True, "merged"
 
     def clear_questions(self):
         path = self._file("questions")

@@ -1786,18 +1786,27 @@ class Orchestrator:
 
         plan_update = self.ws.parse_section(response, "PLAN_UPDATE")
         if plan_update:
-            self.ws.write("plan", f"# Plan\n\n{plan_update}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
+            written, reason = self.ws.merge_artifact_update("plan", plan_update, "Plan")
+            if written:
+                self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
+            else:
+                self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
 
         decisions_update = self.ws.parse_section(response, "DECISIONS_UPDATE")
         if decisions_update:
-            self.ws.write("decisions", f"# Key Decisions\n\n{decisions_update}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
+            written, reason = self.ws.merge_artifact_update("decisions", decisions_update, "Key Decisions")
+            if written:
+                self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
+            else:
+                self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
 
         design_update = self.ws.parse_section(response, "DESIGN_UPDATE")
         if design_update:
-            self.ws.write("design", f"# Architecture Design\n\n{design_update}")
-            self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
+            written, reason = self.ws.merge_artifact_update("design", design_update, "Architecture Design")
+            if written:
+                self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
+            else:
+                self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
 
         design_bit = self.ws.parse_section(response, "DESIGN_APPEND")
         if design_bit:

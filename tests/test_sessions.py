@@ -533,6 +533,40 @@ class ProductCapabilityCatalogTests(unittest.TestCase):
             self.assertIn("commerce.payments", context)
 
 
+class ArtifactMergeSafetyTests(unittest.TestCase):
+    def test_section_update_preserves_unmentioned_existing_sections_and_archives_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write("design", "# Design\n\n## Architecture\nOld architecture.\n\n## Security\nKeep this detail.\n")
+            written, mode = workspace.merge_artifact_update(
+                "design", "## Architecture\nUpdated architecture.\n\n## Operations\nNew operations.", "Architecture Design",
+            )
+            self.assertTrue(written)
+            self.assertEqual(mode, "merged")
+            result = workspace.read("design")
+            self.assertIn("Updated architecture", result)
+            self.assertNotIn("Old architecture", result)
+            self.assertIn("Keep this detail", result)
+            self.assertIn("New operations", result)
+            revisions = list((workspace.root / "artifact_history" / "design").glob("*.md"))
+            self.assertEqual(len(revisions), 1)
+            self.assertIn("Old architecture", revisions[0].read_text())
+
+    def test_unsectioned_model_update_cannot_replace_existing_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            original = "# Design\n\n## Architecture\nDetailed existing architecture.\n"
+            workspace.write("design", original)
+            written, reason = workspace.merge_artifact_update(
+                "design", "A short generic replacement with no sections.", "Architecture Design",
+            )
+            self.assertFalse(written)
+            self.assertIn("no `##` sections", reason)
+            self.assertEqual(workspace.read("design"), original)
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self):
         import backend.auth
