@@ -133,7 +133,10 @@ class ClaudeAgent(AgentBase):
                     "input_schema": t["inputSchema"],
                 })
 
-        while True:
+        iterations = 0
+        while iterations < 10:
+            iterations += 1
+            
             kwargs = {
                 "model": self.config.model or "claude-sonnet-4-6",
                 "max_tokens": self.config.extra.get("max_tokens", 2000),
@@ -191,6 +194,12 @@ class ClaudeAgent(AgentBase):
                     output_tokens=total_output,
                 )
                 return "\n".join(text_content), usage
+                
+        return "Error: Agent exceeded maximum tool execution limit.", Usage(
+            input_tokens=total_input,
+            cached_input_tokens=total_cached,
+            output_tokens=total_output,
+        )
 
 
 class OpenAIAgent(AgentBase):
@@ -239,17 +248,18 @@ class OpenAIAgent(AgentBase):
                     }
                 })
                 
-        if "integrate.api.nvidia.com" in (self.config.base_url or ""):
+        if tools:
             request_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
             
-            while True:
+            iterations = 0
+            while iterations < 10:
+                iterations += 1
                 kwargs = {
                     "model": self.config.model,
                     "messages": request_messages,
                     "max_tokens": self.config.extra.get("max_tokens", 2000),
+                    "tools": tools,
                 }
-                if tools:
-                    kwargs["tools"] = tools
                     
                 response = self._client.chat.completions.create(**kwargs)
                 raw = response.usage
@@ -281,6 +291,25 @@ class OpenAIAgent(AgentBase):
                         input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
                         output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
                     )
+                    
+            return "Error: Agent exceeded maximum tool execution limit.", Usage(
+                input_tokens=0,
+                output_tokens=0,
+            )
+            
+        if "integrate.api.nvidia.com" in (self.config.base_url or ""):
+            request_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
+            kwargs = {
+                "model": self.config.model,
+                "messages": request_messages,
+                "max_tokens": self.config.extra.get("max_tokens", 2000),
+            }
+            response = self._client.chat.completions.create(**kwargs)
+            raw = response.usage
+            return response.choices[0].message.content or "", Usage(
+                input_tokens=int(getattr(raw, "prompt_tokens", 0) or 0),
+                output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+            )
 
         kwargs = {
             "model": self.config.model or "gpt-4o",
@@ -291,8 +320,6 @@ class OpenAIAgent(AgentBase):
             "store": True,
             "prompt_cache_key": f"designflow-{self._session_id}",
         }
-        if tools:
-            kwargs["tools"] = tools
             
         compact_threshold = int(self.config.extra.get("compact_threshold", 0) or 0)
         if compact_threshold:
@@ -301,8 +328,6 @@ class OpenAIAgent(AgentBase):
                 "compact_threshold": compact_threshold,
             }]
             
-        # The responses API currently doesn't easily support iterative tool calling in this tight loop
-        # so we will just invoke it natively and let the user handle it or ignore tools for this specific beta API
         response = self._client.responses.create(**kwargs)
         self._response_id = response.id
         raw = response.usage
@@ -365,7 +390,9 @@ class GroqAgent(AgentBase):
         total_cached = 0
         total_output = 0
 
-        while True:
+        iterations = 0
+        while iterations < 10:
+            iterations += 1
             request = {
                 "model": self.config.model or "llama-3.3-70b-versatile",
                 "messages": groq_messages,
@@ -413,6 +440,12 @@ class GroqAgent(AgentBase):
                     output_tokens=total_output,
                 )
                 return msg.content or "", usage
+        
+        return "Error: Agent exceeded maximum tool execution limit.", Usage(
+            input_tokens=total_input,
+            cached_input_tokens=total_cached,
+            output_tokens=total_output,
+        )
 
 
 class GeminiAgent(AgentBase):

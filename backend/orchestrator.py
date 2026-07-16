@@ -1516,13 +1516,14 @@ class Orchestrator:
         }))
         while self._running:
             try:
+                main_loop = asyncio.get_running_loop()
                 def call_mcp_tool(name: str, args: dict) -> str:
                     # Execute async MCP tool call in the main thread's event loop
                     if not self.mcp_manager:
                         raise RuntimeError("MCP Manager not initialized")
                     future = asyncio.run_coroutine_threadsafe(
                         self.mcp_manager.call_tool(name, args),
-                        asyncio.get_running_loop()
+                        main_loop
                     )
                     return future.result()
                     

@@ -948,6 +948,9 @@ async def start_run(
                 )
                 state.workspace.finish_logbook_run(state.run_id, "error", agent_states)
                 state.store.clear_run_state()
+        finally:
+            if state.orchestrator:
+                state.orchestrator.stop()
 
     state.run_task = asyncio.create_task(run_and_update())
     idea_source = "saved_run" if resumes_saved_run else ("prompt" if body.idea.strip() else "DESIGNFLOW.md")
