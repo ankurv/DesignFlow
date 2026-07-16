@@ -658,8 +658,8 @@ class Workspace:
             if not path.is_file():
                 continue
             
-            # Skip dynamically exported design plans
-            if path.parent == self.project_root and path.name in excluded_files:
+            # Skip dynamically exported design plans from context only
+            if context_only and path.parent == self.project_root and path.name in excluded_files:
                 continue
                 
             relative = path.relative_to(self.project_root)
