@@ -1440,6 +1440,7 @@ ${decisionsData.content}${unresolved}`;
 
     const data = await res.json();
     alert(`Planning baseline successfully exported directly to your project folder!\n\nPlan: ${data.plan_file}\nRules: ${data.agents_file}`);
+    await updateWorkspaceInfo();
   } catch (e) {
     alert('Failed to export plan: ' + e.message);
   } finally {
