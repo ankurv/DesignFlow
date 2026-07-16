@@ -1332,26 +1332,40 @@ async def export_workspace(body: ExportBody, state: AppState = Depends(get_state
         config = AgentConfig(provider=body.provider, model=body.model)
         agent = create_agent(config)
         prompt = (
-            "You are generating a strict set of agent supervision and architecture rules based on the following project plan.\n\n"
+            "You are an elite Enterprise Software Architect defining the operational rules for autonomous coding agents (like Google Antigravity or Codex) working on this codebase.\n\n"
+            "Based on the following project plan, generate a highly comprehensive, strict set of guidelines that the agents MUST follow. "
+            "These guidelines must enforce enterprise-grade development standards, proactive problem solving, and strict architectural compliance.\n\n"
             f"PROJECT PLAN:\n{body.bundled_content}\n\n"
-            f"Output ONLY the raw Markdown for an AGENTS.md file. It must start with '# Agent Guidelines for this Project'. "
-            f"Do not include markdown code block formatting (```markdown). "
-            f"Include rules for Architecture, Supervision & Feedback. Tell agents they must strictly follow '{project_name}.md'."
+            f"INSTRUCTIONS FOR THE OUTPUT (AGENTS.md):\n"
+            f"1. Output ONLY the raw Markdown. Start exactly with '# Agent Guidelines for this Project'. Do NOT wrap in ```markdown.\n"
+            f"2. Strict Architecture Adherence: Explicitly mandate that agents must strictly follow `{project_name}.md` as the absolute source of truth. Any deviation requires explicit user approval.\n"
+            f"3. Task Evaluation & Proactive Recommendations: Instruct agents to ALWAYS evaluate user requests for edge cases, performance implications, and architectural fit before writing code. They must proactively suggest superior implementation paths if the user's request is suboptimal or unsafe.\n"
+            f"4. Code Quality & Best Practices: Include rules for defensive programming, comprehensive error handling, modularity, DRY principles, and avoiding regression bugs.\n"
+            f"5. Testing & Validation: Require agents to proactively verify their changes (e.g., via unit tests, build commands, or manual UI checks) before concluding a task.\n"
+            f"6. Knowledge Items (KIs): Instruct agents that if they are provided with Knowledge Items or historical artifacts, they MUST review them BEFORE independent research.\n"
         )
         agents_md = await agent.generate(prompt)
     except Exception as e:
         # Fallback to a rigid template if LLM fails
         agents_md = (
             "# Agent Guidelines for this Project\n\n"
-            "## Architecture Rules\n"
-            f"- Please refer to `{project_name}.md` in this directory for the full architecture and implementation plan.\n"
-            f"- DO NOT deviate from the architecture outlined in `{project_name}.md` without explicitly asking the user for permission.\n"
-            f"- Update `{project_name}.md` if any fundamental design decisions change during implementation.\n\n"
-            "## Supervision & Feedback\n"
-            "- If a task requires significantly altering the core structure, you MUST stop and ask the user for explicit approval before proceeding.\n"
-            "- Before introducing any new third-party dependencies, you must justify it and ask the user."
+            "## 1. Strict Architecture Adherence\n"
+            f"- **Source of Truth**: You MUST refer to `{project_name}.md` in this directory for the full architecture, tech stack, and implementation plan.\n"
+            f"- **No Unauthorized Deviations**: DO NOT deviate from the architecture outlined in `{project_name}.md` without explicitly asking the user for permission.\n"
+            f"- **Documentation Updates**: If a fundamental design decision changes during implementation with user approval, proactively update `{project_name}.md` to reflect the new state.\n\n"
+            "## 2. Task Evaluation & Proactive Recommendations\n"
+            "- **Evaluate Before Acting**: For every task, analyze if the requested change makes sense within the existing repository structure and architecture.\n"
+            "- **Identify Risks**: Actively look for edge cases, bugs, or performance implications in the user's request.\n"
+            "- **Suggest Better Alternatives**: Always suggest alternative approaches, design improvements, or cleaner implementation patterns if a better solution is available. Do not simply execute the task verbatim if a superior path exists.\n\n"
+            "## 3. Code Quality & Enterprise Best Practices\n"
+            "- **Defensive Programming**: Write robust code with comprehensive error handling and logging.\n"
+            "- **Modularity**: Keep functions small, focused, and decoupled. Avoid monolithic files.\n"
+            "- **Clean Code**: Adhere to language-specific best practices, strict type-checking, and maintainability standards.\n\n"
+            "## 4. Testing & Validation\n"
+            "- **Verify Work**: Do not blindly commit code. Proactively verify that your changes compile, pass tests, and achieve the desired outcome before concluding your task.\n\n"
+            "## 5. Knowledge Items (KI) Usage\n"
+            "- **Check Context First**: If you receive Knowledge Items (KIs) or summaries at the start of a conversation, you MUST read the relevant KI artifacts before performing independent research or writing code to ensure you follow established project patterns.\n"
         )
-
     plan_file = project_path / f"{project_name}.md"
     plan_file.write_text(body.bundled_content, encoding="utf-8")
     
