@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict
 
 USERS_PATH = Path.home() / ".designflow" / "users.json"
+SESSIONS_PATH = Path.home() / ".designflow" / "sessions.json"
 
 @dataclass
 class User:
@@ -20,10 +21,32 @@ class Session:
     username: str
     role: str
 
+    def to_dict(self):
+        return {"session_id": self.session_id, "username": self.username, "role": self.role}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(session_id=data["session_id"], username=data["username"], role=data["role"])
+
 class AuthManager:
     def __init__(self):
         self.sessions: Dict[str, Session] = {}
         self._init_db()
+        self._load_sessions()
+
+    def _load_sessions(self):
+        try:
+            data = json.loads(SESSIONS_PATH.read_text())
+            for sid, sdata in data.items():
+                self.sessions[sid] = Session.from_dict(sdata)
+        except Exception:
+            self.sessions = {}
+
+    def _save_sessions(self):
+        try:
+            SESSIONS_PATH.write_text(json.dumps({sid: s.to_dict() for sid, s in self.sessions.items()}, indent=2))
+        except Exception:
+            pass
 
     def _init_db(self):
         USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +96,7 @@ class AuthManager:
         session_id = secrets.token_urlsafe(32)
         session = Session(session_id=session_id, username=username, role=user_data["role"])
         self.sessions[session_id] = session
+        self._save_sessions()
         return session
 
     def get_session(self, session_id: str) -> Optional[Session]:
@@ -81,6 +105,7 @@ class AuthManager:
     def logout(self, session_id: str):
         if session_id in self.sessions:
             del self.sessions[session_id]
+            self._save_sessions()
 
 
     def add_user(self, username: str, password: str, role: str) -> bool:
