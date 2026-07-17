@@ -1,21 +1,21 @@
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
   :root {
-    /* Premium High-Contrast Dark Palette */
-    --bg:       #09090b;       /* Zinc-950 base */
-    --bg2:      #18181b;       /* Zinc-900 elevated */
-    --bg3:      #27272a;       /* Zinc-800 elevated */
-    --border:   #3f3f46;       /* Zinc-700 borders */
-    --border2:  #52525b;       /* Zinc-600 borders */
-    --text:     #fafafa;       /* Zinc-50 bright text */
-    --text-muted: #d4d4d8;     /* Zinc-300 secondary text (was too dim/blue) */
-    --muted:    #a1a1aa;       /* Zinc-400 tertiary text/icons */
+    /* Soft, Matte Slate Palette (Glare-Free) */
+    --bg:       #0f172a;       /* Slate-900 (Matte, comfortable dark blue-grey) */
+    --bg2:      #1e293b;       /* Slate-800 */
+    --bg3:      #334155;       /* Slate-700 */
+    --border:   #334155;       /* Slate-700 */
+    --border2:  #475569;       /* Slate-600 */
+    --text:     #e2e8f0;       /* Slate-200 (Soft off-white, no glare) */
+    --text-muted: #94a3b8;     /* Slate-400 (Very readable but muted) */
+    --muted:    #64748b;       /* Slate-500 */
     
     --accent:   #818cf8;       /* Indigo-400 */
-    --accent-button: #6366f1;  /* Indigo-500 button */
-    --accent-hover: #4f46e5;   /* Indigo-600 */
-    --accent-glow: rgba(99, 102, 241, 0.16);
-    --accent2:  #a5b4fc;       /* Indigo-300 */
+    --accent-button: #4f46e5;  /* Indigo-600 (Softer, deeper button) */
+    --accent-hover: #4338ca;   /* Indigo-700 */
+    --accent-glow: rgba(99, 102, 241, 0.05); /* Reduced glow opacity */
+    --accent2:  #a5b4fc;       
     
     --green:    #10b981;
     --yellow:   #f59e0b;
@@ -28,7 +28,7 @@
     --heading-font: var(--font);
     --mono:     'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
     
-    /* Bumped font sizes for dramatically improved readability */
+    /* Font sizes for comfortable reading */
     --fs-2xs:   11px;
     --fs-xs:    12px;
     --fs-sm:    13px;
@@ -41,8 +41,8 @@
   
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { font-family: var(--font); }
-  /* Sleek, deep radial gradient that doesn't wash out the contrast */
-  body { background: radial-gradient(circle at top right, #1c1c24 0%, var(--bg) 40%, #050505 100%); color: var(--text); font-family: inherit;
+  /* Flat, soft, glare-free background */
+  body { background: var(--bg); color: var(--text); font-family: inherit;
          font-size: var(--fs-lg); line-height: 1.6; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
   button, input, textarea, select, option { font: inherit; }
 
