@@ -126,6 +126,21 @@ class StructuredCheckpointTests(unittest.TestCase):
             self.assertEqual(run["outcome"], outcome)
             store.close()
 
+    def test_recent_activity_reads_only_a_small_chronological_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("tail", "Build it")
+            for index in range(12):
+                store.append_event("tail", {
+                    "kind": "turn_end", "agent": "agent",
+                    "timestamp": f"2026-01-01T00:00:{index:02d}Z",
+                    "data": {"response": f"message-{index}"},
+                })
+            tail = store.recent_run_activity("tail", limit=5)
+            self.assertEqual([item["data"]["response"] for item in tail],
+                             [f"message-{index}" for index in range(7, 12)])
+            store.close()
+
     def test_startup_reconciles_abandoned_database_run(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ProjectStore(Path(directory))
@@ -730,6 +745,108 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
 
 
 class SessionTests(unittest.TestCase):
+    def test_recent_activity_api_marks_paused_provider_failure_as_resumable(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            state.configs = [{
+                "id": "provider-a", "name": "gemini-1", "kind": "gemini", "model": "default",
+                "api_key": "", "base_url": "", "cli_command": "", "role": "", "system_prompt": "",
+                "max_history_turns": 20, "is_paused": True, "extra": {},
+            }]
+            state.persist_agents()
+            state.store.start_run("interrupted-1", "Continue design")
+            state.store.append_event("interrupted-1", {
+                "timestamp": "2026-01-01T00:00:00Z", "kind": "error", "agent": "researcher",
+                "data": {"error": "quota", "error_code": "quota_exhausted", "recoverable": True,
+                         "provider_agent": "gemini-1"},
+            })
+            state.store.save_run_state({"run_id": "interrupted-1", "idea": "Continue design"})
+            state.store.finish_run("interrupted-1", "interrupted", [])
+            state.run_id = ""
+
+            response = client.get("/run/recent-activity?limit=8")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["resumable"])
+            self.assertEqual(payload["run_id"], "interrupted-1")
+            self.assertTrue(payload["events"][-1]["data"]["restart_recovery"])
+            self.assertTrue(payload["events"][-1]["data"]["provider_paused"])
+        client.post("/auth/logout")
+
+    def test_checkpoint_answer_api_signals_resume_after_restart(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            state.run_id = "checkpoint-run"
+            state.store.start_run(state.run_id, "Choose")
+            checkpoint = state.store.enqueue_checkpoint(
+                state.run_id, "discovery", "Choose deployment", "Changes security scope",
+                [{"label": "A", "summary": "Local", "recommended": True}],
+            )
+            state.orchestrator = None
+
+            response = client.post(
+                f"/run/checkpoint/{checkpoint['id']}/answer",
+                json={"option_id": checkpoint["options"][0]["id"], "custom_answer": ""},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["requires_resume"])
+            self.assertIsNone(response.json()["next_checkpoint"])
+        client.post("/auth/logout")
+
+    def test_pause_then_auto_failover_api_does_not_reassign_twice_or_reexpose_failure(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            configs = [
+                {"id": "provider-a", "name": "quota", "kind": "openai", "model": "a", "api_key": "x",
+                 "base_url": "", "cli_command": "", "role": "", "system_prompt": "", "max_history_turns": 20,
+                 "is_paused": False, "extra": {}},
+                {"id": "provider-b", "name": "healthy", "kind": "openai", "model": "b", "api_key": "x",
+                 "base_url": "", "cli_command": "", "role": "", "system_prompt": "", "max_history_turns": 20,
+                 "is_paused": False, "extra": {}},
+            ]
+            state.configs = configs
+            state.persist_agents()
+            logical = StatefulFake(AgentConfig(
+                id="logical-1", base_id="provider-a", name="researcher", kind="openai", model="a",
+            ))
+            orchestrator = Orchestrator([logical], state.workspace, store=state.store, run_id="failover-run")
+            orchestrator._running = True
+            orchestrator._failed_turn = {
+                "turn_id": "turn-1", "agent_id": "logical-1", "provider_id": "provider-a",
+                "agent": "researcher", "error_code": "quota_exhausted", "public_error": "quota",
+                "prompt": "continue", "recovery_options": ["auto_failover", "wait_and_retry", "stop"],
+            }
+            state.orchestrator = orchestrator
+            state.status = "needs_attention"
+
+            paused = dict(configs[0], is_paused=True)
+            self.assertEqual(client.put("/agents/provider-a", json=paused).status_code, 200)
+            self.assertEqual(orchestrator.agents[0].config.base_id, "provider-b")
+            response = client.post("/run/recover-provider", json={"action": "auto_failover"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["provider_id"], "provider-b")
+            self.assertEqual(orchestrator.agents[0].config.base_id, "provider-b")
+            self.assertIsNone(orchestrator.failed_turn)
+        client.post("/auth/logout")
+
     def setUp(self):
         import backend.auth
         import backend.server
@@ -1088,6 +1205,17 @@ class SessionTests(unittest.TestCase):
             orchestrator.failed_turn["recovery_options"],
             ["auto_failover", "wait_and_retry", "stop"],
         )
+
+    def test_recovering_turn_is_not_reexposed_as_the_same_quota_prompt(self):
+        orchestrator = Orchestrator([], Workspace(tempfile.mkdtemp()), require_approval=False)
+        orchestrator._failed_turn = {
+            "turn_id": "turn-1", "agent_id": "logical-1", "provider_id": "provider-a",
+            "error_code": "quota_exhausted", "prompt": "private prompt",
+        }
+        orchestrator.recover_failed_turn("auto_failover")
+        self.assertIsNone(orchestrator.failed_turn)
+        self.assertEqual(orchestrator._failed_turn["recovery_action"], "auto_failover")
+        self.assertTrue(orchestrator._failed_turn["recovery_started"])
 
     def test_invalidated_provider_attempt_cannot_commit_late_history_or_usage(self):
         agent = BlockingFake(AgentConfig(id="slow", name="slow", kind="openai"))
@@ -2814,6 +2942,33 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertIn("ev.data.completion_kind === 'artifact_edit'", source)
         self.assertIn("ev.data.completion_kind === 'chat'", source)
         self.assertIn("No planning baseline was finalized", source)
+
+    def test_provider_recovery_actions_are_rendered_on_the_error_comment(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        html = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
+        self.assertIn('class="provider-recovery-actions"', source)
+        self.assertIn("recoverProvider('auto_failover', this)", source)
+        self.assertIn("recoverProvider('wait_and_retry', this)", source)
+        self.assertIn("actionPane.querySelectorAll('button')", source)
+        self.assertNotIn('id="failoverBtn"', html)
+        self.assertNotIn('id="waitRetryBtn"', html)
+
+    def test_refresh_restores_compact_activity_without_full_event_replay(self):
+        api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        state_js = (Path(__file__).parents[1] / "frontend" / "js" / "state.js").read_text()
+        server = (Path(__file__).parents[1] / "backend" / "server.py").read_text()
+        self.assertIn("async function restoreRecentActivity(limit = 8)", api_js)
+        self.assertIn("historical: true", api_js)
+        self.assertIn("restoreRecentActivity()", state_js)
+        self.assertIn('@app.get("/run/recent-activity")', server)
+        self.assertIn("Continue with available provider", api_js)
+        self.assertIn("resumeInterruptedRun(this)", api_js)
+
+    def test_paused_agents_do_not_present_stale_quota_capacity(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "agents.js").read_text()
+        self.assertIn("delete agentCapacityStatus[uid]", source)
+        self.assertIn("const capacityLabel = isPaused ? 'Paused'", source)
+        self.assertIn("Disabled and excluded from new agent assignments", source)
 
     def test_decision_modal_owns_checkpoint_identity_and_can_resume_after_restart(self):
         source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()

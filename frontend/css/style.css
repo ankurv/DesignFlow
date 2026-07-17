@@ -302,6 +302,9 @@
   .feed-item.steer  { border-color: var(--yellow); background: var(--bg2); }
   .feed-item.retry  { border-color: var(--yellow); background: var(--bg2); }
   .feed-item.retry.cancelled { opacity: 0.55; border-color: var(--border); background: rgba(255,255,255,0.02); text-decoration: line-through; }
+  .provider-recovery-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
+  .provider-recovery-actions.resolved button { display:none; }
+  .provider-recovery-status { color:var(--muted); font-size:12px; }
   
   .feed-row { display: flex; align-items: flex-start; gap: 12px; }
   .feed-avatar {

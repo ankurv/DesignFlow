@@ -398,9 +398,6 @@ async function openProject(pathOverride = '') {
   if (eventCounter) eventCounter.textContent = '0';
   rememberRecentProject(path);
   applyProjectState(data);
-  // The previous SSE stream belongs to the prior project binding (or the
-  // unbound session). Reconnect so project history is replayed into the feed.
-  if (typeof connectSSE === 'function') connectSSE(true);
   currentWsKey = 'cockpit';
     renderHistory(data.recent_runs || []);
     setProjectRestoreStage('history', 'Loading documents, history, usage, and the project team.', 58);
@@ -409,7 +406,11 @@ async function openProject(pathOverride = '') {
       updateDesignCockpit(),
       loadAgentConfig(),
       fetchAgentStatus(false),
+      restoreRecentActivity(),
     ]);
+    // The new stream carries live events only; the compact persisted tail above
+    // gives refresh context without replaying the full run.
+    if (typeof connectSSE === 'function') connectSSE(true);
   finishProjectRestoration();
   } catch (error) {
     failProjectRestoration(`Restoration stopped: ${error.message}. Your saved project files remain on disk.`);
@@ -436,6 +437,7 @@ async function loadCurrentProject() {
       updateDesignCockpit(),
       loadAgentConfig(),
       fetchAgentStatus(false),
+      restoreRecentActivity(),
     ]);
   finishProjectRestoration();
   } catch (error) {

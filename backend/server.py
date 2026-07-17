@@ -748,6 +748,12 @@ def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
 
     new_agent = create_agent(to_agent_config(expert, s))
     active.transfer_runtime_state_to(new_agent)
+    # The logical specialist keeps history and usage, but the replacement
+    # provider must not inherit the depleted provider's error presentation.
+    new_agent.status = AgentStatus.IDLE
+    new_agent.error_message = ""
+    new_agent.retry_at = ""
+    new_agent.retry_reason = ""
 
     for i, a in enumerate(s.orchestrator.agents):
         if a is active:
@@ -1122,12 +1128,20 @@ def recover_provider_turn(body: ProviderRecoveryBody, state: AppState = Depends(
         )
         if active is None:
             raise HTTPException(409, "The failed logical agent is no longer active")
-        _reassign_agent_if_paused(state, active, active.config.base_id or active.config.id)
+        failed_provider_id = failed.get("provider_id") or active.config.base_id or active.config.id
+        current_provider_id = active.config.base_id or active.config.id
+        # Pausing a provider already rebinds its live specialists. Do not move
+        # the same specialist again when Auto-failover is clicked afterwards.
+        if current_provider_id == failed_provider_id:
+            active = _reassign_agent_if_paused(state, active, failed_provider_id)
     state.orchestrator.recover_failed_turn(body.action)
     state.status = "running"
     state.last_transition = f"provider_recovery_{body.action}"
     state.awaiting_input = False
-    return {"ok": True, "status": state.status, "action": body.action}
+    return {
+        "ok": True, "status": state.status, "action": body.action,
+        "provider_id": active.config.base_id or active.config.id if body.action == "auto_failover" else "",
+    }
 
 
 @app.post("/run/stop")
@@ -1372,6 +1386,27 @@ def run_transcript(run_id: str, limit: int = 200, offset: int = 0, state: AppSta
         raise HTTPException(400, "Invalid run id")
     events = state.store.run_events(run_id, limit=limit, offset=offset)
     return {"run_id": run_id, "events": events, "offset": offset, "has_more": len(events) == min(limit, 200)}
+
+
+@app.get("/run/recent-activity")
+def recent_run_activity(limit: int = 8, state: AppState = Depends(get_state)):
+    """Bootstrap a compact feed tail after login/refresh; this is not event replay."""
+    if not state.store:
+        return {"run_id": "", "events": []}
+    run_id = state.run_id or state.store.latest_run_id()
+    events = state.store.recent_run_activity(run_id, limit=limit) if run_id else []
+    run = next((item for item in state.store.recent_runs(limit=20) if item["run_id"] == run_id), {})
+    saved_state = state.store.load_run_state() or {}
+    resumable = bool(run.get("status") == "interrupted" and saved_state.get("run_id") == run_id)
+    if resumable:
+        paused_names = {str(config.get("name", "")) for config in state.configs if config.get("is_paused")}
+        for event in reversed(events):
+            data = event.get("data", {})
+            if event.get("kind") == "error" and data.get("recoverable"):
+                data["restart_recovery"] = True
+                data["provider_paused"] = str(data.get("provider_agent", "")) in paused_names
+                break
+    return {"run_id": run_id, "events": events, "resumable": resumable}
 
 
 @app.get("/runs/{run_id}/turns")

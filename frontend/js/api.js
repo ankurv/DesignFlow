@@ -578,6 +578,36 @@ function connectSSE(resetHistory = false) {
   es.onerror = () => {};
 }
 
+async function restoreRecentActivity(limit = 8) {
+  const feed = document.getElementById('feed');
+  if (!feed || !projectOpen) return;
+  try {
+    const response = await fetch(`/run/recent-activity?limit=${encodeURIComponent(limit)}`);
+    const payload = await response.json().catch(() => ({events: []}));
+    if (!response.ok) return;
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    feed.innerHTML = '';
+    for (const event of events) appendFeed({...event, historical: true});
+    if (payload.resumable && !events.some(event => event.data?.restart_recovery)) {
+      appendFeed({
+        kind: 'error', agent: 'DesignFlow', historical: true,
+        timestamp: new Date().toISOString(),
+        data: {
+          error: 'The previous run was interrupted before it could finish.',
+          recoverable: true, restart_recovery: true,
+        },
+      });
+    }
+    eventCount = feed.querySelectorAll('.feed-item').length;
+    const counter = document.getElementById('eventCount');
+    if (counter) counter.textContent = String(eventCount);
+    const runId = document.getElementById('runId');
+    if (runId && payload.run_id) runId.textContent = payload.run_id;
+  } catch (_) {
+    // A missing activity tail must never block project restoration or live SSE.
+  }
+}
+
 let postEventRefreshTimer = null;
 let pendingWorkspaceRefresh = false;
 function schedulePostEventRefresh({workspace = false} = {}) {
@@ -631,10 +661,6 @@ function handleEvent(ev) {
       retryBtn.disabled = false;
     }
     const providerRecovery = ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(ev.data.error_code);
-    const failoverBtn = document.getElementById('failoverBtn');
-    const waitRetryBtn = document.getElementById('waitRetryBtn');
-    if (failoverBtn) failoverBtn.style.display = providerRecovery ? '' : 'none';
-    if (waitRetryBtn) waitRetryBtn.style.display = providerRecovery ? '' : 'none';
     if (retryBtn && providerRecovery) retryBtn.style.display = 'none';
   }
 
@@ -687,6 +713,7 @@ function appendFeed(ev) {
   let summary = '';
   let detail = '';
   let metricsHtml = '';
+  let recoveryActionsHtml = '';
   let kindLabel = (ev.kind || 'update').replace(/_/g, ' ');
 
   switch(ev.kind) {
@@ -776,7 +803,24 @@ function appendFeed(ev) {
       break;
     case 'error':
       summary = ev.data.error_code ? String(ev.data.error || 'Agent request failed.') : friendlyProviderError(ev.data.error || ev.data.message);
-      if (ev.data.recoverable) summary += ' You can retry after resolving the provider issue.';
+      if (ev.historical && ev.data.provider_paused) {
+        summary = `Previous quota failure from ${ev.data.provider_agent || 'a model'}. That provider is now paused and will not be used.`;
+      }
+      if (ev.data.recoverable && !ev.data.restart_recovery) summary += ' You can retry after resolving the provider issue.';
+      if (ev.historical && ev.data.restart_recovery) {
+        recoveryActionsHtml = `
+          <div class="provider-recovery-actions interrupted-run-actions">
+            <button class="btn btn-primary btn-sm" type="button" onclick="resumeInterruptedRun(this)">Continue with available provider</button>
+            <span class="provider-recovery-status" aria-live="polite">The saved workflow position will be restored.</span>
+          </div>`;
+      } else if (!ev.historical && ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(ev.data.error_code)) {
+        recoveryActionsHtml = `
+          <div class="provider-recovery-actions" data-turn-id="${escAttr(String(ev.data.turn_id || ''))}">
+            <button class="btn btn-primary btn-sm" type="button" onclick="recoverProvider('auto_failover', this)">Auto-failover</button>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="recoverProvider('wait_and_retry', this)">Wait &amp; retry</button>
+            <span class="provider-recovery-status" aria-live="polite"></span>
+          </div>`;
+      }
       kindLabel = 'error';
       break;
     default:
@@ -811,6 +855,7 @@ function appendFeed(ev) {
           ${detail ? `<button class="btn btn-secondary btn-sm" style="padding: 2px 7px; font-weight: bold; line-height: 1;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
         </div>
         ${detail ? `<div class="feed-detail markdown-body" style="display: ${ev.data.verdict === 'PAUSE_FOR_INPUT' ? 'block' : 'none'}; margin-top: 8px;">${parseMarkdown(detail)}</div>` : ''}
+        ${recoveryActionsHtml}
       </div>
     </div>
   `;
@@ -824,6 +869,21 @@ function appendFeed(ev) {
   feed.appendChild(div);
   if (wasNearBottom) feed.scrollTop = feed.scrollHeight;
   if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
+}
+
+async function resumeInterruptedRun(sourceButton) {
+  const pane = sourceButton?.closest('.provider-recovery-actions');
+  if (sourceButton) sourceButton.disabled = true;
+  const status = pane?.querySelector('.provider-recovery-status');
+  if (status) status.textContent = 'Restoring the interrupted run…';
+  const resumed = await startRun('continue', {hiddenPrompt: true});
+  if (!resumed) {
+    if (sourceButton) sourceButton.disabled = false;
+    if (status) status.textContent = 'Could not resume. Check the available agents and try again.';
+    return;
+  }
+  if (pane) pane.classList.add('resolved');
+  if (status) status.textContent = 'Run resumed with the available agent pool.';
 }
 
 setInterval(() => {
@@ -1085,17 +1145,40 @@ async function retryFailedTurn() {
   notify('Context compacted. Retrying the same turn.');
 }
 
-async function recoverProvider(action) {
-  const response = await fetch('/run/recover-provider', {
-    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({action}),
-  });
+async function recoverProvider(action, sourceButton = null) {
+  const actionPane = sourceButton?.closest('.provider-recovery-actions') || null;
+  const localButtons = actionPane ? actionPane.querySelectorAll('button') : [];
+  localButtons.forEach(button => { button.disabled = true; });
+  const localStatus = actionPane?.querySelector('.provider-recovery-status');
+  if (localStatus) localStatus.textContent = action === 'auto_failover'
+    ? 'Switching provider…'
+    : 'Scheduling retry…';
+  let response;
+  try {
+    response = await fetch('/run/recover-provider', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({action}),
+    });
+  } catch (error) {
+    localButtons.forEach(button => { button.disabled = false; });
+    if (localStatus) localStatus.textContent = 'Could not reach the server. Try again.';
+    notify('Could not reach the server to recover the provider turn.', true);
+    return;
+  }
   const data = await response.json();
   if (!response.ok) {
+    localButtons.forEach(button => { button.disabled = false; });
+    if (localStatus) localStatus.textContent = data.detail || 'Recovery could not be started.';
     notify(data.detail || 'Could not recover the provider turn', true);
     return;
   }
-  document.getElementById('failoverBtn').style.display = 'none';
-  document.getElementById('waitRetryBtn').style.display = 'none';
+  document.querySelectorAll('.provider-recovery-actions').forEach(pane => {
+    pane.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    const status = pane.querySelector('.provider-recovery-status');
+    if (status) status.textContent = pane === actionPane
+      ? (action === 'auto_failover' ? 'Failover started.' : 'Retry scheduled.')
+      : 'Recovery handled.';
+    pane.classList.add('resolved');
+  });
   paused = false;
   updateStatus('running');
   notify(action === 'auto_failover'
@@ -1220,8 +1303,6 @@ function updateStatus(s) {
   const pauseBtn = document.getElementById('pauseBtn');
   const stopBtn = document.getElementById('stopBtn');
   const retryBtn = document.getElementById('retryBtn');
-  const failoverBtn = document.getElementById('failoverBtn');
-  const waitRetryBtn = document.getElementById('waitRetryBtn');
   dot.className = `status-dot ${s}`;
   txt.textContent = s;
 
@@ -1274,10 +1355,6 @@ function updateStatus(s) {
 
   const running = s === 'running' || s === 'paused' || s === 'needs_attention';
   if (retryBtn) retryBtn.style.display = s === 'needs_attention' ? '' : 'none';
-  if (s !== 'needs_attention') {
-    if (failoverBtn) failoverBtn.style.display = 'none';
-    if (waitRetryBtn) waitRetryBtn.style.display = 'none';
-  }
   if (pauseBtn) {
     pauseBtn.style.display = (s === 'running' || s === 'paused') ? '' : 'none';
     pauseBtn.textContent = s === 'paused' ? 'Resume' : 'Pause';
@@ -1326,11 +1403,7 @@ async function fetchAgentStatus(refreshCockpit = true) {
   });
   const failedTurn = res.failed_turn || {};
   const retryBtn = document.getElementById('retryBtn');
-  const failoverBtn = document.getElementById('failoverBtn');
-  const waitRetryBtn = document.getElementById('waitRetryBtn');
   const providerRecovery = ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(failedTurn.error_code);
-  if (failoverBtn) failoverBtn.style.display = providerRecovery ? '' : 'none';
-  if (waitRetryBtn) waitRetryBtn.style.display = providerRecovery ? '' : 'none';
   if (retryBtn && providerRecovery) retryBtn.style.display = 'none';
   if (retryBtn && failedTurn.error_code === 'context_too_large') {
     retryBtn.textContent = 'Compact & Retry';

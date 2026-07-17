@@ -634,6 +634,25 @@ class ProjectStore:
             result.append(item)
         return result
 
+    def recent_run_activity(self, run_id: str, limit: int = 8) -> list[dict]:
+        """Return a small chronological activity tail without replaying a run."""
+        meaningful = ("turn_end", "error", "phase", "file_write", "steer", "done", "retry")
+        placeholders = ",".join("?" for _ in meaningful)
+        with self._lock:
+            rows = self._db.execute(
+                f"""SELECT id, run_id, timestamp, kind, agent, data_json
+                    FROM events WHERE run_id=? AND kind IN ({placeholders})
+                    ORDER BY id DESC LIMIT ?""",
+                (run_id, *meaningful, max(1, min(int(limit), 20))),
+            ).fetchall()
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["event_id"] = item.pop("id")
+            item["data"] = json.loads(item.pop("data_json") or "{}")
+            result.append(item)
+        return result
+
     def get_mcp_servers(self) -> list[dict]:
         with self._lock:
             rows = self._db.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()

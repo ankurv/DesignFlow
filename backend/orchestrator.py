@@ -371,7 +371,7 @@ class Orchestrator:
 
     @property
     def failed_turn(self) -> dict[str, Any] | None:
-        if not self._failed_turn:
+        if not self._failed_turn or self._failed_turn.get("recovery_started"):
             return None
         return {key: value for key, value in self._failed_turn.items() if key != "prompt"}
 
@@ -389,6 +389,7 @@ class Orchestrator:
         if action not in {"auto_failover", "wait_and_retry"}:
             raise ValueError("Unknown provider recovery action")
         self._failed_turn["recovery_action"] = action
+        self._failed_turn["recovery_started"] = True
         self.retry_failed_turn()
 
     # ── Main entry ────────────────────────────────────────────────────────────
@@ -1680,6 +1681,7 @@ class Orchestrator:
                         "turn_id": turn_id,
                         "attempt": attempt,
                         "agent_id": agent.config.id,
+                        "provider_id": agent.config.base_id or agent.config.id,
                         "agent": agent.name,
                         "error": str(exc),
                         "public_error": public_error,
