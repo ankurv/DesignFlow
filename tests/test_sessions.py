@@ -764,7 +764,7 @@ class SessionTests(unittest.TestCase):
         import backend.server
 
         client = TestClient(backend.server.app)
-        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
             state = backend.server.app_states[str(Path(directory).resolve())]
@@ -798,7 +798,7 @@ class SessionTests(unittest.TestCase):
         import backend.server
 
         client = TestClient(backend.server.app)
-        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
             state = backend.server.app_states[str(Path(directory).resolve())]
@@ -824,7 +824,7 @@ class SessionTests(unittest.TestCase):
         import backend.server
 
         client = TestClient(backend.server.app)
-        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
             state = backend.server.app_states[str(Path(directory).resolve())]
@@ -1555,7 +1555,7 @@ Decision 2: Choose retention.
         import backend.server
 
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
         payload = {"name": "Project Bot", "kind": "openai", "role": "helper"}
         res = client.post("/agents", json=payload)
@@ -1752,7 +1752,7 @@ Decision 2: Choose retention.
 
         with tempfile.TemporaryDirectory() as tmpdir:
             client = TestClient(backend.server.app)
-            res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+            res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
             self.assertEqual(res.status_code, 200)
             res = client.post("/project/open", json={"path": tmpdir})
             self.assertEqual(res.status_code, 200)
@@ -1788,7 +1788,7 @@ Decision 2: Choose retention.
         import backend.server
         from unittest.mock import patch, MagicMock
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
         with patch("backend.server.create_agent") as mock_create:
             mock_agent = MagicMock()
@@ -1815,7 +1815,7 @@ Decision 2: Choose retention.
         import backend.server
         from unittest.mock import patch, MagicMock
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
         with patch("backend.server.create_agent") as mock_create:
             mock_agent = MagicMock()
@@ -1844,7 +1844,7 @@ Decision 2: Choose retention.
         from fastapi.testclient import TestClient
         import backend.server
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
 
         with tempfile.TemporaryDirectory() as td:
@@ -1867,8 +1867,8 @@ Decision 2: Choose retention.
 
         first = TestClient(backend.server.app)
         second = TestClient(backend.server.app)
-        self.assertEqual(first.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
-        self.assertEqual(second.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(first.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
+        self.assertEqual(second.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
 
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(first.post("/project/open", json={"path": directory}).status_code, 200)
@@ -1894,8 +1894,8 @@ Decision 2: Choose retention.
         import backend.server
 
         client = TestClient(backend.server.app)
-        first_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"}).json()
-        second_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"}).json()
+        first_login = client.post("/auth/login", json={"username": "admin", "password": "admin"}).json()
+        second_login = client.post("/auth/login", json={"username": "admin", "password": "admin"}).json()
         first_headers = {"X-DesignFlow-Session": first_login["session_id"]}
         second_headers = {"X-DesignFlow-Session": second_login["session_id"]}
 
@@ -1910,7 +1910,7 @@ Decision 2: Choose retention.
         import backend.server
 
         client = TestClient(backend.server.app)
-        login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        login = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(login.status_code, 200)
         called = []
         original_callback = backend.server.app.state.request_shutdown
@@ -1958,7 +1958,7 @@ Decision 2: Choose retention.
         import backend.server
 
         client = TestClient(backend.server.app)
-        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin123"}).status_code, 200)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             self.assertEqual(client.post("/project/open", json={"path": first}).status_code, 200)
             first_path = str(Path(first).resolve())
@@ -2767,7 +2767,7 @@ Decision 2: Choose retention.
         from fastapi.testclient import TestClient
         import backend.server
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
 
         with tempfile.TemporaryDirectory() as td:
@@ -2803,7 +2803,7 @@ Decision 2: Choose retention.
         from fastapi.testclient import TestClient
         import backend.server
         client = TestClient(backend.server.app)
-        res = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+        res = client.post("/auth/login", json={"username": "admin", "password": "admin"})
         self.assertEqual(res.status_code, 200)
 
         with tempfile.TemporaryDirectory() as td:

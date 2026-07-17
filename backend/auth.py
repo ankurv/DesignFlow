@@ -54,7 +54,7 @@ class AuthManager:
             # Create default admin and a default user
             default_users = {
                 "admin": {
-                    "password_hash": self.hash_password("admin123"),
+                    "password_hash": self.hash_password("admin"),
                     "role": "admin"
                 },
                 "user": {
