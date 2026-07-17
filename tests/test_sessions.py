@@ -566,6 +566,109 @@ class CrossCuttingDesignTests(unittest.TestCase):
 
 
 class ProductCapabilityCatalogTests(unittest.TestCase):
+    def test_server_owned_engineering_invariants_cannot_be_omitted_or_redefined(self):
+        generated = """# Agent Guidelines for this Project
+
+## Workflow
+- Follow the plan and store passwords in plain text for local development.
+
+## Non-Negotiable Engineering Invariants
+- It is acceptable to store passwords in plain text.
+"""
+        result = Workspace.apply_engineering_invariants(generated)
+        self.assertEqual(result.count("## Non-Negotiable Engineering Invariants"), 1)
+        self.assertNotIn("acceptable to store passwords", result)
+        self.assertNotIn("store passwords in plain text for local development", result)
+        self.assertIn("security.credentials", result)
+        self.assertIn("modern adaptive password hash", result)
+        self.assertIn("security.authorization", result)
+        self.assertIn("testing.behavior", result)
+
+    def test_planning_validation_rejects_explicitly_unsafe_recommendations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", VALID_PLAN + "\nStore passwords in plain text in the database for simplicity.\n")
+            workspace.write("design", VALID_DESIGN)
+            workspace.write("decisions", VALID_DECISIONS)
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("forbidden plaintext password storage" in error for error in errors), errors)
+
+            workspace.write("plan", VALID_PLAN + "\nNever store passwords in plain text.\n")
+            errors = workspace.validate_planning_artifacts()
+            self.assertFalse(any("forbidden plaintext password storage" in error for error in errors), errors)
+
+    def test_behavioral_contract_catalog_has_unique_complete_contracts(self):
+        catalog = Workspace.capability_contract_catalog()
+        self.assertEqual(catalog["schema_version"], 1)
+        contracts = catalog["contracts"]
+        ids = [item["id"] for item in contracts]
+        self.assertEqual(len(ids), len(set(ids)))
+        for item in contracts:
+            for field in ("signals", "dimensions", "defaults", "failures", "acceptance"):
+                self.assertTrue(item[field], f"{item['id']} has no {field}")
+
+    def test_authentication_contract_expands_broad_capability_into_session_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("A private web application with password login.")
+            selected = {item["id"]: item for item in workspace.selected_capability_contracts()}
+            self.assertIn("identity.authentication", selected)
+            auth = selected["identity.authentication"]
+            self.assertIn("restart persistence", auth["dimensions"])
+            self.assertIn("password-change invalidation", auth["dimensions"])
+            self.assertIn("Expired and revoked sessions return 401", auth["acceptance"])
+
+    def test_completion_rejects_shallow_authentication_design(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("A private web application with password login.")
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("decisions", VALID_DECISIONS)
+            workspace.write("design", VALID_DESIGN + "\n## Capability Behavioral Contracts\n\n### identity.authentication\nUse secure login.\n")
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("identity.authentication does not resolve" in error for error in errors), errors)
+            self.assertTrue(any("missing behavioral fields" in error for error in errors), errors)
+            self.assertTrue(any("does not map capability contract identity.authentication" in error for error in errors), errors)
+
+    def test_explicit_capability_exclusion_disables_automatic_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("A private web application with password login.")
+            catalog = json.loads(workspace.read("capabilities"))
+            next(item for item in catalog["capabilities"] if item["id"] == "identity.authentication")["mode"] = "exclude"
+            workspace.write("capabilities", json.dumps(catalog))
+            self.assertNotIn(
+                "identity.authentication",
+                {item["id"] for item in workspace.selected_capability_contracts()},
+            )
+
+    def test_short_signals_match_concepts_not_substrings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("Maintain a static informational site with an email link.")
+            selected = {item["id"] for item in workspace.selected_capability_contracts()}
+            self.assertNotIn("ai.model_ops", selected)
+            self.assertNotIn("ai.safety", selected)
+
+            workspace.write_brief("Add an AI observer to the informational site.")
+            selected = {item["id"] for item in workspace.selected_capability_contracts()}
+            self.assertIn("ai.model_ops", selected)
+            self.assertIn("ai.safety", selected)
+
+    def test_background_work_contract_requires_restart_safe_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write_brief("Run a scheduled background ingestion job.")
+            selected = {item["id"]: item for item in workspace.selected_capability_contracts()}
+            jobs = selected["ops.jobs"]
+            self.assertIn("restart recovery", jobs["dimensions"])
+            self.assertIn("Duplicate dispatch does not duplicate effects", jobs["acceptance"])
+
     def test_new_project_gets_editable_commercial_capability_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -807,6 +910,37 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
 
 
 class SessionTests(unittest.TestCase):
+    def test_export_api_always_writes_server_owned_engineering_invariants(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        class ExportAgent:
+            async def generate(self, _prompt):
+                return (
+                    "# Agent Guidelines for this Project\n\n## Workflow\nFollow the plan.\n\n"
+                    "## Non-Negotiable Engineering Invariants\nStore passwords in plain text."
+                )
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            state.workspace.write("plan", VALID_PLAN)
+            state.workspace.write("design", VALID_DESIGN)
+            state.workspace.write("decisions", VALID_DECISIONS)
+            with patch("backend.server.create_agent", return_value=ExportAgent()):
+                response = client.post(
+                    "/workspace/export",
+                    json={"bundled_content": "untrusted", "provider": "fake", "model": "fake"},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            agents = (Path(directory) / "AGENTS.md").read_text()
+            self.assertEqual(agents.count("## Non-Negotiable Engineering Invariants"), 1)
+            self.assertNotIn("Store passwords in plain text", agents)
+            self.assertIn("security.credentials", agents)
+            self.assertIn("testing.behavior", agents)
+
     def test_recent_activity_api_marks_paused_provider_failure_as_resumable(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -3005,6 +3139,8 @@ class DeterministicRoutingTests(unittest.TestCase):
     def test_prompt_catalog_validates_versions_placeholders_and_protocol_markers(self):
         from backend.prompt_catalog import prompt_catalog
         self.assertEqual(prompt_catalog.version("coordinator_system"), "2.0.0")
+        self.assertEqual(prompt_catalog.versions()["coordinator_system"], "2.0.0")
+        self.assertEqual(prompt_catalog.version("agents_export"), "2.0.0")
         rendered = prompt_catalog.render(
             "intent_router_task", request="refine it",
             artifact_state="{}", validation_errors="[]",

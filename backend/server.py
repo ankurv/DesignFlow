@@ -1522,7 +1522,12 @@ async def export_workspace(body: ExportBody, state: AppState = Depends(get_state
     try:
         config = AgentConfig(provider=body.provider, model=body.model)
         agent = create_agent(config)
-        prompt = prompt_catalog.render("agents_export", project_name=project_name, project_plan=bundled_content)
+        prompt = prompt_catalog.render(
+            "agents_export",
+            project_name=project_name,
+            project_plan=bundled_content,
+            engineering_invariants=state.workspace.engineering_invariants_context(),
+        )
         agents_md = await agent.generate(prompt)
     except Exception as e:
         # Fallback to a rigid template if LLM fails
@@ -1545,6 +1550,8 @@ async def export_workspace(body: ExportBody, state: AppState = Depends(get_state
             "## 5. Knowledge Items (KI) Usage\n"
             "- **Check Context First**: If you receive Knowledge Items (KIs) or summaries at the start of a conversation, you MUST read the relevant KI artifacts before performing independent research or writing code to ensure you follow established project patterns.\n"
         )
+    agents_md = state.workspace.apply_engineering_invariants(agents_md)
+
     plan_file = project_path / f"{project_name}.md"
     plan_file.write_text(bundled_content, encoding="utf-8")
     

@@ -64,6 +64,32 @@ the full planning workflow. Invalid router output fails safely to the planning w
 it never silently converts a requested mutation into conversational prose. Routing context
 is discarded before synthesis so it cannot influence the resulting architecture.
 
+### Capability behavioral contracts
+
+Broad feature labels are not considered implementation-ready requirements. DesignFlow selects
+versioned contracts from `backend/capability_contracts.json` using the user-owned brief and
+explicit project capability modes. It then requires the design to resolve the selected
+lifecycles, defaults, failures, recovery behavior, and acceptance scenarios. Selection never
+uses generated artifacts, preventing a model's own prose from recursively expanding scope.
+
+```mermaid
+flowchart LR
+    Brief["User-owned brief"] --> Select["Boundary-aware signal selection"]
+    Modes["Explicit include / exclude modes"] --> Select
+    Catalog["Versioned behavioral contracts"] --> Select
+    Select --> Draft["Resolve decisions, failures, implementation, acceptance"]
+    Draft --> Design["DESIGN.md contract sections"]
+    Draft --> Plan["PLAN.md requirement traceability"]
+    Design --> Gate["Deterministic completion gate"]
+    Plan --> Gate
+    Gate --> Export["Validated planning bundle"]
+```
+
+The catalog supplies safe defaults for evaluation, not universal infrastructure mandates.
+A plan may justify an exclusion, but it cannot silently omit a selected lifecycle obligation.
+The persisted run state records selected contract IDs and prompt versions so a planning run is
+diagnosable after prompts or the contract catalog evolve.
+
 ```mermaid
 flowchart TD
     %% Entry Point

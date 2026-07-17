@@ -97,6 +97,24 @@ capabilities during discovery and synthesis. Set an entry's `mode` to `include` 
 `exclude` to override automatic relevance judgment, add project-specific entries, or
 remove entries that should not be considered. Existing project catalogs are never overwritten.
 
+Relevant common capabilities are expanded through bundled behavioral contracts rather than
+left as one-line feature names. For example, authentication must resolve session persistence,
+expiry, restart, revocation, recovery, security, failure states, and executable acceptance
+scenarios. Background work similarly covers identity, idempotency, retry, cancellation, and
+restart recovery. The completion gate requires each selected contract in the design and its
+mapping to implementation and verification in the plan. Signal matching is concept-boundary
+aware, generated prose cannot recursively select more contracts, and explicit include/exclude
+settings remain authoritative.
+
+Generated `AGENTS.md` files also receive a server-owned, versioned set of non-negotiable
+engineering invariants. These cover credential and password handling, redaction, trusted-server
+authorization, input and output safety, browser security, dependency hygiene, data minimization,
+migrations, idempotency and restart recovery, resource limits, safe errors and configuration,
+failure-path testing, destructive-operation approval, accessibility, and AI trust boundaries.
+The canonical block is appended after model generation, so a provider failure or weak model
+cannot omit or redefine it. Planning validation also rejects explicit recommendations for common
+unsafe shortcuts such as plaintext password storage, hard-coded credentials, or sensitive logs.
+
 Open **[http://localhost:8010](http://localhost:8010)** in your browser.
 
 ### Connect coding agents over MCP

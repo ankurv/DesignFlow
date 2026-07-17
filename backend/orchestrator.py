@@ -1171,7 +1171,7 @@ class Orchestrator:
         prompt = prompt_catalog.render(
             "drafting", idea=self.idea, steering=steer_block or "None",
             task=self.task or "Develop the product goal into a credible planning baseline.",
-            capabilities=self.ws.capabilities_context(compact=True),
+            capabilities=self.ws.planning_capabilities_context(),
         )
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
@@ -1223,7 +1223,7 @@ class Orchestrator:
 
         prompt = prompt_catalog.render(
             "refinement", steering=steer_block or "None",
-            capabilities=self.ws.capabilities_context(compact=True),
+            capabilities=self.ws.planning_capabilities_context(),
             quality_feedback=self._deterministic_feedback or "None",
         )
         full_ctx = self._agent_context(coordinator)
@@ -1357,6 +1357,11 @@ class Orchestrator:
             "discovery_question_keys": sorted(self._discovery_question_keys),
             "discovery_failed_providers": sorted(self._discovery_failed_providers),
             "artifact_fingerprints": self.ws.artifact_fingerprints(),
+            "capability_contract_schema_version": self.ws.capability_contract_catalog()["schema_version"],
+            "capability_contract_ids": [
+                item["id"] for item in self.ws.selected_capability_contracts()
+            ],
+            "prompt_versions": prompt_catalog.versions(),
             "agents": {
                 a.name: [
                     {

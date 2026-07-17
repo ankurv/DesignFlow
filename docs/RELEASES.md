@@ -22,6 +22,8 @@ reject invalid or divergent versions before a release is built.
 - Moved planning-bundle composition to the server, removed duplicate artifact titles, and blocked invalid exports.
 - Replaced phrase-list routing for ambiguous requests with a state-aware typed intent-routing step and safe planning fallback.
 - Added a versioned, manifest-validated Markdown prompt catalog for workflow, routing, editing, chat, and agent-export prompts.
+- Added brief-driven capability behavioral contracts for common application lifecycles, deterministic design/traceability gates, explicit overrides, and run-level prompt/contract provenance.
+- Added server-owned engineering invariants to planning and every exported `AGENTS.md`, plus deterministic rejection of explicit credential, logging, and query-construction anti-patterns.
 
 ## Current baseline
 

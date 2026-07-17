@@ -44,5 +44,9 @@ class PromptCatalog:
     def version(self, name: str) -> str:
         return str(self.manifest["prompts"][name]["version"])
 
+    def versions(self) -> dict[str, str]:
+        """Return the immutable prompt-version snapshot used by a run."""
+        return {name: str(spec["version"]) for name, spec in self.manifest["prompts"].items()}
+
 
 prompt_catalog = PromptCatalog()

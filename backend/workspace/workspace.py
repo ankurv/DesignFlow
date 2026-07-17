@@ -870,6 +870,130 @@ class Workspace:
             lines.append(f"- ... and {remaining} more files")
         return "\n".join(lines)
 
+    @staticmethod
+    def capability_contract_catalog() -> dict:
+        contract_path = Path(__file__).resolve().parents[1] / "capability_contracts.json"
+        return json.loads(contract_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def engineering_invariant_catalog() -> dict:
+        invariant_path = Path(__file__).resolve().parents[1] / "engineering_invariants.json"
+        return json.loads(invariant_path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def engineering_invariants_markdown(cls) -> str:
+        catalog = cls.engineering_invariant_catalog()
+        lines = [f"## {catalog['title']}", ""]
+        lines.extend(f"- **{item['id']}** — {item['rule']}" for item in catalog["rules"])
+        return "\n".join(lines)
+
+    @classmethod
+    def apply_engineering_invariants(cls, generated: str) -> str:
+        """Attach canonical rules after generation so model prose cannot weaken them."""
+        catalog = cls.engineering_invariant_catalog()
+        heading = re.escape(catalog["title"])
+        without_generated_copy = re.sub(
+            rf"^##\s*{heading}\s*$[\s\S]*?(?=^##\s|\Z)",
+            "",
+            generated or "",
+            flags=re.MULTILINE | re.IGNORECASE,
+        ).strip()
+        if cls.unsafe_engineering_recommendations(without_generated_copy):
+            without_generated_copy = (
+                "# Agent Guidelines for this Project\n\n"
+                "## Planning Baseline\n"
+                "Follow the exported project plan. Ask for approval before a material architecture deviation, "
+                "and verify implementation changes before completion."
+            )
+        if not without_generated_copy.startswith("# Agent Guidelines for this Project"):
+            without_generated_copy = "# Agent Guidelines for this Project\n\n" + without_generated_copy
+        return without_generated_copy.rstrip() + "\n\n" + cls.engineering_invariants_markdown() + "\n"
+
+    @staticmethod
+    def unsafe_engineering_recommendations(text: str) -> list[str]:
+        patterns = (
+            ("plaintext password storage", r"\b(?:store|save|persist)\b.{0,40}\bpasswords?\b.{0,25}\b(?:plain\s*text|unencrypted|raw)\b"),
+            ("plaintext password storage", r"\b(?:store|save|persist)\b.{0,30}\b(?:plain\s*text|unencrypted|raw)\b.{0,25}\bpasswords?\b"),
+            ("hard-coded credentials", r"\bhard[ -]?code\b.{0,40}\b(?:password|secret|api key|access token|private key)\b"),
+            ("sensitive logging", r"\blog\b.{0,35}\b(?:password|api key|access token|authorization header|session cookie)\b"),
+            ("unsafe query construction", r"\bconcatenat\w*\b.{0,45}\b(?:user input|untrusted input)\b.{0,45}\b(?:sql|shell|command)\b"),
+        )
+        found = []
+        for label, pattern in patterns:
+            for match in re.finditer(pattern, text or "", re.IGNORECASE | re.DOTALL):
+                prefix = text[max(0, match.start() - 35):match.start()].lower()
+                if re.search(r"(?:never|must not|do not|don't|avoid|prohibit)\s*$", prefix):
+                    continue
+                found.append(label)
+                break
+        return list(dict.fromkeys(found))
+
+    @classmethod
+    def engineering_invariants_context(cls) -> str:
+        return (
+            "Universal implementation invariants. Reflect applicable consequences in DESIGN.md and "
+            "PLAN.md; never propose a contradictory implementation:\n"
+            + cls.engineering_invariants_markdown()
+        )
+
+    def selected_capability_contracts(self) -> list[dict]:
+        """Select behavioral contracts from explicit modes and project evidence."""
+        try:
+            catalog = json.loads(self.read("capabilities"))
+        except json.JSONDecodeError:
+            catalog = {"capabilities": []}
+        modes = {str(item.get("id")): str(item.get("mode", "auto")) for item in catalog.get("capabilities", [])}
+        # Selection is anchored to the user-owned brief. Generated artifacts
+        # must not recursively activate more contracts by mentioning them.
+        evidence = self.brief().lower()
+        contracts = self.capability_contract_catalog().get("contracts", [])
+
+        def signal_is_present(signal: str) -> bool:
+            # Signals are concepts, not arbitrary substrings. In particular,
+            # `ai` must not activate for words such as `maintain` or `email`.
+            # Non-alphanumeric boundaries also preserve phrases such as
+            # `external api` and `frontend/backend`.
+            words = [re.escape(word) for word in signal.split() if word]
+            if not words:
+                return False
+            phrase = r"\s+".join(words)
+            return bool(re.search(rf"(?<![a-z0-9]){phrase}(?![a-z0-9])", evidence))
+
+        selected = []
+        for contract in contracts:
+            mode = modes.get(contract["id"], "auto")
+            if mode == "exclude":
+                continue
+            signals = [str(value).lower() for value in contract.get("signals", [])]
+            if mode == "include" or any(signal_is_present(signal) for signal in signals):
+                selected.append(contract)
+        return selected
+
+    def capability_contracts_context(self) -> str:
+        selected = self.selected_capability_contracts()
+        if not selected:
+            return "No common behavioral contracts were selected; do not invent them."
+        lines = [
+            "Selected capability behavioral contracts. Resolve these in DESIGN.md under "
+            "`## Capability Behavioral Contracts`; do not merely repeat the labels."
+        ]
+        for item in selected:
+            lines.extend([
+                f"### {item['id']}",
+                "Required decisions: " + "; ".join(item.get("dimensions", [])),
+                "Safe defaults to evaluate: " + "; ".join(item.get("defaults", [])),
+                "Failure states: " + "; ".join(item.get("failures", [])),
+                "Acceptance scenarios: " + "; ".join(item.get("acceptance", [])),
+            ])
+        return "\n".join(lines)
+
+    def planning_capabilities_context(self) -> str:
+        return "\n\n".join((
+            self.capabilities_context(compact=True),
+            self.capability_contracts_context(),
+            self.engineering_invariants_context(),
+        ))
+
     def scoped_context(self, roles: Optional[list[str]] = None) -> str:
         requested = roles or self.FILES
         keys = [key for key in requested if key not in {"src", "src_index"}]
@@ -990,6 +1114,10 @@ class Workspace:
         design = self.read("design")
         decisions = self.read("decisions")
 
+        combined = "\n".join((design, plan, decisions))
+        for label in self.unsafe_engineering_recommendations(combined):
+            errors.append(f"Planning artifacts recommend forbidden {label}; replace it with the applicable engineering invariant.")
+
         missing_headers = [
             heading for heading in self.REQUIRED_PLAN_HEADERS
             if not self._has_markdown_h2(plan, heading)
@@ -1035,6 +1163,50 @@ class Workspace:
 
         if not self._has_markdown_h2(design, "Known Unknowns & Validation Plan"):
             errors.append("DESIGN.md must include a 'Known Unknowns & Validation Plan' section.")
+
+        selected_contracts = self.selected_capability_contracts()
+        if selected_contracts:
+            contract_section = re.search(
+                r"^##\s*Capability Behavioral Contracts\s*$([\s\S]*?)(?=^##\s|\Z)",
+                design, re.MULTILINE | re.IGNORECASE,
+            )
+            if not contract_section:
+                errors.append(
+                    "DESIGN.md must include 'Capability Behavioral Contracts' for selected common capabilities."
+                )
+            else:
+                contract_text = contract_section.group(1)
+                for contract in selected_contracts:
+                    subsection = re.search(
+                        rf"^###\s*`?{re.escape(contract['id'])}`?\s*$([\s\S]*?)(?=^###\s|\Z)",
+                        contract_text, re.MULTILINE | re.IGNORECASE,
+                    )
+                    if not subsection:
+                        errors.append(f"Capability contract {contract['id']} is selected but missing from DESIGN.md.")
+                        continue
+                    body = re.sub(r"\s+", " ", subsection.group(1).lower())
+                    missing_dimensions = [
+                        dimension for dimension in contract.get("dimensions", [])
+                        if dimension.lower() not in body
+                    ]
+                    if missing_dimensions:
+                        errors.append(
+                            f"Capability contract {contract['id']} does not resolve: "
+                            + ", ".join(missing_dimensions) + "."
+                        )
+                    missing_labels = [
+                        label for label in ("decisions", "failure states", "implementation", "acceptance")
+                        if label not in body
+                    ]
+                    if missing_labels:
+                        errors.append(
+                            f"Capability contract {contract['id']} is missing behavioral fields: "
+                            + ", ".join(missing_labels) + "."
+                        )
+                    if traceability and contract["id"].lower() not in traceability.group(1).lower():
+                        errors.append(
+                            f"PLAN.md Requirement Traceability does not map capability contract {contract['id']}."
+                        )
 
         operations = re.search(
             r"^##\s*Product Operations & Evolution\s*$([\s\S]*?)(?=^##\s|\Z)",

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "title": "Non-Negotiable Engineering Invariants",
+  "rules": [
+    {"id":"security.credentials","rule":"Never store plaintext passwords, API keys, access tokens, private keys, or session secrets in source code, plans, logs, analytics, or unencrypted database fields. Store password verifiers only with a modern adaptive password hash and unique salt; use an approved secret store or runtime environment for other credentials."},
+    {"id":"security.redaction","rule":"Redact credentials, authorization headers, cookies, personal data, and sensitive payload fields at the point they enter logs, traces, errors, support bundles, or model prompts."},
+    {"id":"security.authorization","rule":"Enforce authentication, authorization, ownership, and tenant boundaries on the trusted server for every protected read and write. Client-side visibility checks are never security controls; privileged access defaults to deny."},
+    {"id":"security.input-output","rule":"Validate untrusted input at trust boundaries with explicit schemas and limits. Use parameterized database queries and context-appropriate output encoding; never build executable SQL, shell commands, HTML, or URLs by unsafe string concatenation."},
+    {"id":"security.web","rule":"Use secure cookie and browser protections appropriate to the architecture, including HttpOnly, Secure, SameSite, CSRF defenses for cookie-authenticated mutations, restrictive CORS, and a content security policy where applicable."},
+    {"id":"security.dependencies","rule":"Pin and review dependencies, verify their provenance, scan for known vulnerabilities and leaked secrets, and define a controlled update and rollback process. Do not execute untrusted install scripts without review."},
+    {"id":"data.minimization","rule":"Collect and retain only data required for a documented purpose. Classify sensitive data, define retention and deletion behavior including derived copies and backups, and encrypt sensitive data in transit and at rest where the threat model requires it."},
+    {"id":"data.migrations","rule":"Treat schema and persistent-state changes as versioned migrations with compatibility, backup, interruption recovery, verification, and rollback limits documented before destructive execution."},
+    {"id":"reliability.effects","rule":"Make retryable mutations and background work idempotent. Define transaction boundaries, concurrency behavior, timeouts, bounded retries with backoff, cancellation, partial-failure handling, and restart recovery before implementation."},
+    {"id":"reliability.resources","rule":"Bound request sizes, pagination, queues, concurrency, memory, disk, and external calls. Apply rate limits and backpressure at abuse-prone or capacity-sensitive boundaries."},
+    {"id":"operations.errors","rule":"Return stable, non-sensitive errors to users while preserving correlation IDs and actionable diagnostics for operators. Every material failure state must expose a safe recovery action or an explicit terminal state."},
+    {"id":"operations.config","rule":"Validate configuration at startup, define source precedence and reload versus restart behavior, fail safely when required values are absent, and never expose secret values through configuration or health endpoints."},
+    {"id":"testing.behavior","rule":"Test externally observable behavior and failure paths, not only happy-path implementation details. Include authorization, validation, retry/idempotency, migration, restart/recovery, redaction, and destructive-operation tests wherever those concerns apply."},
+    {"id":"delivery.safety","rule":"Do not perform destructive data, infrastructure, migration, or deployment operations without resolving the exact target, checking preconditions, defining recovery, and obtaining explicit approval when user data or availability is at risk."},
+    {"id":"accessibility.compatibility","rule":"Define supported platforms and compatibility policy, use accessible semantics and keyboard interaction for user interfaces, and verify critical workflows against the stated accessibility and compatibility targets."},
+    {"id":"ai.boundaries","rule":"Treat model output and retrieved content as untrusted input. Models cannot bypass deterministic authorization or safety controls, expose secrets, silently perform consequential actions, or be required for core functionality unless that dependency is explicit and recoverable."}
+  ]
+}
