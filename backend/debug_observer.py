@@ -30,7 +30,10 @@ class DebugObserver:
 
     @staticmethod
     def _redact(value: Any, key: str = "") -> Any:
-        if re.search(r"api.?key|authorization|password|secret|credential|token", key, re.I):
+        if re.search(
+            r"api.?key|authorization|password|secret|credential|(?:access|refresh|bearer|session).?token",
+            key, re.I,
+        ):
             return "[REDACTED]"
         if isinstance(value, dict):
             return {str(k): DebugObserver._redact(v, str(k)) for k, v in value.items()}
@@ -75,17 +78,33 @@ class DebugObserver:
         last_start = max((index for index, event in enumerate(events) if event.get("kind") == "debug_run_start"), default=0)
         events = events[last_start:]
         kinds = Counter(event.get("kind", "") for event in events)
-        phases = [str(event.get("data", {}).get("phase", "")) for event in events]
         discovery_fallbacks = [
             event for event in events
             if event.get("kind") == "phase"
             and event.get("data", {}).get("phase") == "discovery"
             and event.get("data", {}).get("status") == "fallback"
         ]
+        provider_failovers = [
+            event for event in events
+            if event.get("kind") == "phase"
+            and event.get("data", {}).get("status") == "provider_failover"
+        ]
+        discovery_approvals = [
+            event for event in events
+            if event.get("kind") == "phase"
+            and event.get("data", {}).get("phase") == "approval"
+            and event.get("data", {}).get("status") == "waiting_for_approval"
+        ]
         files = [str(event.get("data", {}).get("file", "")) for event in events if event.get("kind") == "file_write"]
         insights = []
 
-        peer_reviews = phases.count("peer_review")
+        # Turn events also carry their current phase, so counting every event
+        # double-counts a single review. A phase event represents one entry.
+        peer_reviews = sum(
+            1 for event in events
+            if event.get("kind") == "phase"
+            and event.get("data", {}).get("phase") == "peer_review"
+        )
         if peer_reviews > 3:
             insights.append(self._insight(
                 "repeated_peer_review", "medium",
@@ -107,6 +126,33 @@ class DebugObserver:
                 "adaptive_discovery_fallback", "medium",
                 "Adaptive discovery could not use the preferred model and switched to local fallback questions.",
                 "Show the provider failure in the UI and try another healthy configured agent before using the deterministic fallback.",
+            ))
+        if provider_failovers:
+            insights.append(self._insight(
+                "provider_failover", "medium",
+                f"Discovery failed over between providers {len(provider_failovers)} time(s).",
+                "Review model suitability, timeout settings, and terminal turn-state recording.",
+            ))
+        if len(discovery_approvals) > 1:
+            insights.append(self._insight(
+                "repeated_discovery_checkpoint", "high",
+                f"Discovery paused for approval {len(discovery_approvals)} times in one run.",
+                "Resume from drafting after the first discovery answer and reject duplicate decisions.",
+            ))
+        token_totals = [
+            int(event.get("data", {}).get("run_total_tokens", 0) or 0)
+            for event in events if event.get("kind") == "turn_end"
+        ]
+        token_limits = [
+            int(event.get("data", {}).get("run_max_tokens", 0) or 0)
+            for event in events if event.get("kind") == "turn_end"
+        ]
+        if (token_totals and token_limits and max(token_limits) > 0
+                and max(token_totals) >= 0.6 * max(token_limits)):
+            insights.append(self._insight(
+                "high_token_burn", "high",
+                f"The run used {max(token_totals):,} of {max(token_limits):,} tokens before completion.",
+                "Bound repeated phases and warn before another high-cost model call.",
             ))
         diagram_requested = any("mermaid" in prompt.lower() or "visual design" in prompt.lower() for prompt in self._run_prompts.values())
         completed = kinds["done"] > 0

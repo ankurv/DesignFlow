@@ -566,6 +566,82 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
             self.assertIn("no `##` sections", reason)
             self.assertEqual(workspace.read("design"), original)
 
+    def test_merge_keeps_last_duplicate_h2_and_preserves_h3_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write("design", "# Design\n\n## Architecture\nOld.\n\n### Components\nOld detail.\n")
+            written, _ = workspace.merge_artifact_update(
+                "design",
+                "## Architecture\nFirst.\n\n### Components\nFirst detail.\n\n"
+                "## Architecture\nFinal.\n\n### Components\nFinal detail.\n",
+                "Architecture Design",
+            )
+            self.assertTrue(written)
+            result = workspace.read("design")
+            self.assertEqual(result.count("## Architecture"), 1)
+            self.assertEqual(result.count("### Components"), 1)
+            self.assertIn("Final detail", result)
+            self.assertNotIn("First detail", result)
+
+    def test_merge_repairs_legacy_duplicate_and_protocol_sections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write(
+                "plan",
+                "# Plan\n\n## Requirements\nStale first.\n\n"
+                "## PLAN_APPEND\nLeaked control content.\n\n"
+                "## Requirements\nCurrent legacy version.\n\n## Risks\nKeep risk.\n",
+            )
+            written, _ = workspace.merge_artifact_update(
+                "plan", "## Requirements\nFresh synthesis.\n", "Plan",
+            )
+            self.assertTrue(written)
+            result = workspace.read("plan")
+            self.assertEqual(result.count("## Requirements"), 1)
+            self.assertNotIn("PLAN_APPEND", result)
+            self.assertNotIn("Leaked control content", result)
+            self.assertIn("Fresh synthesis", result)
+            self.assertIn("Keep risk", result)
+
+    def test_append_protocol_sections_are_bounded(self):
+        response = (
+            "## DESIGN_APPEND\nDesign delta.\n"
+            "## PLAN_APPEND\nPlan delta.\n"
+            "## DECISIONS_APPEND\nDecision delta.\n"
+        )
+        self.assertEqual(Workspace.parse_section(response, "DESIGN_APPEND"), "Design delta.")
+        self.assertEqual(Workspace.parse_section(response, "PLAN_APPEND"), "Plan delta.")
+        self.assertEqual(Workspace.parse_section(response, "DECISIONS_APPEND"), "Decision delta.")
+
+    def test_validation_rejects_unresolved_confirmation_questions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("design", VALID_DESIGN)
+            workspace.write(
+                "decisions",
+                VALID_DECISIONS + "\n## New Questions for Confirmation\n- Should live trading be enabled?\n",
+            )
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("user decision checkpoint" in error for error in errors), errors)
+
+    def test_validation_preserves_explicit_observer_optionality(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.brief_path.write_text(
+                "## Optional governed AI Observer\nThe AI Observer is an optional enhancement.\n"
+            )
+            workspace.write("plan", VALID_PLAN.replace(
+                "## Implementation Phases\n",
+                "## Implementation Phases\n- [ ] Implement AI Observer\n",
+            ))
+            workspace.write("design", VALID_DESIGN)
+            workspace.write("decisions", VALID_DECISIONS)
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("optional AI Observer" in error for error in errors), errors)
+
 
 class SessionTests(unittest.TestCase):
     def setUp(self):
@@ -688,6 +764,16 @@ class SessionTests(unittest.TestCase):
             "qwen-qwq-32b",
             "llama-3.1-8b-instant",
         ])
+
+    def test_virtual_company_skips_content_safety_models_when_design_models_exist(self):
+        from backend.server import config_supports_design, model_for_virtual_agent
+
+        mixed = {"model": "vendor/content-safety", "extra": {"available_models": [
+            "vendor/content-safety", "vendor/general-70b",
+        ]}}
+        safety_only = {"model": "vendor/content-safety", "extra": {}}
+        self.assertEqual(model_for_virtual_agent(mixed, 0, 1), "vendor/general-70b")
+        self.assertFalse(config_supports_design(safety_only))
 
     def test_codex_cli_resumes_exact_thread(self):
         first = "\n".join([
@@ -1073,7 +1159,9 @@ class SessionTests(unittest.TestCase):
                 "questions",
                 "# Decision Checkpoint\n\nShould tenant isolation use separate schemas or tenant-scoped rows?",
             )
-            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator = Orchestrator(
+                [], workspace, require_approval=True, max_debate_rounds=1,
+            )
             orchestrator.phase = OrchestratorPhase.APPROVAL
 
             asyncio.run(orchestrator.steer("Use tenant-scoped rows with mandatory tenant_id and database RLS."))
@@ -1274,9 +1362,6 @@ Decision 2: Choose retention.
                 run_task = asyncio.create_task(orchestrator.run("social app"))
                 answers = [
                     "Primary users are small friend groups planning meetups",
-                    "A — Cloud-agnostic and portable across providers",
-                    "A — Small launch: up to 1,000 active users",
-                    "A — No special constraints beyond standard security practices",
                     "A — Approve the baseline",
                 ]
                 for answer in answers:
@@ -1294,7 +1379,7 @@ Decision 2: Choose retention.
                 await run_task
 
                 # Check that the next prompt received the steering response!
-                self.assertIn("Cloud-agnostic", boss.received[-1][-1]["content"])
+                self.assertIn("Primary users are small friend groups", boss.received[-1][-1]["content"])
             asyncio.run(run_test())
 
     def test_need_based_review_selects_small_relevant_panel(self):
@@ -1983,6 +2068,79 @@ Decision 2: Choose retention.
             self.assertIn("Why this matters", question)
             self.assertEqual(orchestrator._discovery_questions_asked, 1)
 
+    def test_low_debate_discovery_answer_resumes_at_drafting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Build a service")
+            orchestrator = Orchestrator(
+                [], workspace, require_approval=True, max_debate_rounds=1,
+            )
+
+            async def question(_coordinator, _step):
+                orchestrator._pending_discovery_checkpoint = {
+                    "phase": "discovery", "dimension": "scope", "question": "Choose scope?",
+                    "rationale": "This changes the architecture.", "recommendation": "A",
+                    "blocking": True, "options": [
+                        {"label": "A", "summary": "Small", "consequence": "Less work", "recommended": True},
+                        {"label": "B", "summary": "Large", "consequence": "More work", "recommended": False},
+                    ],
+                }
+                return "Choose scope?\n- [A] Small\n- [B] Large"
+
+            orchestrator._adaptive_discovery_question = question
+            asyncio.run(orchestrator._run_discovery_phase(None, 1))
+            self.assertEqual(orchestrator.phase, OrchestratorPhase.APPROVAL)
+            self.assertEqual(orchestrator.post_approval_phase, OrchestratorPhase.DRAFTING)
+
+    def test_discovery_depth_is_derived_from_debate_level(self):
+        with tempfile.TemporaryDirectory() as directory:
+            low = Orchestrator([], Workspace(directory), require_approval=True, max_debate_rounds=1)
+            deep = Orchestrator([], Workspace(directory), require_approval=True, max_debate_rounds=6)
+            self.assertEqual(low.max_discovery_questions, 1)
+            self.assertEqual(deep.max_discovery_questions, 3)
+            low._discovery_questions_asked = 1
+            self.assertEqual(asyncio.run(low._adaptive_discovery_question(None, 2)), "")
+
+    def test_discovery_rejects_semantically_repeated_questions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator([], Workspace(directory), require_approval=True)
+            first = json.dumps({
+                "status": "ask", "dimension": "risk",
+                "question": "Should AlphaDrive allow users to configure custom risk management rules for their trading strategies?",
+                "reason": "Risk configuration materially changes strategy evaluation and the product interface.",
+                "options": [
+                    {"label": "Custom rules", "consequence": "Users gain control with additional complexity."},
+                    {"label": "Built-in rules", "consequence": "The MVP stays simpler with fewer controls."},
+                ], "recommended": "Built-in rules", "blocking": True,
+            })
+            repeated = json.dumps({
+                "status": "ask", "dimension": "configuration",
+                "question": "Should users be allowed to configure custom risk management rules across their AlphaDrive trading strategies?",
+                "reason": "A shared risk configuration changes storage, evaluation, and user experience.",
+                "options": [
+                    {"label": "Shared rules", "consequence": "Users coordinate risk centrally with more complexity."},
+                    {"label": "Per-strategy rules", "consequence": "The MVP remains bounded and easier to validate."},
+                ], "recommended": "Per-strategy rules", "blocking": True,
+            })
+            self.assertIsNotNone(orchestrator._parse_discovery_proposal(first))
+            self.assertIsNone(orchestrator._parse_discovery_proposal(repeated))
+
+    def test_discovery_rejects_answered_question_from_prior_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            store = ProjectStore(workspace.root)
+            store.start_run("old", "Old run")
+            checkpoint = store.enqueue_checkpoint(
+                "old", "discovery", "Should the MVP support one user or a small team?", "Changes tenancy.",
+                [{"label": "A", "summary": "One user"}, {"label": "B", "summary": "Small team"}],
+            )
+            store.answer_checkpoint("old", checkpoint["id"], "user", checkpoint["options"][0]["id"])
+            orchestrator = Orchestrator([], workspace, store=store, run_id="new")
+            self.assertTrue(orchestrator._is_repeated_discovery_question(
+                orchestrator._question_key("Should AlphaDrive support a single user or a small team?")
+            ))
+            store.close()
+
     def test_adaptive_discovery_rejects_internal_decision_heading(self):
         with tempfile.TemporaryDirectory() as directory:
             orchestrator = Orchestrator([], Workspace(directory), require_approval=True)
@@ -2438,6 +2596,52 @@ class DeterministicRoutingTests(unittest.TestCase):
             insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())
             self.assertNotIn("sk-secret123456", events)
             self.assertTrue(any(item["code"] == "missing_requested_artifact" for item in insights["insights"]))
+
+    def test_debug_observer_reports_discovery_loops_failover_and_token_burn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            observer = DebugObserver(Path(directory), max_events=30)
+            observer.start_run("run-loop", "Design the system", "debate")
+            approval = {"kind": "phase", "data": {"phase": "approval", "status": "waiting_for_approval"}}
+            observer.observe(approval)
+            observer.observe(approval)
+            observer.observe({"kind": "phase", "data": {
+                "phase": "discovery", "status": "provider_failover",
+            }})
+            observer.observe({"kind": "turn_end", "data": {
+                "run_total_tokens": 70000, "run_max_tokens": 100000,
+            }})
+            observer.close()
+            insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())["insights"]
+            codes = {item["code"] for item in insights}
+            self.assertIn("repeated_discovery_checkpoint", codes)
+            self.assertIn("provider_failover", codes)
+            self.assertIn("high_token_burn", codes)
+
+    def test_debug_observer_counts_peer_review_phase_entries_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            observer = DebugObserver(Path(directory), max_events=30)
+            observer.start_run("run-review", "Design the system", "debate")
+            for index in range(3):
+                observer.observe({"kind": "phase", "data": {"phase": "peer_review", "status": f"review {index}"}})
+                observer.observe({"kind": "turn_start", "data": {"phase": "peer_review"}})
+                observer.observe({"kind": "turn_end", "data": {"phase": "peer_review"}})
+            observer.close()
+            insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())["insights"]
+            self.assertFalse(any(item["code"] == "repeated_peer_review" for item in insights), insights)
+
+    def test_finish_run_closes_unfinished_turns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("run-stop", "Design it")
+            store.append_event("run-stop", {
+                "kind": "turn_start", "agent": "researcher", "timestamp": "2026-01-01T00:00:00Z",
+                "data": {"turn_id": "turn-1", "phase": "discovery", "attempt": 1},
+            })
+            store.finish_run("run-stop", "stopped", [])
+            turn = store.run_turns("run-stop")[0]
+            self.assertEqual(turn["status"], "cancelled")
+            self.assertIsNotNone(turn["completed_at"])
+            store.close()
 
     def test_provider_errors_prefer_structured_status_codes(self):
         forbidden = RuntimeError("a very long provider response")

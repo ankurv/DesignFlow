@@ -633,10 +633,26 @@ def model_pool_for_config(config: dict) -> list[str]:
     return list(dict.fromkeys(configured + discovered))
 
 
+def is_design_capable_model(model: str) -> bool:
+    """Exclude specialist moderation/classification models from design roles."""
+    normalized = (model or "").lower().replace("_", "-")
+    return not any(marker in normalized for marker in (
+        "content-safety", "moderation", "prompt-guard", "llama-guard",
+    ))
+
+
+def config_supports_design(config: dict) -> bool:
+    pool = model_pool_for_config(config)
+    return not pool or any(is_design_capable_model(model) for model in pool)
+
+
 def model_for_virtual_agent(config: dict, role_index: int, provider_count: int) -> str:
     pool = model_pool_for_config(config)
     if not pool:
         return str(config.get("model", "") or "")
+    capable_pool = [model for model in pool if is_design_capable_model(model)]
+    if capable_pool:
+        pool = capable_pool
     provider_turn = role_index // max(1, provider_count)
     return pool[provider_turn % len(pool)]
 
@@ -841,6 +857,11 @@ async def start_run(
         persisted_checkpoint = state.store.latest_current_checkpoint()
         saved_run_id = str(persisted_checkpoint.get("run_id", "")) or state.store.latest_run_id()
     task = body.idea.strip() if (brief or saved_goal) else ""
+    effective_mode = body.mode
+    if brief and not body.idea.strip() and body.mode == "auto":
+        # The primary Start Run button intentionally has no prompt when a
+        # DESIGNFLOW.md brief exists. Treat it as planning, not direct chat.
+        effective_mode = "debate"
     if not product_goal:
         raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
     if body.save_brief and body.idea.strip():
@@ -852,7 +873,10 @@ async def start_run(
 
     agents = []
     try:
-        base_configs = [c for c in state.merged_configs if not c.get("is_paused")]
+        base_configs = [
+            c for c in state.merged_configs
+            if not c.get("is_paused") and config_supports_design(c)
+        ]
         if not base_configs:
             raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
 
@@ -872,7 +896,8 @@ async def start_run(
 
         # 2. Also include any custom agents the user explicitly defined
         for config in state.merged_configs:
-            if config["name"] not in personas and not config.get("is_paused"):
+            if (config["name"] not in personas and not config.get("is_paused")
+                    and config_supports_design(config)):
                 agents.append(create_agent(to_agent_config(config, state)))
     except Exception as exc:
         raise HTTPException(400, f"Could not initialize agent team: {exc}") from exc
@@ -893,7 +918,7 @@ async def start_run(
     else:
         state.workspace.begin_logbook_run(state.run_id, task or product_goal)
     if state.debug_observer:
-        state.debug_observer.start_run(state.run_id, task or product_goal, body.mode)
+        state.debug_observer.start_run(state.run_id, task or product_goal, effective_mode)
 
     state.orchestrator = Orchestrator(
         agents=agents,
@@ -903,7 +928,7 @@ async def start_run(
         max_tokens=body.max_tokens,
         max_build_iterations=body.max_build_iterations,
         require_approval=True,
-        mode=body.mode,
+        mode=effective_mode,
         restore=True,
         allow_artifact_changes_on_restore=resumes_saved_run,
         store=state.store,

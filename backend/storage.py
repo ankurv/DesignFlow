@@ -379,6 +379,15 @@ class ProjectStore:
             ).fetchall()]
         return [self.checkpoint(checkpoint_id) for checkpoint_id in ids]
 
+    def answered_checkpoint_questions(self) -> list[str]:
+        """Return durable answered questions for cross-run duplicate detection."""
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT question FROM decision_checkpoints
+                   WHERE status='answered' ORDER BY answered_at"""
+            ).fetchall()
+        return [str(row["question"]) for row in rows if str(row["question"]).strip()]
+
     def load_agents(self) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
@@ -436,6 +445,13 @@ class ProjectStore:
         cost = sum(float(agent.get("cost_usd", 0) or 0) for agent in agents)
         pricing_complete = int(all(agent.get("pricing_known", False) for agent in agents))
         with self._lock, self._db:
+            terminal_turn_status = "cancelled" if status in {"stopped", "cancelled"} else "failed"
+            self._db.execute(
+                """UPDATE turns SET status=?, completed_at=?,
+                          error=CASE WHEN error='' THEN ? ELSE error END
+                   WHERE run_id=? AND status IN ('running', 'waiting')""",
+                (terminal_turn_status, now, f"Run {status}", run_id),
+            )
             self._db.execute(
                 """UPDATE runs
                    SET status=?, completed_at=?, total_tokens=?, cached_input_tokens=?,
@@ -519,7 +535,7 @@ class ProjectStore:
                 "UPDATE turns SET status='waiting', attempt=? WHERE run_id=? AND turn_id=?",
                 (int(data.get("attempt", 1) or 1), run_id, turn_id),
             )
-        elif kind == "error" and data.get("recoverable"):
+        elif kind == "error":
             self._db.execute(
                 """UPDATE turns SET status='failed', attempt=?, error=?
                    WHERE run_id=? AND turn_id=?""",

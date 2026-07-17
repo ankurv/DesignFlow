@@ -30,7 +30,9 @@ class Workspace:
         "DESIGN_UPDATE",
         "DESIGN_APPEND",
         "PLAN_UPDATE",
+        "PLAN_APPEND",
         "DECISIONS_UPDATE",
+        "DECISIONS_APPEND",
     ]
     REQUIRED_PLAN_HEADERS = [
         "Requirements",
@@ -231,7 +233,9 @@ class Workspace:
 
     @staticmethod
     def _markdown_h2_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
-        matches = list(re.finditer(r"(?m)^#{2,3}\s+(.+?)\s*$", content or ""))
+        # Only H2 headings are canonical artifact sections. H3 headings are
+        # details owned by their parent section and must travel with it.
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", content or ""))
         if not matches:
             return (content or "").strip(), []
         preamble = (content or "")[:matches[0].start()].strip()
@@ -261,17 +265,33 @@ class Workspace:
         if not existing:
             return False, f"Rejected {key.upper()}.md update because the existing document cannot be safely section-merged."
 
+        # Models occasionally repeat a complete section while refining. The
+        # last version is the most recent synthesis, so retain it once rather
+        # than allowing duplicate H2 sections into the canonical artifact.
         incoming_by_heading = {heading.casefold(): body for heading, body in incoming}
+        incoming_order = list(dict.fromkeys(heading.casefold() for heading, _ in reversed(incoming)))[::-1]
+        protocol_headings = {name.casefold() for name in self.PROTOCOL_HEADERS}
+        # Repair artifacts produced by older versions: discard leaked protocol
+        # sections and collapse duplicate canonical headings to their last
+        # occurrence before applying the new synthesis.
+        existing_by_heading = {
+            heading.casefold(): body
+            for heading, body in existing
+            if heading.casefold() not in protocol_headings
+        }
+        existing_order = list(dict.fromkeys(
+            heading.casefold() for heading, _ in reversed(existing)
+            if heading.casefold() not in protocol_headings
+        ))[::-1]
         merged = []
         consumed = set()
-        for heading, body in existing:
-            lookup = heading.casefold()
+        for lookup in existing_order:
             if lookup in incoming_by_heading:
                 merged.append(incoming_by_heading[lookup])
                 consumed.add(lookup)
             else:
-                merged.append(body)
-        merged.extend(body for heading, body in incoming if heading.casefold() not in consumed)
+                merged.append(existing_by_heading[lookup])
+        merged.extend(incoming_by_heading[heading] for heading in incoming_order if heading not in consumed)
         result = "\n\n".join(filter(None, (preamble or f"# {title}", *merged))).rstrip() + "\n"
         self._archive_artifact(key, current)
         self.write(key, result)
@@ -914,6 +934,48 @@ class Workspace:
         decision_body = re.sub(r"^#.*$", "", decisions, flags=re.MULTILINE).strip()
         if decisions == "(empty)" or len(decision_body) < 40:
             errors.append("DECISIONS.md must record substantive choices, trade-offs, and rationale.")
+
+        unresolved_confirmation = re.search(
+            r"^#{2,6}\s+.*(?:questions?|recommendations?).{0,30}(?:for\s+)?confirmation.*$"
+            r"([\s\S]*?)(?=^#{1,6}\s|\Z)",
+            decisions,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if unresolved_confirmation and re.search(
+            r"(?:^\s*[-*]\s+|\?|\b(?:confirm|choose|decide|approve)\b)",
+            unresolved_confirmation.group(1),
+            re.MULTILINE | re.IGNORECASE,
+        ):
+            errors.append(
+                "DECISIONS.md contains unresolved questions for confirmation; convert them into a user decision checkpoint."
+            )
+
+        leaked_markers = sorted(set(re.findall(
+            r"^##\s+(DESIGN|PLAN|DECISIONS)_(?:UPDATE|APPEND)\b",
+            "\n".join((design, plan, decisions)),
+            re.MULTILINE | re.IGNORECASE,
+        )))
+        if leaked_markers:
+            errors.append("Planning artifacts contain leaked response-protocol control markers.")
+
+        brief = self.brief_path.read_text(errors="replace") if self.brief_path.exists() else ""
+        observer_is_optional = bool(re.search(
+            r"(?:optional(?:ly)?[\s\w-]{0,40}AI Observer|AI Observer[\s\w-]{0,40}optional)",
+            brief,
+            re.IGNORECASE,
+        ))
+        if observer_is_optional:
+            mandatory_observer_lines = [
+                line for line in plan.splitlines()
+                if "ai observer" in line.lower()
+                and "optional" not in line.lower()
+                and re.search(r"(?:^- \[[ xX]\]|\b(?:depend(?:s|ency)?|requires?|must)\b)", line, re.I)
+            ]
+            if mandatory_observer_lines:
+                errors.append(
+                    "PLAN.md makes the explicitly optional AI Observer a mandatory task or dependency. "
+                    "Keep core workflows independent and label Observer work optional."
+                )
 
         phases = re.search(
             r"^##\s*Implementation Phases\s*$([\s\S]*?)(?=^##\s|\Z)",

@@ -260,6 +260,9 @@ class Orchestrator:
         self.run_id = run_id
         self._cb = event_cb
         self.max_debate_rounds = max_debate_rounds
+        # Debate depth also bounds requirements discovery, but discovery stays
+        # much smaller than the debate itself. Low=1, standard=2, deep=3.
+        self.max_discovery_questions = min(3, max(1, (max_debate_rounds + 1) // 2))
         self.max_tokens = max_tokens
         self.max_build_iterations = max_build_iterations
         self.require_approval = require_approval
@@ -715,6 +718,38 @@ class Orchestrator:
         stop = {"the", "a", "an", "is", "are", "what", "which", "should", "do", "does", "to", "for", "and", "or"}
         return " ".join(word for word in words if word not in stop)[:180]
 
+    @staticmethod
+    def _question_terms(question: str) -> set[str]:
+        stop = {
+            "the", "a", "an", "is", "are", "what", "which", "should", "do", "does",
+            "to", "for", "and", "or", "their", "in", "of", "with", "as", "that",
+            "it", "be", "only", "across", "may", "will", "would", "could", "this",
+        }
+        return {
+            word for word in re.findall(r"[a-z0-9]+", (question or "").lower())
+            if word not in stop
+        }
+
+    def _known_discovery_questions(self) -> set[str]:
+        known = set(self._discovery_question_keys)
+        if self.store and hasattr(self.store, "answered_checkpoint_questions"):
+            known.update(
+                self._question_key(question)
+                for question in self.store.answered_checkpoint_questions()
+            )
+        return {question for question in known if question}
+
+    def _is_repeated_discovery_question(self, key: str) -> bool:
+        terms = self._question_terms(key)
+        for previous in self._known_discovery_questions():
+            if SequenceMatcher(None, key, previous).ratio() >= 0.72:
+                return True
+            previous_terms = self._question_terms(previous)
+            smaller = min(len(terms), len(previous_terms))
+            if smaller >= 3 and len(terms & previous_terms) / smaller >= 0.60:
+                return True
+        return False
+
     def _parse_discovery_proposal(self, response: str) -> Optional[str]:
         match = re.search(r"\{[\s\S]*\}", response or "")
         if not match:
@@ -737,11 +772,7 @@ class Orchestrator:
         if not question.endswith("?") or re.match(r"^\s*decision(?:\s+\d+)?\s*:", question, re.I):
             return None
         key = self._question_key(question)
-        semantically_repeated = any(
-            SequenceMatcher(None, key, previous).ratio() >= 0.82
-            for previous in self._discovery_question_keys
-        )
-        if not key or key in self._discovery_question_keys or semantically_repeated:
+        if not key or self._is_repeated_discovery_question(key):
             return None
         rendered_options = []
         for index, option in enumerate(options):
@@ -785,7 +816,7 @@ class Orchestrator:
         return "\n\n".join(parts)
 
     async def _adaptive_discovery_question(self, coordinator, step: int) -> str:
-        if self._discovery_questions_asked >= 6:
+        if self._discovery_questions_asked >= self.max_discovery_questions:
             return ""
         if self._adaptive_discovery_unavailable:
             return self._deterministic_discovery_question()
@@ -847,6 +878,12 @@ class Orchestrator:
             except (RuntimeError, asyncio.TimeoutError) as exc:
                 last_error = exc
                 self._discovery_failed_providers.add(analyst.config.base_id or analyst.config.id or analyst.name)
+                self._emit(Event(EventKind.ERROR, agent=analyst.name, data={
+                    "turn_id": turn_id, "attempt": self._turn_attempts.get(turn_id, 1),
+                    "phase": "discovery_analysis", "error": str(exc) or type(exc).__name__,
+                    "error_code": classify_provider_error(exc).code, "recoverable": False,
+                    **self._event_actor_meta(analyst),
+                }))
                 self._emit(Event(EventKind.PHASE, agent=analyst.name, data={
                     "phase": "discovery", "status": "provider_failover",
                     "message": "Discovery analyst failed; trying another configured agent.",
@@ -863,6 +900,12 @@ class Orchestrator:
             question = self._parse_discovery_proposal(response)
             if question is None:
                 last_error = RuntimeError("Discovery analyst returned an invalid or duplicate question")
+                self._emit(Event(EventKind.ERROR, agent=analyst.name, data={
+                    "turn_id": turn_id, "attempt": self._turn_attempts.get(turn_id, 1),
+                    "phase": "discovery_analysis", "error": str(last_error),
+                    "error_code": "invalid_discovery_response", "recoverable": False,
+                    **self._event_actor_meta(analyst),
+                }))
                 continue
             self._record_turn_usage(analyst, "discovery")
             self._emit(Event(EventKind.TURN_END, agent=analyst.name, data={
@@ -942,9 +985,22 @@ class Orchestrator:
         if self.require_approval and not question and self._discovery_questions_asked == 0:
             question = self._deterministic_discovery_question()
         if question and self.require_approval:
+            # Adaptive discovery registers valid model questions itself. Also
+            # register deterministic fallbacks and test/custom providers here
+            # so the configured discovery depth is always enforced.
+            lines = [line.strip() for line in question.splitlines() if line.strip()]
+            question_line = next((line for line in lines if line.endswith("?")), lines[0] if lines else "")
+            question_key = self._question_key(question_line)
+            if question_key and question_key not in self._discovery_question_keys:
+                self._discovery_question_keys.add(question_key)
+                self._discovery_questions_asked += 1
             payload = self._pending_discovery_checkpoint or self._checkpoint_payload_from_text(question)
             self._enqueue_checkpoint_payloads([payload])
-            self.post_approval_phase = OrchestratorPhase.DISCOVERY
+            self.post_approval_phase = (
+                OrchestratorPhase.DISCOVERY
+                if self._discovery_questions_asked < self.max_discovery_questions
+                else OrchestratorPhase.DRAFTING
+            )
             self.phase = OrchestratorPhase.APPROVAL
         else:
             self.phase = OrchestratorPhase.DRAFTING
@@ -1049,6 +1105,8 @@ class Orchestrator:
             f"DECISIONS_UPDATE must record every material choice already adopted in the design, including status "
             f"(Proposed or Confirmed), chosen option, alternatives considered, trade-offs, rationale, and what would "
             f"cause the team to revisit it. Do not present an unconfirmed assumption as user-approved. "
+            f"Features explicitly marked optional in the product brief must remain optional and must not become "
+            f"dependencies of core MVP workflows. "
             f"A current user directive overrides conflicting older artifacts: preserve the old ledger entry as "
             f"Superseded, record the replacement as Confirmed, and reconcile DESIGN.md and PLAN.md."
         )
@@ -1112,6 +1170,7 @@ class Orchestrator:
             f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
             f"Treat explicit current user directives as authoritative. Mark conflicting older decisions Superseded "
             f"instead of silently deleting history, and remove their consequences from DESIGN.md and PLAN.md.\n"
+            f"Preserve optionality from the product brief: optional capabilities must not gate core tasks or MVP acceptance.\n"
             f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
         )
         if self._deterministic_feedback:
