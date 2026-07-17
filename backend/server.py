@@ -720,7 +720,7 @@ def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
     expert["id"] = active.config.id
     expert["base_id"] = new_base.get("id", "")
     expert["name"] = active.name
-    expert["role"] = active.role
+    expert["role"] = active.config.role
     expert["system_prompt"] = active.config.system_prompt
     expert.setdefault("extra", {})["runtime_base_name"] = new_base.get("name", new_base.get("id", "provider"))
 
@@ -731,6 +731,7 @@ def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
         if a is active:
             s.orchestrator.agents[i] = new_agent
             break
+    return new_agent
 
 @app.put("/agents/{agent_id}")
 def update_agent(agent_id: str, body: AgentConfigIn, state: AppState = Depends(get_state)):
@@ -1059,6 +1060,32 @@ def retry_failed_turn(state: AppState = Depends(get_state)):
         "attempt": failed.get("attempt"),
         "agent": failed.get("agent"),
     }}
+
+
+class ProviderRecoveryBody(BaseModel):
+    action: str
+
+
+@app.post("/run/recover-provider")
+def recover_provider_turn(body: ProviderRecoveryBody, state: AppState = Depends(get_state)):
+    if not state.orchestrator or not state.orchestrator.failed_turn:
+        raise HTTPException(400, "There is no failed provider turn to recover")
+    if body.action not in {"auto_failover", "wait_and_retry"}:
+        raise HTTPException(400, "Recovery action must be auto_failover or wait_and_retry")
+    failed = state.orchestrator.failed_turn
+    if body.action == "auto_failover":
+        active = next(
+            (agent for agent in state.orchestrator.agents if agent.config.id == failed.get("agent_id")),
+            None,
+        )
+        if active is None:
+            raise HTTPException(409, "The failed logical agent is no longer active")
+        _reassign_agent_if_paused(state, active, active.config.base_id or active.config.id)
+    state.orchestrator.recover_failed_turn(body.action)
+    state.status = "running"
+    state.last_transition = f"provider_recovery_{body.action}"
+    state.awaiting_input = False
+    return {"ok": True, "status": state.status, "action": body.action}
 
 
 @app.post("/run/stop")

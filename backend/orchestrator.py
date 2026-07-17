@@ -378,6 +378,15 @@ class Orchestrator:
         self._pause_event.set()
         self._recovery_event.set()
 
+    def recover_failed_turn(self, action: str):
+        """Resume the exact failed turn after the caller selects a recovery policy."""
+        if not self._failed_turn:
+            raise ValueError("There is no failed turn to recover")
+        if action not in {"auto_failover", "wait_and_retry"}:
+            raise ValueError("Unknown provider recovery action")
+        self._failed_turn["recovery_action"] = action
+        self.retry_failed_turn()
+
     # ── Main entry ────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1107,6 +1116,9 @@ class Orchestrator:
             f"cause the team to revisit it. Do not present an unconfirmed assumption as user-approved. "
             f"Features explicitly marked optional in the product brief must remain optional and must not become "
             f"dependencies of core MVP workflows. "
+            f"Choose architecture diagrams according to the design's actual needs. Use separate readable views when "
+            f"actors, boundaries, data flows, state transitions, deployment, or failure behavior cannot be explained "
+            f"clearly in one diagram; do not target an arbitrary diagram count. "
             f"A current user directive overrides conflicting older artifacts: preserve the old ledger entry as "
             f"Superseded, record the replacement as Confirmed, and reconcile DESIGN.md and PLAN.md."
         )
@@ -1171,6 +1183,8 @@ class Orchestrator:
             f"Treat explicit current user directives as authoritative. Mark conflicting older decisions Superseded "
             f"instead of silently deleting history, and remove their consequences from DESIGN.md and PLAN.md.\n"
             f"Preserve optionality from the product brief: optional capabilities must not gate core tasks or MVP acceptance.\n"
+            f"Use as many distinct architecture diagrams as the design needs for clarity, based on separable structures "
+            f"and behaviors—not a fixed count—and avoid one overloaded diagram.\n"
             f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
         )
         if self._deterministic_feedback:
@@ -1603,15 +1617,27 @@ class Orchestrator:
                 else:
                     agent_mcp_tools = [t for t in self.mcp_tools if t.get("server") in agent_allowed_servers]
 
-                response = await asyncio.to_thread(
-                    agent.send, prompt, effective_system, ephemeral_context,
-                    mcp_tools=agent_mcp_tools, tool_handler=call_mcp_tool
-                )
+                provider_timeout = max(15, int(agent.config.extra.get("orchestrator_timeout", 300) or 300))
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            agent.send, prompt, effective_system, ephemeral_context,
+                            mcp_tools=agent_mcp_tools, tool_handler=call_mcp_tool,
+                        ),
+                        timeout=provider_timeout,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"[{agent.name}] send failed: provider timed out after {provider_timeout} seconds"
+                    ) from exc
                 self._failed_turn = None
                 return response
             except RuntimeError as exc:
                 provider_error = classify_provider_error(exc)
-                if not provider_error.retryable:
+                user_selectable_recovery = provider_error.code in {
+                    "quota_exhausted", "rate_limited", "provider_timeout",
+                }
+                if not provider_error.retryable or user_selectable_recovery:
                     agent.mark_error(str(exc))
                     public_error, error_code = provider_error.message, provider_error.code
                     self._failed_turn = {
@@ -1623,6 +1649,7 @@ class Orchestrator:
                         "public_error": public_error,
                         "error_code": error_code,
                         "prompt": prompt,
+                        "recovery_options": ["auto_failover", "wait_and_retry", "stop"],
                         **context,
                     }
                     self._recovery_event.clear()
@@ -1644,6 +1671,7 @@ class Orchestrator:
                     # A user may have paused the failed provider and substituted
                     # this logical specialist with another model. Resolve it only
                     # after explicit recovery, at this safe turn boundary.
+                    recovery_action = self._failed_turn.get("recovery_action", "wait_and_retry")
                     agent = next(
                         (candidate for candidate in self.agents if candidate.config.id == self._failed_turn["agent_id"]),
                         agent,
@@ -1653,7 +1681,7 @@ class Orchestrator:
                     agent.error_message = ""
                     self._emit(Event(EventKind.TURN_START, agent=agent.name, data={
                         "turn_id": turn_id, "attempt": attempt, "resumed": True,
-                        "retry_reason": "manual_recovery", **context, **self._event_actor_meta(agent),
+                        "retry_reason": recovery_action, **context, **self._event_actor_meta(agent),
                     }))
                     continue
                 if max_retries and attempt >= max_retries + 1:

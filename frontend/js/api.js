@@ -572,6 +572,7 @@ function handleEvent(ev) {
   }
   if (ev.kind === 'error') {
     awaitingDecisionInput = false;
+    updateStatus(ev.data.recoverable ? 'needs_attention' : 'error');
     const retryBtn = document.getElementById('retryBtn');
     if (retryBtn && ev.data.recoverable) {
       retryBtn.textContent = ev.data.error_code === 'context_too_large' ? 'Compact & Retry' : 'Retry failed turn';
@@ -580,7 +581,12 @@ function handleEvent(ev) {
         : 'Retry the failed model turn';
       retryBtn.disabled = false;
     }
-    updateStatus(ev.data.recoverable ? 'needs_attention' : 'error');
+    const providerRecovery = ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(ev.data.error_code);
+    const failoverBtn = document.getElementById('failoverBtn');
+    const waitRetryBtn = document.getElementById('waitRetryBtn');
+    if (failoverBtn) failoverBtn.style.display = providerRecovery ? '' : 'none';
+    if (waitRetryBtn) waitRetryBtn.style.display = providerRecovery ? '' : 'none';
+    if (retryBtn && providerRecovery) retryBtn.style.display = 'none';
   }
 
   // Parse coordinator turn into user-facing summary cards
@@ -1022,6 +1028,24 @@ async function retryFailedTurn() {
   notify('Context compacted. Retrying the same turn.');
 }
 
+async function recoverProvider(action) {
+  const response = await fetch('/run/recover-provider', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({action}),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    notify(data.detail || 'Could not recover the provider turn', true);
+    return;
+  }
+  document.getElementById('failoverBtn').style.display = 'none';
+  document.getElementById('waitRetryBtn').style.display = 'none';
+  paused = false;
+  updateStatus('running');
+  notify(action === 'auto_failover'
+    ? 'Failing over to another healthy model for the same turn.'
+    : 'Retrying the same model; the workflow position was preserved.');
+}
+
 async function resetRun() {
   if (runStatus === 'running') return;
   if (!confirm("Are you sure you want to reset? This will clear the conversational history (but keep your project files intact).")) return;
@@ -1139,6 +1163,8 @@ function updateStatus(s) {
   const pauseBtn = document.getElementById('pauseBtn');
   const stopBtn = document.getElementById('stopBtn');
   const retryBtn = document.getElementById('retryBtn');
+  const failoverBtn = document.getElementById('failoverBtn');
+  const waitRetryBtn = document.getElementById('waitRetryBtn');
   dot.className = `status-dot ${s}`;
   txt.textContent = s;
 
@@ -1191,6 +1217,10 @@ function updateStatus(s) {
 
   const running = s === 'running' || s === 'paused' || s === 'needs_attention';
   if (retryBtn) retryBtn.style.display = s === 'needs_attention' ? '' : 'none';
+  if (s !== 'needs_attention') {
+    if (failoverBtn) failoverBtn.style.display = 'none';
+    if (waitRetryBtn) waitRetryBtn.style.display = 'none';
+  }
   if (pauseBtn) {
     pauseBtn.style.display = (s === 'running' || s === 'paused') ? '' : 'none';
     pauseBtn.textContent = s === 'paused' ? 'Resume' : 'Pause';
@@ -1239,6 +1269,12 @@ async function fetchAgentStatus() {
   });
   const failedTurn = res.failed_turn || {};
   const retryBtn = document.getElementById('retryBtn');
+  const failoverBtn = document.getElementById('failoverBtn');
+  const waitRetryBtn = document.getElementById('waitRetryBtn');
+  const providerRecovery = ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(failedTurn.error_code);
+  if (failoverBtn) failoverBtn.style.display = providerRecovery ? '' : 'none';
+  if (waitRetryBtn) waitRetryBtn.style.display = providerRecovery ? '' : 'none';
+  if (retryBtn && providerRecovery) retryBtn.style.display = 'none';
   if (retryBtn && failedTurn.error_code === 'context_too_large') {
     retryBtn.textContent = 'Compact & Retry';
     retryBtn.title = 'Re-run preflight with bounded history and compact project context';

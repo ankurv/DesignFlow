@@ -133,7 +133,10 @@ class DebugObserver:
                 f"Discovery failed over between providers {len(provider_failovers)} time(s).",
                 "Review model suitability, timeout settings, and terminal turn-state recording.",
             ))
-        if len(discovery_approvals) > 1:
+        # Debate depth intentionally permits up to three distinct discovery
+        # decisions. More than that exceeds the orchestrator's hard bound and
+        # indicates a loop regardless of the configured debate level.
+        if len(discovery_approvals) > 3:
             insights.append(self._insight(
                 "repeated_discovery_checkpoint", "high",
                 f"Discovery paused for approval {len(discovery_approvals)} times in one run.",

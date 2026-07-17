@@ -443,6 +443,16 @@ VALID_DECISIONS = """## Accepted Decisions
 
 
 class CrossCuttingDesignTests(unittest.TestCase):
+    def test_plural_diagram_request_requires_multiple_views(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.brief_path.write_text("Provide system context and component architecture diagrams.")
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("decisions", VALID_DECISIONS)
+            workspace.write("design", VALID_DESIGN)
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("at least 2 distinct Mermaid" in error for error in errors), errors)
+
     def test_planning_validation_requires_product_operations_coverage(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -1038,6 +1048,10 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(error.data["error"], "Model quota or provider credits are exhausted.")
         self.assertEqual(orchestrator.failed_turn["error_code"], "quota_exhausted")
         self.assertEqual(orchestrator.failed_turn["public_error"], "Model quota or provider credits are exhausted.")
+        self.assertEqual(
+            orchestrator.failed_turn["recovery_options"],
+            ["auto_failover", "wait_and_retry", "stop"],
+        )
 
     def test_failed_turn_uses_user_substituted_agent_on_retry(self):
         failed = RepairableFake(
@@ -2674,8 +2688,8 @@ class DeterministicRoutingTests(unittest.TestCase):
             observer = DebugObserver(Path(directory), max_events=30)
             observer.start_run("run-loop", "Design the system", "debate")
             approval = {"kind": "phase", "data": {"phase": "approval", "status": "waiting_for_approval"}}
-            observer.observe(approval)
-            observer.observe(approval)
+            for _ in range(4):
+                observer.observe(approval)
             observer.observe({"kind": "phase", "data": {
                 "phase": "discovery", "status": "provider_failover",
             }})

@@ -998,8 +998,20 @@ class Workspace:
                 "PLAN.md is missing required headers: " + ", ".join(missing_headers)
             )
 
-        if "```mermaid" not in design.lower() or "```" not in design:
-            errors.append("DESIGN.md must include at least one Mermaid diagram block.")
+        mermaid_count = len(re.findall(r"^```mermaid\s*$", design, re.MULTILINE | re.IGNORECASE))
+        brief_text = self.brief_path.read_text(errors="replace") if self.brief_path.exists() else ""
+        # Let the product brief drive multiplicity. A plural diagram request
+        # requires multiple views; otherwise one coherent baseline diagram is
+        # sufficient for the deterministic gate and semantic review decides
+        # whether additional views are warranted.
+        requests_multiple = bool(re.search(r"\bdiagrams\b", brief_text, re.IGNORECASE))
+        minimum_diagrams = 2 if requests_multiple else 1
+        if mermaid_count < minimum_diagrams:
+            errors.append(
+                f"DESIGN.md must include at least {minimum_diagrams} distinct Mermaid diagram block(s) "
+                f"for this {'brief, which explicitly requests multiple diagrams' if minimum_diagrams > 1 else 'planning baseline'} "
+                f"({mermaid_count} found)."
+            )
 
         if not self._has_markdown_h2(design, "Known Unknowns & Validation Plan"):
             errors.append("DESIGN.md must include a 'Known Unknowns & Validation Plan' section.")
@@ -1086,7 +1098,7 @@ class Workspace:
         return errors
 
     def unresolved_confirmation_question(self, decisions: str | None = None) -> str:
-        """Return the first actual question and options still parked in a confirmation section."""
+        """Return the first actual question still parked in a confirmation section."""
         text = decisions if decisions is not None else self.read("decisions")
         for match in re.finditer(
             r"^#{2,6}\s+.*(?:questions?|recommendations?).{0,30}(?:for\s+)?confirmation.*$"
@@ -1095,8 +1107,12 @@ class Workspace:
             re.MULTILINE | re.IGNORECASE,
         ):
             body = match.group(1).strip()
-            if "?" in body:
-                return body
+            question = re.search(r"(?:^|\n)\s*[-*]?\s*(.+?\?)\s*(?:\n|$)", body)
+            if not question:
+                question = re.search(r"([^\n?]{12,}\?)", body)
+            if question:
+                clean = re.sub(r"\s+", " ", question.group(1)).strip()
+                return re.sub(r"^[-*]\s*", "", clean)
         return ""
 
     @staticmethod
