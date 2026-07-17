@@ -1553,34 +1553,6 @@ async function exportContext() {
   }
 
   try {
-    const planRes = await fetch('/workspace/file/plan');
-    const planData = planRes.ok ? await planRes.json() : {content: 'No PLAN.md found.'};
-    const designRes = await fetch('/workspace/file/design');
-    const designData = designRes.ok ? await designRes.json() : {content: 'No DESIGN.md found.'};
-    const decisionsRes = await fetch('/workspace/file/decisions');
-    const decisionsData = decisionsRes.ok ? await decisionsRes.json() : {content: 'No DECISIONS.md found.'};
-    const questionsRes = await fetch('/workspace/file/questions');
-    const questionsData = questionsRes.ok ? await questionsRes.json() : {content: '(empty)'};
-    
-    const unresolved = questionsData.content && questionsData.content.trim() !== '(empty)'
-      ? `\n\n# Unresolved Questions\n\n${questionsData.content}`
-      : '';
-    const bundled = `# DesignFlow Planning Baseline
-
-This package converts a high-level goal into a stronger technical starting point. It is not a final implementation specification. Validate the documented assumptions, follow the discovery checkpoints, and update the architecture when real code, data, provider behavior, or user feedback contradicts the plan.
-
-# Architecture Design
-
-${designData.content}
-
-# Implementation Plan
-
-${planData.content}
-
-# Decision Ledger
-
-${decisionsData.content}${unresolved}`;
-    
     const provider = document.getElementById('providerSelect')?.value || 'anthropic';
     const model = document.getElementById('modelSelect')?.value || 'claude-3-7-sonnet-20250219';
 
@@ -1588,15 +1560,17 @@ ${decisionsData.content}${unresolved}`;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        bundled_content: bundled,
         provider: provider,
         model: model
       })
     });
 
     if (!res.ok) {
-      const err = await res.text();
-      throw new Error(err);
+      const err = await res.json().catch(() => ({}));
+      const detail = err.detail;
+      const message = typeof detail === 'string' ? detail : detail?.message;
+      const failures = Array.isArray(detail?.errors) ? `\n\n${detail.errors.map(item => `• ${item}`).join('\n')}` : '';
+      throw new Error((message || 'Planning baseline is not export-ready') + failures);
     }
 
     const data = await res.json();

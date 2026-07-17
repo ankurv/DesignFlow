@@ -475,6 +475,11 @@ VALID_PLAN = """## Requirements
 ## Acceptance Criteria
 - plan is actionable
 
+## Requirement Traceability
+| Requirement | Design coverage | Implementation task | Acceptance evidence |
+| --- | --- | --- | --- |
+| Define the product | Architecture | Phase 1 | Verify the baseline is actionable |
+
 ## Implementation Phases
 - [ ] Phase 1: validate the riskiest assumption
 - [ ] Phase 2: implement the baseline
@@ -744,6 +749,46 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
                 workspace.unresolved_confirmation_question(),
                 "Should live trading be enabled?",
             )
+
+    def test_validation_rejects_pending_decisions_and_missing_checkpoint_projection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", VALID_PLAN.replace(
+                "## Decisions\n- start with sqlite",
+                "## Decisions\n- Pending: four product-boundary decisions listed in the decision checkpoint",
+            ))
+            workspace.write("design", VALID_DESIGN)
+            workspace.write("decisions", VALID_DECISIONS + "\n- Pending: choose the signal language.\n")
+            workspace.write("questions", "# Decision Checkpoint\n")
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("Pending decision entries" in error for error in errors), errors)
+            self.assertTrue(any("PLAN.md Decisions contains Pending choices" in error for error in errors), errors)
+            self.assertTrue(any("no structured checkpoint is present" in error for error in errors), errors)
+
+    def test_requirement_traceability_requires_end_to_end_mapping_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("plan", re.sub(
+                r"## Requirement Traceability[\s\S]*?(?=\n## Implementation Phases)",
+                "## Requirement Traceability\n- Requirement: define the product.",
+                VALID_PLAN,
+            ))
+            workspace.write("design", VALID_DESIGN)
+            workspace.write("decisions", VALID_DECISIONS)
+            errors = workspace.validate_planning_artifacts()
+            self.assertTrue(any("Requirement Traceability must map" in error for error in errors), errors)
+
+    def test_server_owned_export_bundle_removes_duplicate_artifact_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("design", "# Architecture Design\n\n# Architecture Design\n\n## Architecture\nUseful design.")
+            workspace.write("plan", "# Implementation Plan\n\n## Requirements\nUseful plan.")
+            workspace.write("decisions", "# Key Decisions\n\n## Confirmed\nUseful decisions.")
+            bundle = workspace.build_export_bundle()
+            self.assertEqual(bundle.count("# Architecture Design"), 1)
+            self.assertEqual(bundle.count("# Implementation Plan"), 1)
+            self.assertEqual(bundle.count("# Decision Ledger"), 1)
+            self.assertNotIn("# Key Decisions", bundle)
 
     def test_validation_preserves_explicit_observer_optionality(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2903,8 +2948,14 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertEqual(artifact.target_artifacts, ("DESIGN.md",))
         self.assertTrue(artifact.requires_diagram_delta)
         self.assertEqual(classify_run_contract("Why Kafka?", "auto").kind, RunKind.CHAT)
+        self.assertEqual(classify_run_contract("refine the design", "auto").kind,
+                         RunKind.INTENT_ROUTING)
+        self.assertEqual(classify_run_contract("Make this substantially better", "auto").kind,
+                         RunKind.INTENT_ROUTING)
+        self.assertEqual(classify_run_contract("How should we refine the design?", "auto").kind,
+                         RunKind.CHAT)
         self.assertEqual(classify_run_contract("Design a secure platform", "auto").kind,
-                         RunKind.PLANNING_WORKFLOW)
+                         RunKind.INTENT_ROUTING)
         self.assertEqual(classify_run_contract("status", "auto", "status").kind,
                          RunKind.STATUS_QUERY)
         self.assertEqual(classify_run_contract(
@@ -2931,11 +2982,49 @@ class DeterministicRoutingTests(unittest.TestCase):
     def test_auto_mode_routes_basic_questions_without_team_debate(self):
         self.assertFalse(Orchestrator._should_run_team_workflow("Why did we choose Kafka?", "auto"))
         self.assertFalse(Orchestrator._should_run_team_workflow("What does this setting do?", "auto"))
-        self.assertTrue(Orchestrator._should_run_team_workflow("Design a secure payment architecture", "auto"))
-        self.assertTrue(Orchestrator._should_run_team_workflow("I want to build a logging platform", "auto"))
+        self.assertFalse(Orchestrator._should_run_team_workflow("Design a secure payment architecture", "auto"))
+        self.assertFalse(Orchestrator._should_run_team_workflow("I want to build a logging platform", "auto"))
         self.assertTrue(Orchestrator._should_run_team_workflow("Debate the storage approach", "auto"))
         self.assertFalse(Orchestrator._should_run_team_workflow("Design a system", "direct"))
         self.assertTrue(Orchestrator._should_run_team_workflow("What is this?", "debate"))
+
+    def test_state_aware_router_resolves_ambiguous_language_to_typed_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Design a trading platform")
+            agent = StatefulFake(
+                AgentConfig(id="architect", name="architect", kind="openai"),
+                replies=['{"kind":"planning_workflow","target_artifacts":[],"reason":"broad refinement"}'],
+            )
+            orchestrator = Orchestrator([agent], workspace, require_approval=False, mode="auto")
+            orchestrator._running = True
+            contract = asyncio.run(orchestrator._resolve_request_contract(agent, "make this substantially better"))
+            self.assertEqual(contract.kind, RunKind.PLANNING_WORKFLOW)
+            self.assertIn("Validation failures", agent.received[0][-1]["content"])
+
+    def test_prompt_catalog_validates_versions_placeholders_and_protocol_markers(self):
+        from backend.prompt_catalog import prompt_catalog
+        self.assertEqual(prompt_catalog.version("coordinator_system"), "2.0.0")
+        rendered = prompt_catalog.render(
+            "intent_router_task", request="refine it",
+            artifact_state="{}", validation_errors="[]",
+        )
+        self.assertIn("planning_workflow", rendered)
+        with self.assertRaises(ValueError):
+            prompt_catalog.render("intent_router_task", request="missing values")
+
+    def test_state_aware_router_fails_safe_to_workflow_instead_of_chat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Design a trading platform")
+            agent = StatefulFake(
+                AgentConfig(id="architect", name="architect", kind="openai"),
+                replies=["not valid routing JSON"],
+            )
+            orchestrator = Orchestrator([agent], workspace, require_approval=False, mode="auto")
+            orchestrator._running = True
+            contract = asyncio.run(orchestrator._resolve_request_contract(agent, "make it better"))
+            self.assertEqual(contract.kind, RunKind.PLANNING_WORKFLOW)
 
     def test_targeted_artifact_edits_use_one_agent(self):
         prompt = "Update DESIGN.md to include a Mermaid architecture diagram."

@@ -31,6 +31,7 @@ from .errors import classify_provider_error
 from .debug_observer import DebugObserver
 from .designflow_mcp import designflow_mcp_app
 from .mcp_access import mcp_access_tokens
+from .prompt_catalog import prompt_catalog
 from .audit import audit_log
 from .version import __version__
 
@@ -1496,7 +1497,7 @@ class FileUpdateBody(BaseModel):
     content: str
 
 class ExportBody(BaseModel):
-    bundled_content: str
+    bundled_content: str = ""
     provider: str
     model: str
 
@@ -1510,23 +1511,18 @@ async def export_workspace(body: ExportBody, state: AppState = Depends(get_state
         raise HTTPException(400, "Project path does not exist")
         
     project_name = project_path.name or "project"
+    active_checkpoint = state.store.latest_current_checkpoint() if state.store else {}
+    if active_checkpoint:
+        raise HTTPException(409, "Resolve the active decision checkpoint before exporting the planning baseline")
+    validation_errors = state.workspace.validate_planning_artifacts()
+    if validation_errors:
+        raise HTTPException(409, {"message": "Planning baseline is not export-ready", "errors": validation_errors})
+    bundled_content = state.workspace.build_export_bundle()
     
     try:
         config = AgentConfig(provider=body.provider, model=body.model)
         agent = create_agent(config)
-        prompt = (
-            "You are an elite Enterprise Software Architect defining the operational rules for autonomous coding agents (like Google Antigravity or Codex) working on this codebase.\n\n"
-            "Based on the following project plan, generate a highly comprehensive, strict set of guidelines that the agents MUST follow. "
-            "These guidelines must enforce enterprise-grade development standards, proactive problem solving, and strict architectural compliance.\n\n"
-            f"PROJECT PLAN:\n{body.bundled_content}\n\n"
-            f"INSTRUCTIONS FOR THE OUTPUT (AGENTS.md):\n"
-            f"1. Output ONLY the raw Markdown. Start exactly with '# Agent Guidelines for this Project'. Do NOT wrap in ```markdown.\n"
-            f"2. Strict Architecture Adherence: Explicitly mandate that agents must strictly follow `{project_name}.md` as the absolute source of truth. Any deviation requires explicit user approval.\n"
-            f"3. Task Evaluation & Proactive Recommendations: Instruct agents to ALWAYS evaluate user requests for edge cases, performance implications, and architectural fit before writing code. They must proactively suggest superior implementation paths if the user's request is suboptimal or unsafe.\n"
-            f"4. Code Quality & Best Practices: Include rules for defensive programming, comprehensive error handling, modularity, DRY principles, and avoiding regression bugs.\n"
-            f"5. Testing & Validation: Require agents to proactively verify their changes (e.g., via unit tests, build commands, or manual UI checks) before concluding a task.\n"
-            f"6. Knowledge Items (KIs): Instruct agents that if they are provided with Knowledge Items or historical artifacts, they MUST review them BEFORE independent research.\n"
-        )
+        prompt = prompt_catalog.render("agents_export", project_name=project_name, project_plan=bundled_content)
         agents_md = await agent.generate(prompt)
     except Exception as e:
         # Fallback to a rigid template if LLM fails
@@ -1550,7 +1546,7 @@ async def export_workspace(body: ExportBody, state: AppState = Depends(get_state
             "- **Check Context First**: If you receive Knowledge Items (KIs) or summaries at the start of a conversation, you MUST read the relevant KI artifacts before performing independent research or writing code to ensure you follow established project patterns.\n"
         )
     plan_file = project_path / f"{project_name}.md"
-    plan_file.write_text(body.bundled_content, encoding="utf-8")
+    plan_file.write_text(bundled_content, encoding="utf-8")
     
     agents_file = project_path / "AGENTS.md"
     agents_file.write_text(agents_md, encoding="utf-8")

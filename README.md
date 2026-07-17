@@ -85,6 +85,12 @@ Exactly one checkpoint per run may be active, option answers are validated trans
 and stale submissions are rejected by checkpoint ID. `QUESTIONS.md` is now only a readable
 projection of the active database row and is never parsed by the server runtime.
 
+Completed plans must include end-to-end requirement traceability from the original brief to
+design coverage, bounded implementation work, and acceptance evidence. Deterministic quality
+checks reject pending decisions, references to missing checkpoints, and incomplete traceability.
+Export is composed from canonical server-side artifacts and is blocked until those checks and
+all active decision checkpoints pass; browser-supplied export content is never authoritative.
+
 Each project also receives an editable `.designflow/product_capabilities.json` catalog.
 DesignFlow evaluates its commercial, operational, delivery, security, and experience
 capabilities during discovery and synthesis. Set an entry's `mode` to `include` or

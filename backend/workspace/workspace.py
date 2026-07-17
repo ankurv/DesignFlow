@@ -44,6 +44,7 @@ class Workspace:
         "Decisions",
         "Risks",
         "Acceptance Criteria",
+        "Requirement Traceability",
         "Implementation Phases",
         "Discovery Checkpoints",
     ]
@@ -998,6 +999,25 @@ class Workspace:
                 "PLAN.md is missing required headers: " + ", ".join(missing_headers)
             )
 
+        traceability = re.search(
+            r"^##\s*Requirement Traceability\s*$([\s\S]*?)(?=^##\s|\Z)",
+            plan, re.MULTILINE | re.IGNORECASE,
+        )
+        if traceability:
+            trace_text = traceability.group(1).lower()
+            missing_trace_fields = [
+                label for label, pattern in (
+                    ("source requirement", r"\brequirement\b"),
+                    ("design coverage", r"\bdesign\b"),
+                    ("implementation work", r"\b(?:phase|task|implementation)\b"),
+                    ("acceptance evidence", r"\b(?:acceptance|evidence|verify|validation)\b"),
+                ) if not re.search(pattern, trace_text)
+            ]
+            if missing_trace_fields:
+                errors.append(
+                    "PLAN.md Requirement Traceability must map: " + ", ".join(missing_trace_fields) + "."
+                )
+
         mermaid_count = len(re.findall(r"^```mermaid\s*$", design, re.MULTILINE | re.IGNORECASE))
         brief_text = self.brief_path.read_text(errors="replace") if self.brief_path.exists() else ""
         # Let the product brief drive multiplicity. A plural diagram request
@@ -1054,6 +1074,36 @@ class Workspace:
                 "DECISIONS.md contains unresolved questions for confirmation; convert them into a user decision checkpoint."
             )
 
+        pending_decisions = re.findall(
+            r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:status\s*:\s*)?pending(?:\*\*)?\s*[:—-]?.+$",
+            decisions,
+        )
+        if pending_decisions:
+            errors.append(
+                "DECISIONS.md contains Pending decision entries; resolve them through structured user checkpoints "
+                "or classify them as implementation validation work."
+            )
+
+        plan_decisions = re.search(
+            r"^##\s*Decisions\s*$([\s\S]*?)(?=^##\s|\Z)", plan, re.MULTILINE | re.IGNORECASE,
+        )
+        if plan_decisions and re.search(r"(?im)^\s*[-*]\s*(?:\*\*)?Pending(?:\*\*)?\s*:", plan_decisions.group(1)):
+            errors.append(
+                "PLAN.md Decisions contains Pending choices; emit the actual structured checkpoint before completion."
+            )
+
+        unresolved_checkpoint_reference = re.search(
+            r"(?i)\b(?:decision checkpoint below|listed in (?:the )?decision checkpoint|"
+            r"pending product(?:-boundary)? decisions?)\b",
+            "\n".join((design, plan)),
+        )
+        questions = self.read("questions").strip()
+        questions_are_empty = questions in {"", "(empty)", "# Clarifying Questions", "# Decision Checkpoint"}
+        if unresolved_checkpoint_reference and questions_are_empty:
+            errors.append(
+                "Planning artifacts reference unresolved decision checkpoints, but no structured checkpoint is present."
+            )
+
         leaked_markers = sorted(set(re.findall(
             r"^##\s+(DESIGN|PLAN|DECISIONS)_(?:UPDATE|APPEND)\b",
             "\n".join((design, plan, decisions)),
@@ -1096,6 +1146,27 @@ class Workspace:
                 errors.append("QUESTIONS.md still contains unresolved user decisions.")
 
         return errors
+
+    @staticmethod
+    def _without_leading_title(content: str) -> str:
+        """Remove only leading H1 titles so the canonical export owns section titles."""
+        lines = (content or "").strip().splitlines()
+        while lines and (not lines[0].strip() or re.match(r"^#\s+", lines[0])):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def build_export_bundle(self) -> str:
+        design = self._without_leading_title(self.read("design"))
+        plan = self._without_leading_title(self.read("plan"))
+        decisions = self._without_leading_title(self.read("decisions"))
+        return (
+            "# DesignFlow Planning Baseline\n\n"
+            "This package is an implementation-planning baseline. Validate documented assumptions and "
+            "discovery checkpoints as implementation evidence becomes available.\n\n"
+            f"# Architecture Design\n\n{design}\n\n---\n\n"
+            f"# Implementation Plan\n\n{plan}\n\n---\n\n"
+            f"# Decision Ledger\n\n{decisions}\n"
+        )
 
     def unresolved_confirmation_question(self, decisions: str | None = None) -> str:
         """Return the first actual question still parked in a confirmation section."""

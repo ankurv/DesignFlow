@@ -277,6 +277,11 @@ class AgentBase(ABC):
         self.status = AgentStatus.IDLE
         self._reset_provider_session()
 
+    def reset_conversation(self):
+        """Discard routing/utility context while preserving cumulative usage accounting."""
+        self.history.clear()
+        self._reset_provider_session()
+
     def _reset_provider_session(self):
         """Stateful providers override this when they have a remote session."""
 

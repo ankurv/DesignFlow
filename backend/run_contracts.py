@@ -13,6 +13,7 @@ class RunKind(str, Enum):
     ARTIFACT_EDIT = "artifact_edit"
     PLANNING_WORKFLOW = "planning_workflow"
     RECOVERY = "recovery"
+    INTENT_ROUTING = "intent_routing"
 
 
 @dataclass(frozen=True)
@@ -106,19 +107,9 @@ def classify_run_contract(text: str, mode: str = "auto", local_intent: str = "")
     if mode == "direct":
         return RunContract(RunKind.CHAT, request)
 
-    strong_planning = bool(re.search(
-        r"^(?:please\s+)?(?:build|design|architect|plan|create|develop|redesign|refactor|re-architect)\b",
-        normalized,
-    ))
-    revision = bool(re.search(r"^(?:please\s+)?(?:revise|update|improve|review)\b", normalized))
-    planning_object = bool(re.search(
-        r"\b(?:architecture|implementation plan|technical design|system design|product plan|mvp)\b",
-        normalized,
-    ))
-    wants_to_build = bool(re.search(
-        r"\b(?:i|we)\s+(?:want|need)\s+to\s+(?:build|design|create|plan|develop)\b",
-        normalized,
-    ))
-    if strong_planning or (revision and planning_object) or wants_to_build:
-        return RunContract(RunKind.PLANNING_WORKFLOW, request)
-    return RunContract(RunKind.CHAT, request)
+    # Questions have no mutation contract. All other natural-language requests
+    # remain deliberately unresolved until the state-aware router sees current
+    # artifacts and validation state; vocabulary matching is not an intent model.
+    if normalized.endswith("?"):
+        return RunContract(RunKind.CHAT, request)
+    return RunContract(RunKind.INTENT_ROUTING, request)

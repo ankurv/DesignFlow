@@ -18,6 +18,10 @@ reject invalid or divergent versions before a release is built.
 - Added constrained implementation-report write-back backed by the project SQLite database.
 - Added localhost-by-default MCP access, admin-managed one-time token generation, immediate regeneration/revocation, and optional `DESIGNFLOW_MCP_TOKEN` authentication.
 - Moved third-party MCP server configuration endpoints to `/mcp/servers`.
+- Added requirement traceability, pending-decision and missing-checkpoint completion gates.
+- Moved planning-bundle composition to the server, removed duplicate artifact titles, and blocked invalid exports.
+- Replaced phrase-list routing for ambiguous requests with a state-aware typed intent-routing step and safe planning fallback.
+- Added a versioned, manifest-validated Markdown prompt catalog for workflow, routing, editing, chat, and agent-export prompts.
 
 ## Current baseline
 

@@ -2,6 +2,11 @@
 
 DesignFlow turns a high-level product goal and an existing repository into a reviewed planning baseline. Python owns workflow, routing, persistence, and recovery; language models contribute specialized analysis and synthesis. The result is a set of durable design artifacts that a coding agent and human team can refine during implementation.
 
+Application-owned behavioral prompts live under `backend/prompts/` as versioned Markdown
+templates described by `manifest.json`. Startup validation enforces exact placeholders and
+parser-critical protocol markers. Python retains typed state transitions, output parsing,
+and deterministic quality rules; prompt prose can be tuned without editing workflow code.
+
 ## System and ownership model
 
 ```mermaid
@@ -50,6 +55,14 @@ flowchart LR
 Browser sessions identify people and select a project. They do not own the orchestration process. All collaborators attached to the same canonical project path share one runtime, event stream, agent team, and database connection. When the final collaborator leaves, DesignFlow stops the run, cancels background work, closes the database, and removes the runtime.
 
 ## Planning workflow
+
+In automatic mode, only unambiguous local commands, explicit agent mentions, and explicit
+artifact-file edits bypass intent routing. Other natural-language requests enter a typed
+intent-routing state that considers the request's meaning, existing canonical artifacts,
+and deterministic validation failures before selecting chat, a bounded artifact edit, or
+the full planning workflow. Invalid router output fails safely to the planning workflow;
+it never silently converts a requested mutation into conversational prose. Routing context
+is discarded before synthesis so it cannot influence the resulting architecture.
 
 ```mermaid
 flowchart TD
@@ -122,6 +135,13 @@ Checkpoint state is stored transactionally in SQLite and projected into `QUESTIO
 human readability. The server never reconstructs checkpoint state by parsing that file.
 Each checkpoint asks one material question with a small set of choices and accepts a custom
 response through the normal prompt input.
+
+Before completion, `PLAN.md` maps every explicit brief outcome and constraint through
+`Requirement Traceability` to its design coverage, bounded implementation unit, and acceptance
+evidence. Deterministic validation rejects pending choices and references to checkpoints that
+do not exist. The export endpoint rebuilds the bundle from canonical artifacts, removes
+artifact-owned duplicate titles, and refuses export while validation errors or an active
+checkpoint remain; it does not trust a bundle assembled by the browser.
 
 ## Coding-agent MCP boundary
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable, Optional
 from backend.mcp_client import MCPManager
@@ -20,7 +21,10 @@ from backend.mcp_client import MCPManager
 from .agents.base import AgentBase, Message, Usage
 from .errors import classify_provider_error
 from .run_contracts import RunContract, RunKind, classify_run_contract
+from .prompt_catalog import prompt_catalog
 from .workspace.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Events ──────────────────────────────────────────────────────────────────
@@ -233,7 +237,16 @@ Respond in this EXACT format:
 <CONTINUE, COMPLETE, or PAUSE_FOR_INPUT>
 (Note: When a coherent planning baseline is ready, set VERDICT to COMPLETE. This means ready to begin iterative implementation, not final specification certainty. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
 
-SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Evaluate proportionate release/version upgrade safety, auditability, and operational logging based on the user's stated deployment, privacy, retention, and operating preferences. Explicit user exclusions are authoritative: document the excluded concern and rationale, and omit its implementation work. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification."""
+SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Evaluate proportionate release/version upgrade safety, auditability, and operational logging based on the user's stated deployment, privacy, retention, and operating preferences. Explicit user exclusions are authoritative: document the excluded concern and rationale, and omit its implementation work. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification.
+
+Maintain end-to-end requirement traceability. PLAN.md must contain `## Requirement Traceability` mapping every explicit user outcome and constraint to its DESIGN.md coverage, implementation phase/task, and acceptance evidence; explicitly mark exclusions and unresolved validations. Never silently omit a requested feature. Before completing, compare the brief, DESIGN.md, PLAN.md, DECISIONS.md, and acceptance criteria for contradictions. A decision may be Confirmed, Proposed, Superseded, or an implementation validation; never leave a `Pending` decision in an allegedly complete baseline. Material user choices must become structured checkpoints. Split implementation work into independently deliverable, testable units: one checklist item should not combine multiple subsystems merely because they share a phase. Each unit must name its output and how completion will be verified."""
+
+# Application-owned prompt files are validated at import. These assignments
+# preserve the public constants used by tests and integrations.
+COORDINATOR_SYSTEM = prompt_catalog.render(
+    "coordinator_system", max_debate_rounds="{max_debate_rounds}", agents_list="{agents_list}",
+)
+SYNTHESIS_SYSTEM = prompt_catalog.text("synthesis_system")
 
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
@@ -499,6 +512,11 @@ class Orchestrator:
         self._coordinator_name = coordinator.name
         coordinator.config.max_history_turns = min(coordinator.config.max_history_turns, 6)
 
+        if self.contract.kind == RunKind.INTENT_ROUTING:
+            self.contract = await self._resolve_request_contract(coordinator, request_text)
+            if self.store and self.run_id:
+                self.store.update_run_contract(self.run_id, self.contract.kind.value)
+
         # Parse explicit @mentions first
         target_agent = None
         prompt_text = request_text
@@ -548,21 +566,9 @@ class Orchestrator:
                     "Return the complete updated document under the matching `## DESIGN_UPDATE`, "
                     "`## PLAN_UPDATE`, or `## DECISIONS_UPDATE` header."
                 )
-                prompt = (
-                    f"Targeted Artifact Edit.\n"
-                    f"User Prompt: {prompt_text}\n"
-                    f"Execute this bounded edit yourself. Do not debate, consult peers, ask for approval, or broaden the scope.\n"
-                    f"Preserve all correct existing content. {output_instruction}\n"
-                    f"For Mermaid, use valid fenced `mermaid` blocks with short, readable labels.\n"
-                    f"Relevant workspace context:\n{context}\n"
-                )
+                prompt = prompt_catalog.render("artifact_edit", request=prompt_text, output_instruction=output_instruction, context=context)
             else:
-                prompt = (
-                    f"Conversational Turn.\n"
-                    f"User Prompt: {prompt_text}\n"
-                    f"Answer the question directly and concisely. Do not start a design debate.\n"
-                    f"Relevant workspace context (if any):\n{context}\n"
-                )
+                prompt = prompt_catalog.render("chat", request=prompt_text, context=context)
 
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
             self._record_turn_usage(target_agent, "direct")
@@ -608,6 +614,43 @@ class Orchestrator:
             await self._run_state_machine(coordinator)
 
         return self.ws.snapshot()
+
+    async def _resolve_request_contract(self, coordinator: AgentBase, request_text: str) -> RunContract:
+        """Resolve ambiguous language from request meaning plus persisted project state."""
+        validation_errors = self.ws.validate_planning_artifacts()
+        artifact_state = {
+            name: self.ws.read(name) not in {"", "(empty)"}
+            for name in ("design", "plan", "decisions")
+        }
+        prompt = prompt_catalog.render("intent_router_task", request=request_text, artifact_state=json.dumps(artifact_state, sort_keys=True), validation_errors=json.dumps(validation_errors))
+        try:
+            turn_context = {"step": 0, "phase": "intent_routing", "standing_role": coordinator.config.role}
+            turn_id = self._begin_turn(coordinator, turn_context)
+            try:
+                response = await self._send_agent(
+                    coordinator, prompt, turn_id, turn_context,
+                    system_override=prompt_catalog.text("intent_router_system"),
+                )
+            finally:
+                # Routing is control-plane work. Its JSON must not contaminate
+                # the coordinator's later design conversation or remote session.
+                coordinator.reset_conversation()
+            self._record_turn_usage(coordinator, "intent_routing")
+            match = re.search(r"\{[\s\S]*\}", response)
+            payload = json.loads(match.group(0) if match else response)
+            kind = RunKind(str(payload.get("kind", "")))
+            if kind not in {RunKind.CHAT, RunKind.ARTIFACT_EDIT, RunKind.PLANNING_WORKFLOW}:
+                raise ValueError("unsupported routed kind")
+            allowed = {"DESIGN.md", "PLAN.md", "DECISIONS.md"}
+            targets = tuple(item for item in payload.get("target_artifacts", []) if item in allowed)
+            if kind == RunKind.ARTIFACT_EDIT and not targets:
+                raise ValueError("artifact edit requires explicit targets")
+            return RunContract(kind, request_text, target_artifacts=targets)
+        except Exception as exc:
+            logger.warning("Intent router failed; applying state-safe fallback: %s", exc)
+            # An ambiguous mutation must never silently degrade to prose. The
+            # planning workflow is safe because it validates before promotion.
+            return RunContract(RunKind.PLANNING_WORKFLOW, request_text)
 
     # ── State Machine ─────────────────────────────────────────────────────────
 
@@ -1125,22 +1168,10 @@ class Orchestrator:
         self._pending_user_input = ""
         steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
 
-        prompt = (
-            f"Product Idea: {self.idea}\n{steer_block}\n"
-            f"Current user request: {self.task or 'Develop the product goal into a credible planning baseline.'}\n"
-            f"Editable capability evaluation catalog:\n{self.ws.capabilities_context(compact=True)}\n\n"
-            f"Draft the initial architecture and implementation plan.\n"
-            f"Output `## DESIGN_UPDATE`, `## PLAN_UPDATE`, and `## DECISIONS_UPDATE` with complete initial drafts.\n"
-            f"DECISIONS_UPDATE must record every material choice already adopted in the design, including status "
-            f"(Proposed or Confirmed), chosen option, alternatives considered, trade-offs, rationale, and what would "
-            f"cause the team to revisit it. Do not present an unconfirmed assumption as user-approved. "
-            f"Features explicitly marked optional in the product brief must remain optional and must not become "
-            f"dependencies of core MVP workflows. "
-            f"Choose architecture diagrams according to the design's actual needs. Use separate readable views when "
-            f"actors, boundaries, data flows, state transitions, deployment, or failure behavior cannot be explained "
-            f"clearly in one diagram; do not target an arbitrary diagram count. "
-            f"A current user directive overrides conflicting older artifacts: preserve the old ledger entry as "
-            f"Superseded, record the replacement as Confirmed, and reconcile DESIGN.md and PLAN.md."
+        prompt = prompt_catalog.render(
+            "drafting", idea=self.idea, steering=steer_block or "None",
+            task=self.task or "Develop the product goal into a credible planning baseline.",
+            capabilities=self.ws.capabilities_context(compact=True),
         )
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
@@ -1171,13 +1202,8 @@ class Orchestrator:
         new_steering = await self._drain_steer()
         steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
 
-        prompt = (
-            f"You are the {agent.config.role or 'Specialist'}.\n"
-            f"Use the authoritative scoped excerpts from DESIGN.md and PLAN.md supplied in this turn's context.\n"
-            f"Do not inspect or reference any scratch directory or unrelated workspace.\n"
-            f"Provide your specialized critique and alternative suggestions.\n{steer_block}\n"
-            f"Keep the response below 1,200 words. Output only bounded `## DESIGN_APPEND`, `## PLAN_APPEND`, "
-            f"or `## DECISIONS_APPEND` deltas; never repeat or rewrite complete artifacts."
+        prompt = prompt_catalog.render(
+            "peer_review", role=agent.config.role or "Specialist", steering=steer_block or "None",
         )
 
         full_ctx = self._agent_context(agent)
@@ -1195,20 +1221,11 @@ class Orchestrator:
         self._pending_user_input = ""
         steer_block = f"\n\n[HUMAN STEERING]\n{new_steering}" if new_steering else ""
 
-        prompt = (
-            f"Use the complete unresolved peer critiques in CONTEXT.md and update DESIGN.md and PLAN.md.\n{steer_block}\n"
-            f"Reconcile the design against this editable capability evaluation catalog:\n"
-            f"{self.ws.capabilities_context(compact=True)}\n\n"
-            f"Output `## DESIGN_UPDATE` and `## PLAN_UPDATE` and `## DECISIONS_UPDATE`.\n"
-            f"Treat explicit current user directives as authoritative. Mark conflicting older decisions Superseded "
-            f"instead of silently deleting history, and remove their consequences from DESIGN.md and PLAN.md.\n"
-            f"Preserve optionality from the product brief: optional capabilities must not gate core tasks or MVP acceptance.\n"
-            f"Use as many distinct architecture diagrams as the design needs for clarity, based on separable structures "
-            f"and behaviors—not a fixed count—and avoid one overloaded diagram.\n"
-            f"If there are major unresolved decisions, output `## DECISION_CHECKPOINT`."
+        prompt = prompt_catalog.render(
+            "refinement", steering=steer_block or "None",
+            capabilities=self.ws.capabilities_context(compact=True),
+            quality_feedback=self._deterministic_feedback or "None",
         )
-        if self._deterministic_feedback:
-            prompt += f"\n\nDeterministic quality checks that must be fixed:\n{self._deterministic_feedback}"
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True)
         self._apply_coordinator_agent_response(coordinator.name, response)
