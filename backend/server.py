@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -18,7 +20,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Cookie, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,6 +31,7 @@ from .storage import ProjectStore
 from .workspace.workspace import Workspace
 from .errors import classify_provider_error
 from .debug_observer import DebugObserver
+from .designflow_mcp import designflow_mcp_app
 from .audit import audit_log
 from .version import __version__
 
@@ -38,35 +41,40 @@ SSE_SHUTDOWN = object()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    mcp_lifespan = designflow_mcp_app.router.lifespan_context(designflow_mcp_app)
+    await mcp_lifespan.__aenter__()
     lease_task = asyncio.create_task(lease_cleanup_loop())
-    yield
-    lease_task.cancel()
-    await asyncio.gather(lease_task, return_exceptions=True)
-    tasks = []
-    all_states = list(app_states.values()) + list(unbound_states.values())
-    for state in all_states:
-        if state.orchestrator:
-            state.orchestrator.stop()
-        if state.run_task and not state.run_task.done():
-            state.run_task.cancel()
-            tasks.append(state.run_task)
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    for state in all_states:
-        if state.store and state.run_id and state.status in {"running", "paused", "needs_attention"}:
+    try:
+        yield
+    finally:
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
+        tasks = []
+        all_states = list(app_states.values()) + list(unbound_states.values())
+        for state in all_states:
             if state.orchestrator:
-                state.orchestrator.save_state()
-            agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
-            state.store.finish_run(state.run_id, "stopped", agents)
-            if state.workspace:
-                state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
-        state.status = "idle"
-        state.awaiting_input = False
-        state.close()
-    app_states.clear()
-    unbound_states.clear()
-    session_projects.clear()
-    session_last_seen.clear()
+                state.orchestrator.stop()
+            if state.run_task and not state.run_task.done():
+                state.run_task.cancel()
+                tasks.append(state.run_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for state in all_states:
+            if state.store and state.run_id and state.status in {"running", "paused", "needs_attention"}:
+                if state.orchestrator:
+                    state.orchestrator.save_state()
+                agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+                state.store.finish_run(state.run_id, "stopped", agents)
+                if state.workspace:
+                    state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
+            state.status = "idle"
+            state.awaiting_input = False
+            state.close()
+        app_states.clear()
+        unbound_states.clear()
+        session_projects.clear()
+        session_last_seen.clear()
+        await mcp_lifespan.__aexit__(None, None, None)
 
 
 app = FastAPI(title="DesignFlow", version=__version__, lifespan=lifespan)
@@ -94,7 +102,8 @@ def audit_action(method: str, path: str) -> str:
         (r"^/run/retry$", "run.retry"), (r"^/run/stop$", "run.stop"),
         (r"^/run/reset$", "run.reset"), (r"^/run/steer$", "run.steer"),
         (r"^/run/checkpoint(?:/.*)?$", "checkpoint.answer"),
-        (r"^/mcp(?:/.*)?$", "mcp.configure"), (r"^/workspace/file/.*$", "artifact.update"),
+        (r"^/mcp/servers(?:/.*)?$", "mcp.configure"), (r"^/mcp/?$", "mcp.invoke"),
+        (r"^/workspace/file/.*$", "artifact.update"),
         (r"^/workspace/src/.*$", "source.update"), (r"^/admin/shutdown$", "admin.shutdown"),
     )
     return next((action for pattern, action in rules if re.match(pattern, path)), "")
@@ -1421,21 +1430,21 @@ class MCPServerIn(BaseModel):
     username: str = ""
     password: str = ""
 
-@app.get("/mcp")
+@app.get("/mcp/servers")
 def get_mcp_servers(state: AppState = Depends(get_state)):
     if not state.store:
         return {"servers": []}
     return {"servers": state.store.get_mcp_servers()}
 
-@app.post("/mcp")
+@app.post("/mcp/servers")
 def add_mcp_server(body: MCPServerIn, state: AppState = Depends(get_state)):
     if not state.store:
         raise HTTPException(400, "No active workspace")
-    server_id = hashlib.md5(f"{body.name}{datetime.now().isoformat()}".encode()).hexdigest()[:8]
+    server_id = uuid.uuid4().hex[:8]
     state.store.add_mcp_server(server_id, body.name, body.command, body.args, body.env, body.username, body.password)
     return {"ok": True, "id": server_id}
 
-@app.delete("/mcp/{server_id}")
+@app.delete("/mcp/servers/{server_id}")
 def delete_mcp_server(server_id: str, state: AppState = Depends(get_state)):
     if not state.store:
         raise HTTPException(400, "No active workspace")
@@ -1579,5 +1588,36 @@ def admin_shutdown(background_tasks: BackgroundTasks, session: Session = Depends
     return {"ok": True, "message": "Graceful server shutdown started"}
 
 _frontend = Path(__file__).parent.parent / "frontend"
+
+
+class MCPAccessMiddleware:
+    """Keep MCP local by default; optionally protect remote use with a bearer token."""
+
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") not in {"http", "websocket"}:
+            await self.asgi_app(scope, receive, send)
+            return
+        configured_token = os.getenv("DESIGNFLOW_MCP_TOKEN", "").strip()
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        supplied = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+        client_host = (scope.get("client") or ("", 0))[0]
+        if configured_token:
+            allowed = hmac.compare_digest(supplied, f"Bearer {configured_token}")
+        else:
+            allowed = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+        if not allowed:
+            response = JSONResponse(
+                {"detail": "MCP access requires localhost or a valid DESIGNFLOW_MCP_TOKEN"},
+                status_code=401 if configured_token else 403,
+            )
+            await response(scope, receive, send)
+            return
+        await self.asgi_app(scope, receive, send)
+
+
+app.mount("/mcp", MCPAccessMiddleware(designflow_mcp_app), name="designflow-mcp")
 if _frontend.exists():
     app.mount("/", StaticFiles(directory=str(_frontend), html=True), name="frontend")

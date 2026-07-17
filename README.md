@@ -93,6 +93,33 @@ remove entries that should not be considered. Existing project catalogs are neve
 
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
+### Connect coding agents over MCP
+
+DesignFlow exposes a standard Streamable HTTP MCP server from the same process. Point any
+MCP-capable coding agent at `http://127.0.0.1:8010/mcp/`:
+
+```json
+{
+  "mcpServers": {
+    "designflow": {
+      "type": "http",
+      "url": "http://127.0.0.1:8010/mcp/"
+    }
+  }
+}
+```
+
+The tools provide scoped implementation context, artifact validation, current run status,
+recent activity, and a constrained write-back channel for implementation evidence, design
+mismatches, and questions. Each tool takes the absolute `project_path`, so one DesignFlow
+server can safely serve multiple local projects without depending on whichever project is
+open in the dashboard.
+
+MCP is localhost-only by default. For access from another machine, set
+`DESIGNFLOW_MCP_TOKEN` before starting DesignFlow and configure the client to send
+`Authorization: Bearer <token>`. The dashboard's third-party MCP server configuration API
+is separate at `/mcp/servers`.
+
 ### 2. Setup a Project Folder
 
 1. Enter an absolute folder path (e.g. `/Users/you/my-project`) in the **Project Folder** bar and click **Open / Create**.

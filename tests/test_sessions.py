@@ -111,6 +111,8 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(audit_action("POST", "/run/start"), "run.start")
         self.assertEqual(audit_action("PUT", "/agents/a1"), "agent.configure")
         self.assertEqual(audit_action("POST", "/workspace/file/design"), "artifact.update")
+        self.assertEqual(audit_action("POST", "/mcp/"), "mcp.invoke")
+        self.assertEqual(audit_action("POST", "/mcp/servers"), "mcp.configure")
         self.assertEqual(audit_action("POST", "/session/heartbeat"), "")
 
 

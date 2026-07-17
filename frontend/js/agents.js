@@ -503,7 +503,7 @@ async function loadMCPServers() {
   }
   if (projectRequired) projectRequired.style.display = 'none';
   if (configSection) configSection.style.display = 'block';
-  const res = await fetch('/mcp').then(r => r.json());
+  const res = await fetch('/mcp/servers').then(r => r.json());
   mcpServers = res.servers || [];
   renderMCPServers();
 }
@@ -553,7 +553,7 @@ async function addMCPServer() {
     });
   }
   
-  const res = await fetch('/mcp', {
+  const res = await fetch('/mcp/servers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, command, args, env, username, password })
@@ -577,7 +577,7 @@ async function addMCPServer() {
 
 async function deleteMCPServer(id) {
   if (!confirm('Delete this MCP server?')) return;
-  const res = await fetch('/mcp/' + id, { method: 'DELETE' });
+  const res = await fetch('/mcp/servers/' + id, { method: 'DELETE' });
   if (res.ok) {
     notify('MCP server deleted');
     loadMCPServers();

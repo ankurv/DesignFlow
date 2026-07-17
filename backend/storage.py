@@ -142,6 +142,18 @@ class ProjectStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_decision_history
                     ON decision_history(decision_id, id);
+                CREATE TABLE IF NOT EXISTS implementation_reports (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    task TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    code_references_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'open'
+                );
+                CREATE INDEX IF NOT EXISTS idx_implementation_reports_status
+                    ON implementation_reports(status, created_at);
                 """
             )
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
@@ -666,6 +678,40 @@ class ProjectStore:
             item = dict(row)
             item["args"] = json.loads(item.pop("args_json"))
             item["env"] = json.loads(item.pop("env_json"))
+            result.append(item)
+        return result
+
+    def add_implementation_report(self, actor: str, kind: str, task: str, summary: str,
+                                  code_references: list[str]) -> dict:
+        report_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            self._db.execute(
+                """INSERT INTO implementation_reports(
+                   id, created_at, actor, kind, task, summary, code_references_json, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
+                (report_id, now, actor, kind, task, summary, json.dumps(code_references)),
+            )
+        return {
+            "id": report_id, "created_at": now, "actor": actor, "kind": kind,
+            "task": task, "summary": summary, "code_references": code_references, "status": "open",
+        }
+
+    def implementation_reports(self, status: str = "open", limit: int = 50) -> list[dict]:
+        bounded = max(1, min(int(limit), 200))
+        query = "SELECT * FROM implementation_reports"
+        params: tuple = ()
+        if status:
+            query += " WHERE status=?"
+            params = (status,)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params += (bounded,)
+        with self._lock:
+            rows = self._db.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["code_references"] = json.loads(item.pop("code_references_json") or "[]")
             result.append(item)
         return result
 
