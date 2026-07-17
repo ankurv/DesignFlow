@@ -19,6 +19,7 @@ from backend.mcp_client import MCPManager
 
 from .agents.base import AgentBase, Message, Usage
 from .errors import classify_provider_error
+from .run_contracts import RunContract, RunKind, classify_run_contract
 from .workspace.workspace import Workspace
 
 
@@ -311,6 +312,9 @@ class Orchestrator:
         self._adaptive_discovery_unavailable = False
         self._discovery_failed_providers: set[str] = set()
         self._pending_discovery_checkpoint: dict | None = None
+        self.completion_kind = "planning_complete"
+        self.completion_files: list[str] = []
+        self.contract: RunContract | None = None
 
     # ── Public controls ───────────────────────────────────────────────────────
 
@@ -423,11 +427,8 @@ class Orchestrator:
 
     @staticmethod
     def _is_targeted_artifact_update(text: str) -> bool:
-        """Recognize bounded edits to existing planning artifacts."""
-        normalized = " ".join((text or "").lower().split())
-        artifact = re.search(r"\b(?:design|plan|decisions)\.md\b", normalized)
-        edit = re.search(r"\b(?:add|append|include|insert|update|edit|fix|refresh|generate|create)\b", normalized)
-        return bool(artifact and edit)
+        """Compatibility wrapper around the authoritative run classifier."""
+        return classify_run_contract(text).kind == RunKind.ARTIFACT_EDIT
 
     @staticmethod
     def _effective_request(idea: str, task: str) -> str:
@@ -436,34 +437,19 @@ class Orchestrator:
 
     @staticmethod
     def _should_run_team_workflow(text: str, mode: str) -> bool:
-        """Route ordinary questions to one agent and substantive planning work to the team."""
-        normalized = " ".join((text or "").lower().split())
-        if mode in {"debate", "all"}:
-            return True
-        if mode == "direct":
-            return False
-        if re.search(r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized):
-            return True
-        if Orchestrator._is_targeted_artifact_update(normalized):
-            return False
-        strong_planning_request = re.search(
-            r"^(?:please\s+)?(?:build|design|architect|plan|create|develop|redesign|refactor|re-architect)\b",
-            normalized,
-        )
-        revision_request = re.search(r"^(?:please\s+)?(?:revise|update|improve|review)\b", normalized)
-        planning_object = re.search(
-            r"\b(?:architecture|implementation plan|technical design|system design|product plan|mvp)\b",
-            normalized,
-        )
-        return bool(strong_planning_request) or bool(revision_request and planning_object) or bool(
-            re.search(r"\b(?:i|we)\s+(?:want|need)\s+to\s+(?:build|design|create|plan|develop)\b", normalized)
-        )
+        """Compatibility wrapper around the authoritative run classifier."""
+        return classify_run_contract(text, mode).uses_team_workflow
 
     async def run(self, idea: str, task: str = ""):
         self._running = True
         self.idea = idea
         self.task = task.strip()
         request_text = self._effective_request(idea, self.task)
+        self.contract = classify_run_contract(
+            request_text, self.mode, local_intent=self._fuzzy_intent(request_text),
+        )
+        if self.store and self.run_id:
+            self.store.update_run_contract(self.run_id, self.contract.kind.value)
         if self.task and self._is_explicit_user_correction(self.task):
             self.ws.add_context_event("user_decision", self.task, "discovery", "user")
             self.ws.record_user_directive(self.task)
@@ -475,7 +461,8 @@ class Orchestrator:
                 self.ws.clear_questions()
 
         local_response = self._local_command_response(request_text)
-        if local_response:
+        if self.contract.kind == RunKind.STATUS_QUERY and local_response:
+            self.completion_kind = RunKind.STATUS_QUERY.value
             self._emit(Event(EventKind.TURN_END, agent="DesignFlow", data={
                 "turn_id": "local-command", "attempt": 1, "step": 0,
                 "response": local_response, "actor_role": "system",
@@ -523,7 +510,13 @@ class Orchestrator:
                 target_agent = names[matched_name]
                 prompt_text = re.sub(rf'@{match.group(1)}\s*', '', request_text, flags=re.IGNORECASE).strip()
 
-        team_workflow = self._should_run_team_workflow(request_text, self.mode)
+        # An explicit agent mention is an execution override, but it does not
+        # weaken an artifact contract: the named agent must still write it.
+        if target_agent is not None and self.contract.kind == RunKind.PLANNING_WORKFLOW:
+            self.contract = RunContract(RunKind.CHAT, prompt_text)
+            if self.store and self.run_id:
+                self.store.update_run_contract(self.run_id, self.contract.kind.value)
+        team_workflow = self.contract.uses_team_workflow
 
         # Basic questions use one capable agent. Team planning is reserved for
         # explicit design/build/debate work, and @mentions always stay direct.
@@ -543,9 +536,10 @@ class Orchestrator:
             context = self.ws.scoped_context(["design", "plan", "decisions"])
             if len(context) > 12000:
                 context = context[:12000].rstrip() + "\n\n[context truncated]"
-            artifact_update = self._is_targeted_artifact_update(prompt_text)
+            artifact_update = self.contract.requires_artifact_change
             if artifact_update:
-                mermaid_update = bool(re.search(r"\bmermaid\b", prompt_text, re.IGNORECASE))
+                mermaid_update = self.contract.requires_diagram_delta
+                before_mermaid = len(re.findall(r"^```mermaid\s*$", self.ws.read("design"), re.MULTILINE | re.IGNORECASE))
                 output_instruction = (
                     "Return only a `## DESIGN_APPEND` section containing a titled architecture-diagram section "
                     "and the fenced Mermaid block. Do not repeat the existing document."
@@ -572,7 +566,25 @@ class Orchestrator:
             response = await self._send_agent(target_agent, prompt, turn_id, turn_context)
             self._record_turn_usage(target_agent, "direct")
             if artifact_update:
-                self._apply_coordinator_agent_response(target_agent.name, response)
+                written_files = self._apply_coordinator_agent_response(target_agent.name, response)
+                missing_files = set(self.contract.target_artifacts) - written_files
+                if missing_files:
+                    raise RuntimeError(
+                        "Targeted artifact edit produced no applicable update for required file(s): "
+                        + ", ".join(sorted(missing_files))
+                    )
+                if mermaid_update:
+                    after_mermaid = len(re.findall(
+                        r"^```mermaid\s*$", self.ws.read("design"), re.MULTILINE | re.IGNORECASE,
+                    ))
+                    if after_mermaid <= before_mermaid:
+                        raise RuntimeError(
+                            "Diagram edit completed without adding a valid fenced Mermaid diagram to DESIGN.md."
+                        )
+                self.completion_kind = RunKind.ARTIFACT_EDIT.value
+                self.completion_files = sorted(written_files)
+            else:
+                self.completion_kind = RunKind.CHAT.value
             self.ws.append("logbook", response, target_agent.name, "Turn completed")
 
             self._emit(Event(EventKind.TURN_END, agent=target_agent.name, data={
@@ -1297,6 +1309,7 @@ class Orchestrator:
             "idea": self.idea,
             "task": self.task,
             "mode": self.mode,
+            "run_contract": self.contract.to_dict() if self.contract else None,
             "turn_sequence": self._turn_sequence,
             "run_token_total": self.run_token_total,
             "phase_usage": self.phase_usage,
@@ -1348,6 +1361,17 @@ class Orchestrator:
                     return False
                 self.task = self.task or state.get("task", "")
                 self.mode = state.get("mode", self.mode)
+                saved_contract = RunContract.from_dict(state.get("run_contract"))
+                if saved_contract:
+                    self.contract = RunContract(
+                        RunKind.RECOVERY,
+                        self._effective_request(self.idea, self.task),
+                        saved_contract.target_artifacts,
+                        saved_contract.requires_diagram_delta,
+                        recovery_of=saved_contract.effective_kind,
+                    )
+                    if self.store and self.run_id:
+                        self.store.update_run_contract(self.run_id, self.contract.kind.value)
                 self._turn_sequence = state.get("turn_sequence", 0)
                 self.run_token_total = int(state.get("run_token_total", 0) or 0)
                 self.phase_usage = dict(state.get("phase_usage", {}))
@@ -1394,6 +1418,15 @@ class Orchestrator:
                 return False
             self.task = self.task or state.get("task", "")
             self.mode = state.get("mode", self.mode)
+            saved_contract = RunContract.from_dict(state.get("run_contract"))
+            if saved_contract:
+                self.contract = RunContract(
+                    RunKind.RECOVERY,
+                    self._effective_request(self.idea, self.task),
+                    saved_contract.target_artifacts,
+                    saved_contract.requires_diagram_delta,
+                    recovery_of=saved_contract.effective_kind,
+                )
             self._turn_sequence = state.get("turn_sequence", 0)
             self.run_token_total = int(state.get("run_token_total", 0) or 0)
             self.phase_usage = dict(state.get("phase_usage", {}))
@@ -1879,9 +1912,11 @@ class Orchestrator:
         if t.startswith("none ") or t.startswith("none-") or t.startswith("*none"): return True
         return False
 
-    def _apply_coordinator_agent_response(self, agent_name: str, response: str):
+    def _apply_coordinator_agent_response(self, agent_name: str, response: str) -> set[str]:
+        written_files: set[str] = set()
         for filename, content in self.ws.parse_files(response).items():
             self.ws.write_src(filename, content)
+            written_files.add(filename)
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name,
                              data={"file": filename, "preview": content[:120]}))
 
@@ -1889,6 +1924,7 @@ class Orchestrator:
         if plan_update:
             written, reason = self.ws.merge_artifact_update("plan", plan_update, "Plan")
             if written:
+                written_files.add("PLAN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
             else:
                 self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
@@ -1897,6 +1933,7 @@ class Orchestrator:
         if decisions_update:
             written, reason = self.ws.merge_artifact_update("decisions", decisions_update, "Key Decisions")
             if written:
+                written_files.add("DECISIONS.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
             else:
                 self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
@@ -1905,6 +1942,7 @@ class Orchestrator:
         if design_update:
             written, reason = self.ws.merge_artifact_update("design", design_update, "Architecture Design")
             if written:
+                written_files.add("DESIGN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
             else:
                 self._deterministic_feedback = "\n".join(filter(None, (self._deterministic_feedback, reason)))
@@ -1912,14 +1950,18 @@ class Orchestrator:
         design_bit = self.ws.parse_section(response, "DESIGN_APPEND")
         if design_bit:
             self.ws.append("design", design_bit, agent_name, "Coordinator-led Turn")
+            written_files.add("DESIGN.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
 
         plan_bit = self.ws.parse_section(response, "PLAN_APPEND")
         if plan_bit:
             self.ws.append("plan", plan_bit, agent_name, "Peer Review")
+            written_files.add("PLAN.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
 
         decisions_bit = self.ws.parse_section(response, "DECISIONS_APPEND")
         if decisions_bit:
             self.ws.append("decisions", decisions_bit, agent_name, "Peer Review")
+            written_files.add("DECISIONS.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
+        return written_files

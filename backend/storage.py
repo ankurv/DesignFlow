@@ -39,7 +39,9 @@ class ProjectStore:
                     started_at TEXT NOT NULL,
                     completed_at TEXT,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
-                    estimated_cost_usd REAL NOT NULL DEFAULT 0
+                    estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                    run_kind TEXT NOT NULL DEFAULT 'planning_workflow',
+                    outcome_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +149,10 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0")
             if "pricing_complete" not in columns:
                 self._db.execute("ALTER TABLE runs ADD COLUMN pricing_complete INTEGER NOT NULL DEFAULT 1")
+            if "run_kind" not in columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN run_kind TEXT NOT NULL DEFAULT 'planning_workflow'")
+            if "outcome_json" not in columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN outcome_json TEXT NOT NULL DEFAULT '{}'")
             checkpoint_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(decision_checkpoints)").fetchall()
             }
@@ -414,13 +420,17 @@ class ProjectStore:
                     (agent_id, index, json.dumps(config)),
                 )
 
-    def start_run(self, run_id: str, idea: str):
+    def start_run(self, run_id: str, idea: str, run_kind: str = "planning_workflow"):
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._db:
             self._db.execute(
-                "INSERT OR REPLACE INTO runs(run_id, idea, status, started_at) VALUES (?, ?, ?, ?)",
-                (run_id, idea, "running", now),
+                "INSERT OR REPLACE INTO runs(run_id, idea, status, started_at, run_kind) VALUES (?, ?, ?, ?, ?)",
+                (run_id, idea, "running", now, run_kind),
             )
+
+    def update_run_contract(self, run_id: str, run_kind: str):
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET run_kind=? WHERE run_id=?", (run_kind, run_id))
 
     def resume_run(self, run_id: str):
         """Reopen an existing logical run without replacing its identity or metrics."""
@@ -461,7 +471,7 @@ class ProjectStore:
             ).fetchone()
         return str(row["run_id"]) if row else ""
 
-    def finish_run(self, run_id: str, status: str, agents: list[dict]):
+    def finish_run(self, run_id: str, status: str, agents: list[dict], outcome: dict | None = None):
         now = datetime.now(timezone.utc).isoformat()
         tokens = sum(int(agent.get("total_tokens", 0) or 0) for agent in agents)
         cached = sum(int(agent.get("cached_input_tokens", 0) or 0) for agent in agents)
@@ -478,9 +488,9 @@ class ProjectStore:
             self._db.execute(
                 """UPDATE runs
                    SET status=?, completed_at=?, total_tokens=?, cached_input_tokens=?,
-                       estimated_cost_usd=?, pricing_complete=?
+                       estimated_cost_usd=?, pricing_complete=?, outcome_json=?
                    WHERE run_id=?""",
-                (status, now, tokens, cached, cost, pricing_complete, run_id),
+                (status, now, tokens, cached, cost, pricing_complete, json.dumps(outcome or {}), run_id),
             )
 
     def update_run_metrics(self, run_id: str, agents: list[dict]):
@@ -596,11 +606,17 @@ class ProjectStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT run_id, idea, status, started_at, completed_at,
-                          total_tokens, cached_input_tokens, estimated_cost_usd, pricing_complete
+                          total_tokens, cached_input_tokens, estimated_cost_usd, pricing_complete,
+                          run_kind, outcome_json
                    FROM runs ORDER BY started_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["outcome"] = json.loads(item.pop("outcome_json") or "{}")
+            result.append(item)
+        return result
 
     def run_events(self, run_id: str, limit: int = 200, offset: int = 0) -> list[dict]:
         """Load one persisted transcript page only when a user requests it."""

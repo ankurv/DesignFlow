@@ -221,17 +221,17 @@ window.submitSelectedDecision = async function() {
       promptInput?.focus();
       return;
     }
-    if (window.activeStructuredCheckpointId) await submitStructuredCheckpoint('', answer);
+    if (currentStructuredCheckpointId()) await submitStructuredCheckpoint('', answer);
     else await submitDecisionOption('Other', answer);
     return;
   }
-  if (window.activeStructuredCheckpointId) await submitStructuredCheckpoint(selected.value, '');
+  if (currentStructuredCheckpointId()) await submitStructuredCheckpoint(selected.value, '');
   else await submitDecisionOption(selected.dataset.label || '', decodeURIComponent(selected.dataset.text || ''));
 };
 
 async function submitStructuredCheckpoint(optionId, customAnswer) {
-  const checkpointId = window.activeStructuredCheckpointId;
-  if (!checkpointId || !awaitingDecisionInput) return;
+  const checkpointId = currentStructuredCheckpointId();
+  if (!checkpointId) return;
   const controls = document.querySelectorAll('input[name="decisionChoice"], #decisionSubmitBtn, #decisionCustomInput');
   controls.forEach(control => { control.disabled = true; });
   const status = document.getElementById('decisionSubmitStatus');
@@ -252,16 +252,30 @@ async function submitStructuredCheckpoint(optionId, customAnswer) {
       updateStatus('paused');
     } else {
       window.activeStructuredCheckpointId = '';
+      const bodyEl = document.getElementById('contextQuestionsBody');
+      if (bodyEl) delete bodyEl.dataset.checkpointId;
       awaitingDecisionInput = false;
-      updateStatus('running');
       const pendingPane = document.getElementById('contextPendingActions');
       if (pendingPane) pendingPane.style.display = 'none';
       closeDecisionModal();
+      if (data.requires_resume) {
+        updateStatus('idle');
+        const resumed = await startRun('continue', {hiddenPrompt: true});
+        if (!resumed) updateStatus('interrupted');
+      } else {
+        updateStatus('running');
+      }
     }
   } catch (error) {
     controls.forEach(control => { control.disabled = false; });
     if (status) status.textContent = error.message;
   }
+}
+
+function currentStructuredCheckpointId() {
+  return document.getElementById('contextQuestionsBody')?.dataset.checkpointId
+    || window.activeStructuredCheckpointId
+    || '';
 }
 
 window.submitDecisionOption = async function(label, text) {
@@ -366,11 +380,14 @@ function renderInteractiveQuestionPanel(content, checkpoint = null) {
 
   if (!hasQuestion) {
     pendingPane.style.display = 'none';
+    delete bodyEl.dataset.checkpointId;
     return false;
   }
 
   pendingPane.style.display = 'flex';
   bodyEl.innerHTML = checkpoint ? renderStructuredCheckpoint(checkpoint) : renderQuestionBody(content);
+  if (checkpoint?.id) bodyEl.dataset.checkpointId = checkpoint.id;
+  else delete bodyEl.dataset.checkpointId;
   const customInput = document.getElementById('decisionCustomInput');
   if (customInput) customInput.value = '';
   const steerInput = document.getElementById('steerInput');
@@ -745,7 +762,16 @@ function appendFeed(ev) {
       kindLabel = 'retrying';
       break;
     case 'done':
-      summary = 'Planning baseline ready for implementation and further discovery.';
+      if (ev.data.run_kind === 'artifact_edit' || ev.data.completion_kind === 'artifact_edit' || ev.data.completion_kind === 'artifact_updated') {
+        const files = (ev.data.files || []).join(', ') || 'planning artifacts';
+        summary = `Artifact update complete: ${files}.`;
+      } else if (ev.data.run_kind === 'chat' || ev.data.completion_kind === 'chat' || ev.data.completion_kind === 'chat_answered') {
+        summary = 'Response complete. No planning baseline was finalized.';
+      } else if (ev.data.run_kind === 'status_query' || ev.data.completion_kind === 'status_query') {
+        summary = 'Project status returned. No planning work was run.';
+      } else {
+        summary = 'Planning baseline ready for implementation and further discovery.';
+      }
       updateStatus('done');
       break;
     case 'error':

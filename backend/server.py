@@ -971,6 +971,11 @@ async def start_run(
                     state.store.finish_run(
                         state.run_id, "done",
                         agent_states,
+                        outcome={
+                            "status": "verified",
+                            "kind": state.orchestrator.completion_kind,
+                            "files": state.orchestrator.completion_files,
+                        },
                     )
                     state.workspace.finish_logbook_run(state.run_id, "done", agent_states)
                 if state.workspace and snapshot:
@@ -981,7 +986,16 @@ async def start_run(
                         bundle_path.write_text(bundled)
                     except Exception:
                         pass
-                broadcast(Event(kind=EventKind.DONE, data={"workspace": snapshot or {}}), state)
+                broadcast(Event(kind=EventKind.DONE, data={
+                    "workspace": snapshot or {},
+                    "completion_kind": state.orchestrator.completion_kind,
+                    "run_kind": state.orchestrator.contract.kind.value if state.orchestrator.contract else "",
+                    "outcome": {
+                        "status": "verified",
+                        "files": state.orchestrator.completion_files,
+                    },
+                    "files": state.orchestrator.completion_files,
+                }), state)
         except asyncio.CancelledError:
             if state.orchestrator and hasattr(state.orchestrator, "ws"):
                 state.orchestrator.ws.preserve_staged_artifacts("stopped")
@@ -998,6 +1012,11 @@ async def start_run(
                 state.store.finish_run(
                     state.run_id, "error",
                     agent_states,
+                    outcome={
+                        "status": "failed",
+                        "kind": state.orchestrator.contract.kind.value if state.orchestrator.contract else "",
+                        "error_code": error_code,
+                    },
                 )
                 state.workspace.finish_logbook_run(state.run_id, "error", agent_states)
                 state.store.clear_run_state()
@@ -1215,6 +1234,7 @@ async def answer_checkpoint(
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     answer = answered["answer"]
+    requires_resume = not state.orchestrator or not getattr(state.orchestrator, "_running", False)
     if state.workspace:
         decision_workspace = state.orchestrator.ws if state.orchestrator else state.workspace
         decision_workspace.record_user_decision(answered["question"], answer)
@@ -1230,7 +1250,12 @@ async def answer_checkpoint(
             state.orchestrator.resume()
             state.status = "running"
             state.awaiting_input = False
-    return {"ok": True, "answered": answered, "next_checkpoint": next_checkpoint or None}
+    return {
+        "ok": True,
+        "answered": answered,
+        "next_checkpoint": next_checkpoint or None,
+        "requires_resume": requires_resume and not next_checkpoint,
+    }
 
 
 @app.get("/runs/{run_id}/checkpoints")

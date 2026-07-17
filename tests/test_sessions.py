@@ -20,6 +20,7 @@ from backend.errors import classify_provider_error
 from backend.debug_observer import DebugObserver
 from backend.audit import AuditLog
 from backend.storage import ProjectStore
+from backend.run_contracts import RunContract, RunKind, classify_run_contract
 from backend.workspace.workspace import Workspace
 
 
@@ -114,6 +115,17 @@ class AuditLogTests(unittest.TestCase):
 
 
 class StructuredCheckpointTests(unittest.TestCase):
+    def test_run_contract_and_verified_outcome_are_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("typed", "Update DESIGN.md", "artifact_edit")
+            outcome = {"status": "verified", "kind": "artifact_edit", "files": ["DESIGN.md"]}
+            store.finish_run("typed", "done", [], outcome=outcome)
+            run = store.recent_runs()[0]
+            self.assertEqual(run["run_kind"], "artifact_edit")
+            self.assertEqual(run["outcome"], outcome)
+            store.close()
+
     def test_startup_reconciles_abandoned_database_run(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ProjectStore(Path(directory))
@@ -2729,6 +2741,33 @@ class FrontendPrivacyTests(unittest.TestCase):
 
 
 class DeterministicRoutingTests(unittest.TestCase):
+    def test_typed_contract_is_authoritative_for_routing_and_outputs(self):
+        artifact = classify_run_contract(
+            "Refine DESIGN.md and generate more visual diagrams", "auto"
+        )
+        self.assertEqual(artifact.kind, RunKind.ARTIFACT_EDIT)
+        self.assertEqual(artifact.target_artifacts, ("DESIGN.md",))
+        self.assertTrue(artifact.requires_diagram_delta)
+        self.assertEqual(classify_run_contract("Why Kafka?", "auto").kind, RunKind.CHAT)
+        self.assertEqual(classify_run_contract("Design a secure platform", "auto").kind,
+                         RunKind.PLANNING_WORKFLOW)
+        self.assertEqual(classify_run_contract("status", "auto", "status").kind,
+                         RunKind.STATUS_QUERY)
+        self.assertEqual(classify_run_contract(
+            "Debate and update DESIGN.md", "auto"
+        ).kind, RunKind.PLANNING_WORKFLOW)
+
+    def test_recovery_contract_preserves_original_obligations(self):
+        original = classify_run_contract("Update DESIGN.md with a diagram")
+        recovery = RunContract(
+            RunKind.RECOVERY, "continue", original.target_artifacts,
+            original.requires_diagram_delta, recovery_of=original.kind,
+        )
+        restored = RunContract.from_dict(recovery.to_dict())
+        self.assertTrue(restored.requires_artifact_change)
+        self.assertFalse(restored.uses_team_workflow)
+        self.assertEqual(restored.effective_kind, RunKind.ARTIFACT_EDIT)
+
     def test_simple_commands_use_high_confidence_fuzzy_routing(self):
         self.assertEqual(Orchestrator._fuzzy_intent("show staus"), "status")
         self.assertEqual(Orchestrator._fuzzy_intent("list agents"), "agents")
@@ -2747,10 +2786,42 @@ class DeterministicRoutingTests(unittest.TestCase):
     def test_targeted_artifact_edits_use_one_agent(self):
         prompt = "Update DESIGN.md to include a Mermaid architecture diagram."
         self.assertTrue(Orchestrator._is_targeted_artifact_update(prompt))
+        self.assertTrue(Orchestrator._is_targeted_artifact_update(
+            "refine design and generate more visual diagrams of the design"
+        ))
         self.assertFalse(Orchestrator._should_run_team_workflow(prompt, "auto"))
         self.assertTrue(Orchestrator._should_run_team_workflow(
             "Debate the options, then update DESIGN.md", "auto"
         ))
+
+    def test_targeted_artifact_edit_cannot_complete_on_intent_only_prose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Design a trading platform")
+            agent = StatefulFake(
+                AgentConfig(id="researcher", name="researcher", kind="openai"),
+                replies=["I will refine the design and add diagrams."],
+            )
+            orchestrator = Orchestrator([agent], workspace, require_approval=False, mode="auto")
+            with self.assertRaisesRegex(RuntimeError, "produced no applicable"):
+                asyncio.run(orchestrator.run(
+                    "Design a trading platform",
+                    task="refine design and generate more visual diagrams of the design",
+                ))
+
+    def test_done_message_distinguishes_artifact_chat_and_planning_completion(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("ev.data.completion_kind === 'artifact_edit'", source)
+        self.assertIn("ev.data.completion_kind === 'chat'", source)
+        self.assertIn("No planning baseline was finalized", source)
+
+    def test_decision_modal_owns_checkpoint_identity_and_can_resume_after_restart(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("bodyEl.dataset.checkpointId = checkpoint.id", source)
+        self.assertIn("const checkpointId = currentStructuredCheckpointId()", source)
+        self.assertNotIn("if (!checkpointId || !awaitingDecisionInput) return", source)
+        self.assertIn("if (data.requires_resume)", source)
+        self.assertIn("startRun('continue', {hiddenPrompt: true})", source)
 
     def test_latest_task_controls_routing_for_existing_project(self):
         saved_goal = "Design a distributed logging platform"
