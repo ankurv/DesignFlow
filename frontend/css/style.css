@@ -1,20 +1,20 @@
-  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
   :root {
-    /* Soft, Matte Slate Palette (Glare-Free) */
-    --bg:       #0f172a;       /* Slate-900 (Matte, comfortable dark blue-grey) */
-    --bg2:      #1e293b;       /* Slate-800 */
-    --bg3:      #334155;       /* Slate-700 */
-    --border:   #334155;       /* Slate-700 */
-    --border2:  #475569;       /* Slate-600 */
-    --text:     #e2e8f0;       /* Slate-200 (Soft off-white, no glare) */
-    --text-muted: #94a3b8;     /* Slate-400 (Very readable but muted) */
-    --muted:    #64748b;       /* Slate-500 */
+    /* Ultimate Readability Palette (Neutral Gray, Glare-Free) */
+    --bg:       #111827;       /* Gray-900 (Comfortable, neutral dark) */
+    --bg2:      #1f2937;       /* Gray-800 */
+    --bg3:      #374151;       /* Gray-700 */
+    --border:   #374151;       /* Gray-700 */
+    --border2:  #4b5563;       /* Gray-600 */
+    --text:     #e5e7eb;       /* Gray-200 (Perfect contrast, completely eliminates glare) */
+    --text-muted: #9ca3af;     /* Gray-400 */
+    --muted:    #6b7280;       /* Gray-500 */
     
     --accent:   #818cf8;       /* Indigo-400 */
-    --accent-button: #4f46e5;  /* Indigo-600 (Softer, deeper button) */
+    --accent-button: #4f46e5;  /* Indigo-600 */
     --accent-hover: #4338ca;   /* Indigo-700 */
-    --accent-glow: rgba(99, 102, 241, 0.05); /* Reduced glow opacity */
+    --accent-glow: rgba(99, 102, 241, 0.04);
     --accent2:  #a5b4fc;       
     
     --green:    #10b981;
@@ -24,8 +24,8 @@
     --orange:   #f97316;
     --radius:   12px;
     
-    --font:     'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --heading-font: var(--font);
+    --font:     'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --heading-font: 'Plus Jakarta Sans', var(--font);
     --mono:     'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
     
     /* Font sizes for comfortable reading */
@@ -41,9 +41,12 @@
   
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { font-family: var(--font); }
-  /* Flat, soft, glare-free background */
-  body { background: var(--bg); color: var(--text); font-family: inherit;
-         font-size: var(--fs-lg); line-height: 1.6; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  /* Flat, soft, glare-free background with Inter optimizations */
+  body { 
+         background: var(--bg); color: var(--text); font-family: inherit;
+         font-size: var(--fs-lg); line-height: 1.6; height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+         letter-spacing: -0.01em; font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11'; -webkit-font-smoothing: antialiased; 
+       }
   button, input, textarea, select, option { font: inherit; }
 
   /* ── Intro Banner ── */
