@@ -173,6 +173,7 @@ class AppState:
             self.debug_observer.close()
         self.workspace = workspace
         self.store = ProjectStore(workspace.root)
+        self.store.reconcile_interrupted_runs()
         self.debug_observer = DebugObserver(workspace.root) if getattr(app.state, "debug_observer_enabled", False) else None
         self.configs = self.store.load_agents()
         self.event_log.clear()
@@ -268,6 +269,11 @@ async def release_project_binding(session_id: str) -> None:
         project_path = session_projects.pop(session_id, None)
         if not project_path or project_path in session_projects.values():
             return
+        state = app_states.get(project_path)
+        # Browser presence controls observation, not execution. Keep an active
+        # project runtime alive when its last tab disappears.
+        if state and state.status in {"running", "paused", "needs_attention"} and state.run_task and not state.run_task.done():
+            return
         state = app_states.pop(project_path, None)
     if not state:
         return
@@ -285,6 +291,18 @@ async def release_project_binding(session_id: str) -> None:
             state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
     state.status = "idle"
     state.awaiting_input = False
+    state.close()
+
+
+def close_detached_terminal_runtime(state: AppState) -> None:
+    """Release a background runtime after it finishes with no attached tabs."""
+    if not state.workspace or state.status in {"running", "paused", "needs_attention"}:
+        return
+    project_path = state.workspace.path
+    with runtime_registry_lock:
+        if project_path in session_projects.values() or app_states.get(project_path) is not state:
+            return
+        app_states.pop(project_path, None)
     state.close()
 
 
@@ -464,14 +482,18 @@ async def sse_stream(request: Request, state: AppState = Depends(get_state)):
 
     async def generator():
         try:
+            # The live stream begins at subscription time. Persisted events are
+            # loaded explicitly from Run History and never replayed on project open.
+            # A browser reconnect may request only events missed after its last
+            # live event, which preserves transient network reliability.
             try:
                 last_event_id = int(request.headers.get("last-event-id", "0") or 0)
             except ValueError:
                 last_event_id = 0
-            for past in state.event_log:
-                if int(past.get("event_id", 0) or 0) <= last_event_id:
-                    continue
-                yield f"id: {past.get('event_id', '')}\ndata: {json.dumps(past)}\n\n"
+            if last_event_id > 0:
+                for missed in state.event_log:
+                    if int(missed.get("event_id", 0) or 0) > last_event_id:
+                        yield f"id: {missed.get('event_id', '')}\ndata: {json.dumps(missed)}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
@@ -982,6 +1004,7 @@ async def start_run(
         finally:
             if state.orchestrator:
                 state.orchestrator.stop()
+            close_detached_terminal_runtime(state)
 
     state.run_task = asyncio.create_task(run_and_update())
     idea_source = "saved_run" if resumes_saved_run else ("prompt" if body.idea.strip() else "DESIGNFLOW.md")
@@ -1316,6 +1339,16 @@ def recent_runs(state: AppState = Depends(get_state)):
     return {"runs": state.store.recent_runs() if state.store else []}
 
 
+@app.get("/runs/{run_id}/events")
+def run_transcript(run_id: str, limit: int = 200, offset: int = 0, state: AppState = Depends(get_state)):
+    if not state.store:
+        raise HTTPException(400, "Open a project before viewing run history")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
+        raise HTTPException(400, "Invalid run id")
+    events = state.store.run_events(run_id, limit=limit, offset=offset)
+    return {"run_id": run_id, "events": events, "offset": offset, "has_more": len(events) == min(limit, 200)}
+
+
 @app.get("/runs/{run_id}/turns")
 def run_turns(run_id: str, state: AppState = Depends(get_state)):
     return {"turns": state.store.run_turns(run_id) if state.store else []}
@@ -1468,6 +1501,7 @@ def update_src_file(filename: str, body: FileUpdateBody, state: AppState = Depen
 
 @app.get("/events/history")
 def event_history(state: AppState = Depends(get_state)):
+    # Kept for diagnostics; the normal workspace never uses this to rebuild UI.
     return {"events": state.event_log}
 
 

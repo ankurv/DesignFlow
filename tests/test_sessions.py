@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -75,6 +76,18 @@ class StatefulFake(AgentBase):
         )
 
 
+class BlockingFake(AgentBase):
+    def __init__(self, config):
+        super().__init__(config)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def _raw_send(self, messages, system, *args, **kwargs):
+        self.started.set()
+        self.release.wait(timeout=2)
+        return "late response", Usage(input_tokens=10, output_tokens=5)
+
+
 class AuditLogTests(unittest.TestCase):
     def test_audit_log_redacts_sensitive_metadata_and_hashes_identifiers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -101,6 +114,17 @@ class AuditLogTests(unittest.TestCase):
 
 
 class StructuredCheckpointTests(unittest.TestCase):
+    def test_startup_reconciles_abandoned_database_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("abandoned", "Build it")
+            reconciled = store.reconcile_interrupted_runs()
+            run = store.recent_runs()[0]
+            self.assertEqual(reconciled, ["abandoned"])
+            self.assertEqual(run["status"], "interrupted")
+            self.assertIsNotNone(run["completed_at"])
+            store.close()
+
     def test_resuming_run_preserves_identity_start_time_and_usage(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ProjectStore(Path(directory))
@@ -1053,6 +1077,22 @@ class SessionTests(unittest.TestCase):
             ["auto_failover", "wait_and_retry", "stop"],
         )
 
+    def test_invalidated_provider_attempt_cannot_commit_late_history_or_usage(self):
+        agent = BlockingFake(AgentConfig(id="slow", name="slow", kind="openai"))
+        token = agent.begin_attempt()
+        result = []
+        worker = threading.Thread(target=lambda: result.append(agent.send("draft", attempt_token=token)))
+        worker.start()
+        self.assertTrue(agent.started.wait(timeout=1))
+        agent.invalidate_attempt(token)
+        agent.mark_error("provider timed out")
+        agent.release.set()
+        worker.join(timeout=2)
+        self.assertEqual(result, ["late response"])
+        self.assertEqual(agent.history, [])
+        self.assertEqual(agent.total_tokens, 0)
+        self.assertEqual(agent.status.value, "error")
+
     def test_failed_turn_uses_user_substituted_agent_on_retry(self):
         failed = RepairableFake(
             AgentConfig(id="specialist-1", base_id="provider-a", name="security", kind="openai", model="broken"),
@@ -1959,6 +1999,35 @@ Decision 2: Choose retention.
             self.assertNotIn(canonical, backend.server.app_states)
             self.assertTrue(store._closed)
 
+    def test_expired_last_tab_does_not_stop_active_background_run(self):
+        import backend.server
+
+        async def exercise():
+            with tempfile.TemporaryDirectory() as directory:
+                state = backend.server.AppState()
+                state.open_project(directory)
+                canonical = str(Path(directory).resolve())
+                blocker = asyncio.Event()
+                state.run_task = asyncio.create_task(blocker.wait())
+                state.status = "running"
+                backend.server.app_states[canonical] = state
+                backend.server.session_projects["closed-active-tab"] = canonical
+                backend.server.session_last_seen["closed-active-tab"] = 10.0
+
+                expired = await backend.server.expire_stale_bindings(now=100.0, ttl_seconds=75)
+                self.assertEqual(expired, ["closed-active-tab"])
+                self.assertNotIn("closed-active-tab", backend.server.session_projects)
+                self.assertIs(backend.server.app_states[canonical], state)
+                self.assertFalse(state.run_task.done())
+
+                state.run_task.cancel()
+                await asyncio.gather(state.run_task, return_exceptions=True)
+                state.status = "stopped"
+                backend.server.app_states.pop(canonical, None)
+                state.close()
+
+        asyncio.run(exercise())
+
     def test_active_tab_heartbeat_prevents_lease_expiry(self):
         import backend.server
 
@@ -2606,6 +2675,16 @@ class FrontendPrivacyTests(unittest.TestCase):
         self.assertNotIn("/home/", html)
         self.assertIn('placeholder="/path/to/your/project"', html)
 
+    def test_project_restore_overlay_prevents_false_empty_state(self):
+        root = Path(__file__).parents[1] / "frontend"
+        html = (root / "index.html").read_text()
+        state = (root / "js" / "state.js").read_text()
+        self.assertIn('id="projectRestoreOverlay"', html)
+        self.assertIn("Restoring workspace", html)
+        self.assertIn("beginProjectRestoration(path)", state)
+        self.assertIn("Your saved project files remain on disk", state)
+        self.assertIn("retryProjectRestoration", state)
+
     def test_visual_design_action_submits_hidden_prompt_directly(self):
         workspace_js = (Path(__file__).parents[1] / "frontend" / "js" / "workspace.js").read_text()
         api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
@@ -2620,12 +2699,25 @@ class FrontendPrivacyTests(unittest.TestCase):
         self.assertIn("if (typeof connectSSE === 'function') connectSSE(true);", state_js)
         self.assertIn("activeEventSource.close()", api_js)
         self.assertIn("activeEventSource = es", api_js)
-        self.assertIn("loadCurrentProject().finally(() => connectSSE(true));", main_js)
+        self.assertIn("loadCurrentProject().finally(() => {", main_js)
+        self.assertIn("connectSSE(true);", main_js)
+        self.assertIn("fetchAgentStatus(false);", main_js)
         self.assertNotIn("connectSSE();\nloadCurrentProject();", main_js)
         self.assertIn("seenEventIds.has(eventId)", api_js)
         self.assertIn("ev.data.status === 'stopped'", api_js)
         self.assertIn("Still waiting for the model", api_js)
         self.assertIn("Agent turn cancelled when the run was stopped", api_js)
+
+    def test_live_stream_does_not_replay_history_and_transcripts_are_lazy(self):
+        root = Path(__file__).parents[1]
+        server = (root / "backend" / "server.py").read_text()
+        workspace_js = (root / "frontend" / "js" / "workspace.js").read_text()
+        self.assertIn("if last_event_id > 0:", server)
+        self.assertNotIn("for past in state.event_log", server)
+        self.assertIn('@app.get("/runs/{run_id}/events")', server)
+        self.assertIn("View transcript", workspace_js)
+        self.assertIn("loadRunTranscript", workspace_js)
+        self.assertIn("?limit=200", workspace_js)
 
     def test_agent_capacity_uses_runtime_failure_not_only_health_probe(self):
         api_js = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
@@ -2762,11 +2854,15 @@ class DeterministicRoutingTests(unittest.TestCase):
         broadcast(Event(EventKind.DONE, data={}), state)
         self.assertFalse(state.awaiting_input)
 
-    def test_web_checkpoint_offers_one_click_options_and_custom_answer(self):
+    def test_web_checkpoint_modal_offers_options_and_custom_answer(self):
         source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        html = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
         self.assertIn("submitDecisionOption", source)
-        self.assertIn("Other — type my own answer in the prompt box", source)
+        self.assertIn("Other — write my own answer below", source)
         self.assertIn('type="radio" name="decisionChoice"', source)
+        self.assertIn('id="decisionModal"', html)
+        self.assertIn('id="decisionCustomInput"', html)
+        self.assertIn("openDecisionModal()", source)
         self.assertNotIn("Continue with this choice", source)
         self.assertNotIn("One decision at a time", source)
         self.assertIn("await window.submitSelectedDecision()", source)

@@ -431,6 +431,29 @@ class ProjectStore:
             if cursor.rowcount != 1:
                 raise ValueError("Saved run no longer exists")
 
+    def reconcile_interrupted_runs(self) -> list[str]:
+        """Mark process-abandoned active rows without discarding resumable state."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            rows = self._db.execute(
+                "SELECT run_id FROM runs WHERE status IN ('running', 'paused', 'needs_attention')"
+            ).fetchall()
+            run_ids = [str(row["run_id"]) for row in rows]
+            if not run_ids:
+                return []
+            placeholders = ",".join("?" for _ in run_ids)
+            self._db.execute(
+                f"UPDATE runs SET status='interrupted', completed_at=? WHERE run_id IN ({placeholders})",
+                (now, *run_ids),
+            )
+            self._db.execute(
+                f"""UPDATE turns SET status='interrupted', completed_at=?,
+                    error=CASE WHEN error='' THEN 'Server process interrupted this turn' ELSE error END
+                    WHERE run_id IN ({placeholders}) AND status IN ('running', 'waiting')""",
+                (now, *run_ids),
+            )
+        return run_ids
+
     def latest_run_id(self) -> str:
         with self._lock:
             row = self._db.execute(
@@ -578,6 +601,22 @@ class ProjectStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def run_events(self, run_id: str, limit: int = 200, offset: int = 0) -> list[dict]:
+        """Load one persisted transcript page only when a user requests it."""
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT id, run_id, timestamp, kind, agent, data_json
+                   FROM events WHERE run_id=? ORDER BY id LIMIT ? OFFSET ?""",
+                (run_id, max(1, min(int(limit), 200)), max(0, int(offset))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["event_id"] = item.pop("id")
+            item["data"] = json.loads(item.pop("data_json") or "{}")
+            result.append(item)
+        return result
 
     def get_mcp_servers(self) -> list[dict]:
         with self._lock:

@@ -197,22 +197,21 @@ function extractDecisionOptions(text) {
 
 window.selectDecisionRadio = function() {
   const selected = document.querySelector('input[name="decisionChoice"]:checked');
-  const input = document.getElementById('steerInput');
+  const input = document.getElementById('decisionCustomInput');
   if (!selected || !input) return;
   if (selected.value === 'other') {
     input.value = '';
     input.placeholder = 'Type your own answer…';
+    input.focus();
   } else {
-    const label = selected.dataset.label || '';
-    const text = decodeURIComponent(selected.dataset.text || '');
-    input.value = `${label}${text ? ' — ' + text : ''}`;
+    input.value = '';
+    input.placeholder = 'Select Other to write your own answer…';
   }
-  input.focus();
 };
 
 window.submitSelectedDecision = async function() {
   const selected = document.querySelector('input[name="decisionChoice"]:checked');
-  const promptInput = document.getElementById('steerInput');
+  const promptInput = document.getElementById('decisionCustomInput');
   if (!selected && !promptInput?.value.trim()) return;
   if (!selected || selected.value === 'other') {
     const answer = promptInput?.value.trim();
@@ -233,7 +232,7 @@ window.submitSelectedDecision = async function() {
 async function submitStructuredCheckpoint(optionId, customAnswer) {
   const checkpointId = window.activeStructuredCheckpointId;
   if (!checkpointId || !awaitingDecisionInput) return;
-  const controls = document.querySelectorAll('input[name="decisionChoice"], #sendBtn, #steerInput');
+  const controls = document.querySelectorAll('input[name="decisionChoice"], #decisionSubmitBtn, #decisionCustomInput');
   controls.forEach(control => { control.disabled = true; });
   const status = document.getElementById('decisionSubmitStatus');
   if (status) status.textContent = 'Saving your decision…';
@@ -245,7 +244,7 @@ async function submitStructuredCheckpoint(optionId, customAnswer) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not save this decision.');
     controls.forEach(control => { control.disabled = false; });
-    const promptInput = document.getElementById('steerInput');
+    const promptInput = document.getElementById('decisionCustomInput');
     if (promptInput) promptInput.value = '';
     if (data.next_checkpoint) {
       renderInteractiveQuestionPanel('', data.next_checkpoint);
@@ -257,6 +256,7 @@ async function submitStructuredCheckpoint(optionId, customAnswer) {
       updateStatus('running');
       const pendingPane = document.getElementById('contextPendingActions');
       if (pendingPane) pendingPane.style.display = 'none';
+      closeDecisionModal();
     }
   } catch (error) {
     controls.forEach(control => { control.disabled = false; });
@@ -270,7 +270,7 @@ window.submitDecisionOption = async function(label, text) {
   buttons.forEach(button => { button.disabled = true; });
   const status = document.getElementById('decisionSubmitStatus');
   if (status) status.textContent = 'Submitting your decision…';
-  const input = document.getElementById('steerInput');
+  const input = document.getElementById('decisionCustomInput');
   const answer = `${label}${text ? ' — ' + text : ''}`;
   if (input) input.value = answer;
   try {
@@ -287,6 +287,7 @@ window.submitDecisionOption = async function(label, text) {
     updateStatus('running');
     const pendingPane = document.getElementById('contextPendingActions');
     if (pendingPane) pendingPane.style.display = 'none';
+    closeDecisionModal();
   } catch (error) {
     buttons.forEach(button => { button.disabled = false; });
     if (status) status.textContent = 'Could not submit. Choose again or type an answer below.';
@@ -329,7 +330,7 @@ function renderQuestionBody(content) {
     ? '<div class="decision-more-note">Additional decisions will be asked after you answer this one.</div>'
     : '';
   const context = rationale ? `<details class="decision-context"><summary>Why this decision is needed</summary><div>${escHtml(rationale)}</div></details>` : '';
-  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(question)}</div>${context}${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — type my own answer in the prompt box</span></label><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div></fieldset></div>`;
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(question)}</div>${context}${recommendation ? `<div class="decision-recommendation">${parseMarkdown(recommendation)}</div>` : ''}${more}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — write my own answer below</span></label></fieldset></div>`;
 }
 
 function renderStructuredCheckpoint(checkpoint) {
@@ -340,8 +341,22 @@ function renderStructuredCheckpoint(checkpoint) {
   }).join('');
   const rationale = checkpoint.rationale ? `<div class="decision-rationale"><strong>Why this decision matters</strong><span>${escHtml(checkpoint.rationale)}</span></div>` : '';
   const recommendation = checkpoint.recommendation ? `<div class="decision-recommendation"><strong>Recommendation:</strong> ${escHtml(checkpoint.recommendation)}</div>` : '';
-  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(checkpoint.question)}</div>${rationale}${recommendation}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — type my own answer in the prompt box</span></label><div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div></fieldset></div>`;
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(checkpoint.question)}</div>${rationale}${recommendation}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — write my own answer below</span></label></fieldset></div>`;
 }
+
+window.openDecisionModal = function() {
+  const modal = document.getElementById('decisionModal');
+  if (!modal) return;
+  modal.style.display = 'grid';
+  document.body.classList.add('decision-modal-open');
+  setTimeout(() => modal.querySelector('input[name="decisionChoice"], #decisionCustomInput')?.focus(), 0);
+};
+
+window.closeDecisionModal = function() {
+  const modal = document.getElementById('decisionModal');
+  if (modal) modal.style.display = 'none';
+  document.body.classList.remove('decision-modal-open');
+};
 
 function renderInteractiveQuestionPanel(content, checkpoint = null) {
   const pendingPane = document.getElementById('contextPendingActions');
@@ -356,12 +371,15 @@ function renderInteractiveQuestionPanel(content, checkpoint = null) {
 
   pendingPane.style.display = 'flex';
   bodyEl.innerHTML = checkpoint ? renderStructuredCheckpoint(checkpoint) : renderQuestionBody(content);
+  const customInput = document.getElementById('decisionCustomInput');
+  if (customInput) customInput.value = '';
   const steerInput = document.getElementById('steerInput');
   const sendBtn = document.getElementById('sendBtn');
   if (steerInput && !steerInput.value) {
     steerInput.placeholder = 'Choose an option above or type your answer here…';
   }
   if (sendBtn) sendBtn.textContent = 'Submit decision';
+  openDecisionModal();
   return true;
 }
 
@@ -543,6 +561,20 @@ function connectSSE(resetHistory = false) {
   es.onerror = () => {};
 }
 
+let postEventRefreshTimer = null;
+let pendingWorkspaceRefresh = false;
+function schedulePostEventRefresh({workspace = false} = {}) {
+  pendingWorkspaceRefresh = pendingWorkspaceRefresh || workspace;
+  clearTimeout(postEventRefreshTimer);
+  postEventRefreshTimer = setTimeout(async () => {
+    const refreshFiles = pendingWorkspaceRefresh;
+    pendingWorkspaceRefresh = false;
+    const tasks = [fetchAgentStatus(false), updateDesignCockpit()];
+    if (refreshFiles && typeof refreshWorkspace === 'function') tasks.push(refreshWorkspace());
+    await Promise.allSettled(tasks);
+  }, 120);
+}
+
 function handleEvent(ev) {
   eventCount++;
   document.getElementById('eventCount').textContent = eventCount;
@@ -613,16 +645,15 @@ function handleEvent(ev) {
 
   // Update agent sidebar on turn events
   if (ev.kind === 'turn_start' || ev.kind === 'turn_end' || ev.kind === 'retry' || ev.kind === 'error') {
-    fetchAgentStatus();
+    schedulePostEventRefresh();
   }
   
   if (ev.kind === 'turn_end') {
-    if (typeof refreshWorkspace === 'function') refreshWorkspace();
     extractLiveInsights(ev);
-    updateDesignCockpit();
+    schedulePostEventRefresh({workspace: true});
   }
   if (ev.kind === 'phase' || ev.kind === 'file_write' || ev.kind === 'done') {
-    updateDesignCockpit();
+    schedulePostEventRefresh({workspace: ev.kind === 'file_write'});
   }
 }
 
@@ -1239,7 +1270,7 @@ async function runChipPrompt(prompt) {
   await steer();
 }
 
-async function fetchAgentStatus() {
+async function fetchAgentStatus(refreshCockpit = true) {
   const [res, project] = await Promise.all([
     fetch('/run/status').then(r=>r.json()),
     fetch('/project').then(r=>r.json()).catch(() => ({ open: false })),
@@ -1334,7 +1365,7 @@ async function fetchAgentStatus() {
   document.getElementById('totalTokens').textContent = totalTokens.toLocaleString();
   document.getElementById('totalCachedTokens').textContent = cached.toLocaleString();
   document.getElementById('totalCost').textContent = costText;
-  updateDesignCockpit();
+  if (refreshCockpit) updateDesignCockpit();
   const configPanel = document.getElementById('panel-config');
   if (configPanel?.classList.contains('active') && typeof renderAgentCards === 'function') {
     renderAgentCards();

@@ -509,8 +509,39 @@ function renderHistory(runs) {
       <div>${Number(run.total_tokens||0).toLocaleString()} tokens · ${formatCost(run.estimated_cost_usd||0)}</div>
       <div>run ${escHtml(run.run_id)}</div>
     </div>
+    <button class="btn btn-secondary btn-sm" type="button" onclick="loadRunTranscript('${escAttr(run.run_id)}')">View transcript</button>
   </div>`).join('');
 }
+
+window.closeRunTranscript = function() {
+  const panel = document.getElementById('runTranscriptPanel');
+  if (panel) panel.style.display = 'none';
+};
+
+window.loadRunTranscript = async function(runId) {
+  const panel = document.getElementById('runTranscriptPanel');
+  const body = document.getElementById('runTranscriptBody');
+  const title = document.getElementById('runTranscriptTitle');
+  if (!panel || !body) return;
+  panel.style.display = 'block';
+  if (title) title.textContent = `Run ${runId}`;
+  body.innerHTML = '<div class="empty-state">Loading transcript…</div>';
+  panel.scrollIntoView({behavior:'smooth', block:'start'});
+  try {
+    const response = await fetch(`/runs/${encodeURIComponent(runId)}/events?limit=200`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not load transcript');
+    const events = data.events || [];
+    body.innerHTML = events.length ? events.map(event => {
+      const details = event.data || {};
+      const copy = details.response || details.message || details.error || details.status || details.reason || event.kind;
+      const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleString() : '';
+      return `<article class="transcript-event"><div class="transcript-event-meta">${escHtml(timestamp)} · ${escHtml(event.agent || 'System')} · ${escHtml(event.kind)}</div><div class="transcript-event-copy">${escHtml(String(copy))}</div></article>`;
+    }).join('') : '<div class="empty-state">No persisted events were recorded for this run.</div>';
+  } catch (error) {
+    body.innerHTML = `<div class="empty-state">${escHtml(error.message)}</div>`;
+  }
+};
 
 window.generateVisualDesign = async function() {
   const prompt = "Update DESIGN.md directly: preserve its existing content and add a clear Mermaid architecture diagram based on the current project. This is a bounded document edit; use one agent and do not start a debate.";

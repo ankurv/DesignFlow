@@ -72,10 +72,14 @@ if (window.mermaid) {
 }
 // Bind the browser session to its project runtime before subscribing. Opening
 // the stream first leaves it attached to the temporary, unbound session state.
-loadCurrentProject().finally(() => connectSSE(true));
-loadAgentConfig();
-loadMCPServers();
-fetchAgentStatus();
+loadCurrentProject().finally(() => {
+  connectSSE(true);
+  if (!projectOpen) {
+    loadAgentConfig();
+    loadMCPServers();
+    fetchAgentStatus(false);
+  }
+});
 setInterval(() => {
   // This reads local run state only. Provider health checks are manual or run
   // once when agents are loaded, because they can consume provider quota.

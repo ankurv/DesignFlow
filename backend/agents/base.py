@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,6 +124,8 @@ class AgentBase(ABC):
         self._session_id = hashlib.md5(
             f"{config.name}{datetime.now(timezone.utc).isoformat()}".encode()
         ).hexdigest()[:8]
+        self._attempt_lock = threading.Lock()
+        self._active_attempt_token = ""
 
     @property
     def name(self) -> str:
@@ -180,11 +184,29 @@ class AgentBase(ABC):
     def _raw_send(self, messages: list[dict], system: str, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> tuple[str, Usage]:
         """Return response text and normalized token usage."""
 
-    def send(self, message: str, system_override: Optional[str] = None, ephemeral_context: Optional[str] = None, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> str:
+    def begin_attempt(self) -> str:
+        """Make a new provider attempt authoritative for logical state commits."""
+        token = str(uuid.uuid4())
+        with self._attempt_lock:
+            self._active_attempt_token = token
+        return token
+
+    def invalidate_attempt(self, token: str) -> None:
+        with self._attempt_lock:
+            if self._active_attempt_token == token:
+                self._active_attempt_token = ""
+
+    def _attempt_is_current(self, token: str | None) -> bool:
+        if token is None:
+            return True
+        with self._attempt_lock:
+            return self._active_attempt_token == token
+
+    def send(self, message: str, system_override: Optional[str] = None, ephemeral_context: Optional[str] = None, mcp_tools: list[dict] = None, tool_handler: Callable = None, attempt_token: str | None = None) -> str:
         """Sends a message to the model and updates the internal usage metrics."""
-        self.status = AgentStatus.THINKING
+        if self._attempt_is_current(attempt_token):
+            self.status = AgentStatus.THINKING
         user_message = Message(role="user", content=message)
-        self.history.append(user_message)
 
         if self.manages_context:
             window = [user_message]
@@ -193,7 +215,7 @@ class AgentBase(ABC):
             # Preserve the current request exactly; only historical messages
             # are compacted. Canonical workspace artifacts are supplied
             # separately as ephemeral context.
-            window = self._bounded_history(counted_window[:-1]) + [user_message]
+            window = self._bounded_history(counted_window) + [user_message]
 
         system = system_override or self.config.system_prompt
         raw_msgs = [{"role": m.role, "content": m.content} for m in window]
@@ -203,11 +225,15 @@ class AgentBase(ABC):
         try:
             reply, usage = self._raw_send(raw_msgs, system, mcp_tools=mcp_tools, tool_handler=tool_handler)
         except Exception as exc:
-            if self.history and self.history[-1] is user_message:
-                self.history.pop()
-            self.status = AgentStatus.ERROR
+            if self._attempt_is_current(attempt_token):
+                self.status = AgentStatus.ERROR
             raise RuntimeError(f"[{self.name}] send failed: {exc}") from exc
 
+        # A timeout cannot kill a worker thread. Discard its late result unless
+        # this is still the authoritative attempt for the logical specialist.
+        if not self._attempt_is_current(attempt_token):
+            return reply
+        self.history.append(user_message)
         self.last_usage = usage
         self.total_input_tokens += usage.input_tokens
         self.total_cached_input_tokens += usage.cached_input_tokens
@@ -218,6 +244,8 @@ class AgentBase(ABC):
         self.retry_at = ""
         self.retry_reason = ""
         self.error_message = ""
+        if attempt_token is not None:
+            self.invalidate_attempt(attempt_token)
         return reply
 
     def mark_waiting(self, retry_at: str, reason: str):

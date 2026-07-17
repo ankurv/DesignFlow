@@ -176,16 +176,29 @@
 
             <div id="feed" class="feed discussion-feed"></div>
 
-            <div id="contextPendingActions" class="discussion-input-request attention-card" style="display:none;">
-              <div class="cockpit-card-header">
-                <div>
-                  <div class="cockpit-card-kicker">Action required</div>
-                  <h3>Waiting on your input</h3>
-                </div>
-              </div>
-              <div class="decision-scroll-region">
-                <div id="contextQuestionsBody" class="cockpit-card-body md-content"></div>
-                <div id="contextDecisionOptions" class="decision-options" style="display:none;"></div>
+            <div id="contextPendingActions" class="decision-inline-notice" style="display:none;">
+              <div><strong>Decision required</strong><span>The team is waiting for your input.</span></div>
+              <button class="btn btn-primary btn-sm" type="button" onclick="openDecisionModal()">Open decision</button>
+            </div>
+
+            <div id="decisionModal" class="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decisionModalTitle" style="display:none;">
+              <div class="decision-modal-panel">
+                <header class="decision-modal-header">
+                  <div><div class="decision-step-label">Action required</div><h2 id="decisionModalTitle">Make a project decision</h2></div>
+                  <button class="decision-modal-close" type="button" onclick="closeDecisionModal()" aria-label="Close decision">×</button>
+                </header>
+                <main class="decision-modal-scroll">
+                  <div id="contextQuestionsBody" class="cockpit-card-body md-content"></div>
+                  <div id="contextDecisionOptions" class="decision-options" style="display:none;"></div>
+                </main>
+                <footer class="decision-modal-footer">
+                  <label for="decisionCustomInput">Custom answer</label>
+                  <textarea id="decisionCustomInput" class="decision-custom-answer" rows="2" placeholder="Choose an option above, or write your own answer…"></textarea>
+                  <div class="decision-modal-footer-actions">
+                    <div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div>
+                    <button id="decisionSubmitBtn" class="btn btn-primary" type="button" onclick="submitSelectedDecision()">Continue</button>
+                  </div>
+                </footer>
               </div>
             </div>
 
@@ -336,6 +349,10 @@
       <h2>Run History</h2>
       <p class="muted-note" style="margin-top:8px">Persisted in this project's internal DesignFlow workspace metadata.</p>
       <div class="history-grid" id="historyGrid"><div class="empty-state">Open a project to view previous runs.</div></div>
+      <section id="runTranscriptPanel" class="run-transcript-panel" style="display:none;">
+        <div class="run-transcript-header"><div><div class="cockpit-card-kicker">Saved transcript</div><h3 id="runTranscriptTitle">Run transcript</h3></div><button class="btn btn-secondary btn-sm" type="button" onclick="closeRunTranscript()">Close</button></div>
+        <div id="runTranscriptBody" class="run-transcript-body"></div>
+      </section>
     </div>
   </div>
 
@@ -397,6 +414,20 @@
       <button class="btn btn-secondary" onclick="closeProjectModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitProjectPath()">Open Project</button>
     </div>
+  </div>
+</div>
+
+<div id="projectRestoreOverlay" class="project-restore-overlay" role="status" aria-live="polite" style="display:none;">
+  <div class="project-restore-card">
+    <div class="project-restore-spinner" aria-hidden="true"></div>
+    <div class="project-restore-kicker">Restoring workspace</div>
+    <h2 id="projectRestoreTitle">Opening project…</h2>
+    <p id="projectRestoreMessage">Connecting to the project and checking its saved state.</p>
+    <div class="project-restore-progress"><span id="projectRestoreProgress"></span></div>
+    <div id="projectRestoreSteps" class="project-restore-steps">
+      <span data-restore-step="project">Project</span><span data-restore-step="documents">Documents</span><span data-restore-step="history">History</span><span data-restore-step="agents">Agents</span>
+    </div>
+    <button id="projectRestoreRetry" class="btn btn-primary" type="button" onclick="retryProjectRestoration()" style="display:none;">Retry restoration</button>
   </div>
 </div>
 </body>

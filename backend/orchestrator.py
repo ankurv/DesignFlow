@@ -1618,15 +1618,18 @@ class Orchestrator:
                     agent_mcp_tools = [t for t in self.mcp_tools if t.get("server") in agent_allowed_servers]
 
                 provider_timeout = max(15, int(agent.config.extra.get("orchestrator_timeout", 300) or 300))
+                attempt_token = agent.begin_attempt()
                 try:
                     response = await asyncio.wait_for(
                         asyncio.to_thread(
                             agent.send, prompt, effective_system, ephemeral_context,
                             mcp_tools=agent_mcp_tools, tool_handler=call_mcp_tool,
+                            attempt_token=attempt_token,
                         ),
                         timeout=provider_timeout,
                     )
                 except asyncio.TimeoutError as exc:
+                    agent.invalidate_attempt(attempt_token)
                     raise RuntimeError(
                         f"[{agent.name}] send failed: provider timed out after {provider_timeout} seconds"
                     ) from exc
