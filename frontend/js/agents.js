@@ -494,6 +494,7 @@ function addNewAgentCard() {
 let mcpServers = [];
 
 async function loadMCPServers() {
+  await loadMCPAccessToken();
   const configSection = document.getElementById('mcpConfigSection');
   const projectRequired = document.getElementById('mcpProjectRequired');
   if (!projectOpen) {
@@ -506,6 +507,78 @@ async function loadMCPServers() {
   const res = await fetch('/mcp/servers').then(r => r.json());
   mcpServers = res.servers || [];
   renderMCPServers();
+}
+
+async function loadMCPAccessToken() {
+  const statusNode = document.getElementById('mcpAccessStatus');
+  const generateButton = document.getElementById('mcpGenerateTokenButton');
+  const revokeButton = document.getElementById('mcpRevokeTokenButton');
+  const generated = document.getElementById('mcpGeneratedToken');
+  if (!statusNode) return;
+  if (generated) generated.style.display = 'none';
+  try {
+    const response = await fetch('/mcp/access-token');
+    if (response.status === 403) {
+      statusNode.textContent = 'Only an administrator can generate or revoke the server MCP token.';
+      if (generateButton) generateButton.style.display = 'none';
+      if (revokeButton) revokeButton.style.display = 'none';
+      return;
+    }
+    if (!response.ok) throw new Error('Unable to load MCP token status');
+    const status = await response.json();
+    if (generateButton) {
+      generateButton.style.display = '';
+      generateButton.textContent = status.configured ? 'Regenerate token' : 'Generate token';
+      generateButton.dataset.configured = status.configured ? 'true' : 'false';
+    }
+    if (revokeButton) revokeButton.style.display = status.configured ? '' : 'none';
+    const details = [];
+    if (status.configured) details.push(`UI-generated token active${status.created_at ? ` since ${new Date(status.created_at).toLocaleString()}` : ''}.`);
+    else details.push('No UI-generated token is active. Local MCP access requires no token.');
+    if (status.environment_token_configured) details.push('An environment token is also active and must be managed where the server is launched.');
+    statusNode.textContent = details.join(' ');
+  } catch (error) {
+    statusNode.textContent = error.message || 'Unable to load MCP token status.';
+  }
+}
+
+async function generateMCPAccessToken() {
+  const button = document.getElementById('mcpGenerateTokenButton');
+  if (button?.dataset.configured === 'true' && !confirm('Regenerate the token? Existing clients using the UI-generated token will immediately lose access.')) return;
+  const response = await fetch('/mcp/access-token', { method: 'POST' });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    notify(data.detail || 'Unable to generate MCP token', true);
+    return;
+  }
+  const generated = document.getElementById('mcpGeneratedToken');
+  const value = document.getElementById('mcpGeneratedTokenValue');
+  if (value) value.value = data.token || '';
+  if (generated) generated.style.display = 'block';
+  await loadMCPAccessToken();
+  if (generated) generated.style.display = 'block';
+  notify('MCP access token generated. Copy it now.');
+}
+
+async function copyMCPAccessToken() {
+  const value = document.getElementById('mcpGeneratedTokenValue');
+  if (!value?.value) return;
+  await navigator.clipboard.writeText(value.value);
+  notify('MCP access token copied');
+}
+
+async function revokeMCPAccessToken() {
+  if (!confirm('Revoke the UI-generated MCP token? Connected clients using it will immediately lose access.')) return;
+  const response = await fetch('/mcp/access-token', { method: 'DELETE' });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    notify(data.detail || 'Unable to revoke MCP token', true);
+    return;
+  }
+  document.getElementById('mcpGeneratedTokenValue').value = '';
+  document.getElementById('mcpGeneratedToken').style.display = 'none';
+  await loadMCPAccessToken();
+  notify('MCP access token revoked');
 }
 
 function renderMCPServers() {

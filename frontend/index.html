@@ -248,21 +248,10 @@
         
         <div id="dashboardView" style="margin-top: 12px; display:none; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
           <div class="dashboard-tabs" role="tablist" aria-label="Architecture dashboard sections">
-            <button class="dashboard-tab active" id="dashboardTab-guide" role="tab" aria-selected="true" aria-controls="workflowShortcutSection" onclick="showDashboardTab('guide')">Guide</button>
             <button class="dashboard-tab" id="dashboardTab-decisions" role="tab" aria-selected="false" aria-controls="decisionMemorySection" onclick="showDashboardTab('decisions')">Decision Memory</button>
             <button class="dashboard-tab" id="dashboardTab-consensus" role="tab" aria-selected="false" aria-controls="liveInsightsSection" onclick="showDashboardTab('consensus')">Consensus</button>
-            <button class="dashboard-tab" id="dashboardTab-architecture" role="tab" aria-selected="false" aria-controls="mermaidMapContainer" onclick="showDashboardTab('architecture')">Architecture</button>
+            <button class="dashboard-tab active" id="dashboardTab-architecture" role="tab" aria-selected="true" aria-controls="mermaidMapContainer" onclick="showDashboardTab('architecture')">Architecture</button>
             <button class="dashboard-tab" id="dashboardTab-debug" role="tab" aria-selected="false" aria-controls="debugInsightsSection" onclick="showDashboardTab('debug')" style="display:none">Diagnostics</button>
-          </div>
-          <!-- Live Insights Stream -->
-          <div id="workflowShortcutSection" class="dashboard-tab-panel active" data-dashboard-tab="guide" role="tabpanel" aria-labelledby="dashboardTab-guide" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px;">
-            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔁 Iterate After You Hit an Issue</h4>
-            <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('resolve_issue')">Turn an issue into a plan fix</button>
-              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('redebate_decision')">Challenge a prior decision</button>
-              <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('refine_plan')">Refine only the current plan</button>
-            </div>
-            <div style="font-size:13px; color:var(--muted); line-height:1.7;">Use these shortcuts to keep the design loop lightweight: preserve the current design, point to the specific issue you hit, and ask the team to revise only the affected parts with a short change summary.</div>
           </div>
 
           <div id="decisionMemorySection" class="dashboard-scroll-card dashboard-tab-panel" data-dashboard-tab="decisions" role="tabpanel" aria-labelledby="dashboardTab-decisions">
@@ -283,7 +272,7 @@
             <div id="debugInsightsContainer" style="display:flex; flex-direction:column; gap:10px"></div>
           </div>
           <!-- Mermaid visual map container -->
-          <div id="mermaidMapContainer" class="dashboard-tab-panel" data-dashboard-tab="architecture" role="tabpanel" aria-labelledby="dashboardTab-architecture" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:20px; flex-direction:column; flex:1">
+          <div id="mermaidMapContainer" class="dashboard-tab-panel active" data-dashboard-tab="architecture" role="tabpanel" aria-labelledby="dashboardTab-architecture" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:20px; flex-direction:column; flex:1">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">📐 Visual Architecture & Flow Diagrams</h4>
             <div id="mermaidDiagramsContainer" style="display:flex; flex-direction:column; gap:24px; flex:1"></div>
           </div>
@@ -316,18 +305,38 @@
 
   <div class="panel" id="panel-mcp">
     <div class="config-layout">
+      <section id="mcpAccessSection" style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+          <div>
+            <h2 style="margin:0 0 6px;">DesignFlow MCP Access</h2>
+            <p class="muted-note" style="margin:0;max-width:76ch;">Generate a bearer token for Codex, VS Code, or another MCP client connecting to <code>http://127.0.0.1:8010/mcp/</code>. The token is shown only once and is separate from dashboard login.</p>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="mcpGenerateTokenButton" class="btn btn-primary btn-sm" type="button" onclick="generateMCPAccessToken()">Generate token</button>
+            <button id="mcpRevokeTokenButton" class="btn btn-danger btn-sm" type="button" onclick="revokeMCPAccessToken()" style="display:none">Revoke</button>
+          </div>
+        </div>
+        <div id="mcpAccessStatus" style="margin-top:14px;color:var(--muted);font-size:13px;">Checking token status…</div>
+        <div id="mcpGeneratedToken" style="display:none;margin-top:14px;padding:14px;border:1px solid rgba(74,222,128,.35);background:rgba(74,222,128,.06);border-radius:8px;">
+          <div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:8px;">Copy this token now. DesignFlow will not show it again.</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input id="mcpGeneratedTokenValue" class="input-modern" type="text" readonly spellcheck="false" style="flex:1;font-family:var(--mono);">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="copyMCPAccessToken()">Copy</button>
+          </div>
+        </div>
+      </section>
       <div id="mcpProjectRequired" class="panel-empty-message" style="display:none;">
-        <h2>Open a project to configure MCP servers</h2>
-        <p>MCP servers belong to a project. Open or switch to a project, then return here to manage its local tools.</p>
+        <h2>Open a project to configure agent tool servers</h2>
+        <p>The DesignFlow access token above is server-wide. External MCP tools used by planning agents belong to a project.</p>
         <button class="btn btn-primary" onclick="openProject()">Open project</button>
       </div>
       <!-- MCP Servers -->
       <div id="mcpConfigSection">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
-          <h2 style="margin:0;">MCP Servers (Local Tools)</h2>
+          <h2 style="margin:0;">Agent MCP Servers (External Tools)</h2>
           <button class="btn btn-primary btn-sm" onclick="document.getElementById('mcpAddForm').style.display='flex'">＋ Add Server</button>
         </div>
-        <p class="muted-note" style="margin-bottom:16px;">Configure Model Context Protocol (MCP) servers to give agents access to external tools. Servers configured here will be available to Claude agents in this project.</p>
+        <p class="muted-note" style="margin-bottom:16px;">Configure external MCP servers that planning agents may use in this project. This is separate from the DesignFlow MCP access token above.</p>
         
         <div id="mcpList" style="display:flex; flex-direction:column; gap:12px; margin-bottom:16px;"></div>
         

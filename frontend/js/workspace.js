@@ -474,7 +474,7 @@ async function refreshDebugInsights() {
     const debugTab = document.getElementById('dashboardTab-debug');
     if (debugTab) debugTab.style.display = data.enabled ? '' : 'none';
     if (!data.enabled) {
-      if (currentDashboardTab === 'debug') showDashboardTab('guide');
+      if (currentDashboardTab === 'debug') showDashboardTab('architecture');
       return;
     }
     const insights = data.insights || [];
@@ -491,7 +491,7 @@ async function refreshDebugInsights() {
   }
 }
 
-let currentDashboardTab = 'guide';
+let currentDashboardTab = 'architecture';
 
 async function renderArchitectureDiagrams() {
   const panel = document.getElementById('mermaidMapContainer');
@@ -522,7 +522,7 @@ async function renderArchitectureDiagrams() {
 }
 
 window.showDashboardTab = function(name) {
-  const requested = String(name || 'guide');
+  const requested = String(name || 'architecture');
   const button = document.getElementById(`dashboardTab-${requested}`);
   if (!button || button.style.display === 'none') return;
   currentDashboardTab = requested;

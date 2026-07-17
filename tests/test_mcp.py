@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ["DESIGNFLOW_TEST"] = "1"
@@ -9,6 +10,7 @@ os.environ["DESIGNFLOW_TEST"] = "1"
 from fastapi.testclient import TestClient
 
 from backend.server import app
+from backend.mcp_access import MCPAccessTokenStore, mcp_access_tokens
 from backend.storage import ProjectStore
 from backend.workspace.workspace import Workspace
 
@@ -35,7 +37,11 @@ class DesignFlowMCPProtocolTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        mcp_access_tokens.revoke()
         cls.client_context.__exit__(None, None, None)
+
+    def setUp(self):
+        mcp_access_tokens.revoke()
 
     def test_initialize_and_tools_list_use_streamable_http_protocol(self):
         initialized = mcp_request(self.client, "initialize", {
@@ -92,6 +98,36 @@ class DesignFlowMCPProtocolTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_ui_generated_token_is_one_time_admin_managed_and_authenticates_mcp(self):
+        user_login = self.client.post("/auth/login", json={"username": "user", "password": "user123"})
+        self.assertEqual(user_login.status_code, 200)
+        self.assertEqual(self.client.post("/mcp/access-token").status_code, 403)
+
+        admin_login = self.client.post("/auth/login", json={"username": "admin", "password": "admin"})
+        self.assertEqual(admin_login.status_code, 200)
+        generated = self.client.post("/mcp/access-token")
+        self.assertEqual(generated.status_code, 200)
+        token = generated.json()["token"]
+        self.assertTrue(token.startswith("dfmcp_"))
+
+        status = self.client.get("/mcp/access-token").json()
+        self.assertTrue(status["configured"])
+        self.assertNotIn("token", status)
+        self.assertNotIn(token, mcp_access_tokens.path.read_text())
+
+        denied = mcp_request(self.client, "tools/list", {})
+        self.assertEqual(denied.status_code, 401)
+        allowed = mcp_request(
+            self.client, "tools/list", {},
+            headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(allowed.status_code, 200)
+
+        revoked = self.client.delete("/mcp/access-token")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertTrue(revoked.json()["revoked"])
+        self.assertEqual(mcp_request(self.client, "tools/list", {}).status_code, 200)
+
     def test_configured_token_is_required_by_mcp_transport(self):
         with patch.dict(os.environ, {"DESIGNFLOW_MCP_TOKEN": "test-secret"}):
             denied = mcp_request(self.client, "tools/list", {})
@@ -100,6 +136,19 @@ class DesignFlowMCPProtocolTests(unittest.TestCase):
             allowed = mcp_request(self.client, "tools/list", {}, headers=authorized_headers)
             self.assertEqual(allowed.status_code, 200)
 
+
+class MCPAccessTokenStoreTests(unittest.TestCase):
+    def test_regeneration_invalidates_previous_token_and_persists_only_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MCPAccessTokenStore(Path(directory) / "access.json")
+            first = store.generate()["token"]
+            second = store.generate()["token"]
+            self.assertFalse(store.verify(first))
+            self.assertTrue(store.verify(second))
+            persisted = store.path.read_text()
+            self.assertNotIn(first, persisted)
+            self.assertNotIn(second, persisted)
+            self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
 
 if __name__ == "__main__":
     unittest.main()

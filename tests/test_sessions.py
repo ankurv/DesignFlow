@@ -113,6 +113,7 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(audit_action("POST", "/workspace/file/design"), "artifact.update")
         self.assertEqual(audit_action("POST", "/mcp/"), "mcp.invoke")
         self.assertEqual(audit_action("POST", "/mcp/servers"), "mcp.configure")
+        self.assertEqual(audit_action("POST", "/mcp/access-token"), "mcp.configure")
         self.assertEqual(audit_action("POST", "/session/heartbeat"), "")
 
 
@@ -3006,10 +3007,26 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertIn('role="tablist"', html)
         self.assertIn('data-dashboard-tab="decisions"', html)
         self.assertIn('data-dashboard-tab="consensus"', html)
+        self.assertNotIn('dashboardTab-guide', html)
+        self.assertNotIn('workflowShortcutSection', html)
+        self.assertIn('id="dashboardTab-architecture" role="tab" aria-selected="true"', html)
+        self.assertIn("let currentDashboardTab = 'architecture'", workspace_js)
+        self.assertNotIn('applyWorkflowTemplate', (root / "js" / "api.js").read_text())
         self.assertIn(".dashboard-tab-panel.active", css)
         self.assertIn("window.showDashboardTab = function(name)", workspace_js)
         self.assertNotIn("max-height: clamp(220px, 34vh, 360px)", css)
         self.assertIn("font-size: 15px !important", css)
+
+    def test_mcp_page_exposes_admin_managed_one_time_access_token(self):
+        root = Path(__file__).parents[1] / "frontend"
+        html = (root / "index.html").read_text()
+        agents_js = (root / "js" / "agents.js").read_text()
+        self.assertIn('id="mcpAccessSection"', html)
+        self.assertIn('id="mcpGeneratedTokenValue"', html)
+        self.assertIn('Copy this token now. DesignFlow will not show it again.', html)
+        self.assertIn("async function generateMCPAccessToken()", agents_js)
+        self.assertIn("async function revokeMCPAccessToken()", agents_js)
+        self.assertIn("fetch('/mcp/access-token'", agents_js)
 
     def test_architecture_diagrams_render_only_after_tab_is_visible(self):
         root = Path(__file__).parents[1] / "frontend" / "js"

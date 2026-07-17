@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
-import os
 import re
 import shutil
 import threading
@@ -32,6 +30,7 @@ from .workspace.workspace import Workspace
 from .errors import classify_provider_error
 from .debug_observer import DebugObserver
 from .designflow_mcp import designflow_mcp_app
+from .mcp_access import mcp_access_tokens
 from .audit import audit_log
 from .version import __version__
 
@@ -102,7 +101,8 @@ def audit_action(method: str, path: str) -> str:
         (r"^/run/retry$", "run.retry"), (r"^/run/stop$", "run.stop"),
         (r"^/run/reset$", "run.reset"), (r"^/run/steer$", "run.steer"),
         (r"^/run/checkpoint(?:/.*)?$", "checkpoint.answer"),
-        (r"^/mcp/servers(?:/.*)?$", "mcp.configure"), (r"^/mcp/?$", "mcp.invoke"),
+        (r"^/mcp/(?:servers|access-token)(?:/.*)?$", "mcp.configure"),
+        (r"^/mcp/?$", "mcp.invoke"),
         (r"^/workspace/file/.*$", "artifact.update"),
         (r"^/workspace/src/.*$", "source.update"), (r"^/admin/shutdown$", "admin.shutdown"),
     )
@@ -1430,6 +1430,27 @@ class MCPServerIn(BaseModel):
     username: str = ""
     password: str = ""
 
+
+def require_mcp_admin(session: Session = Depends(get_session)) -> Session:
+    if session.role != "admin":
+        raise HTTPException(403, "Only administrators can manage the DesignFlow MCP access token")
+    return session
+
+
+@app.get("/mcp/access-token")
+def get_mcp_access_token_status(session: Session = Depends(require_mcp_admin)):
+    return mcp_access_tokens.status()
+
+
+@app.post("/mcp/access-token")
+def generate_mcp_access_token(session: Session = Depends(require_mcp_admin)):
+    return mcp_access_tokens.generate()
+
+
+@app.delete("/mcp/access-token")
+def revoke_mcp_access_token(session: Session = Depends(require_mcp_admin)):
+    return {"revoked": mcp_access_tokens.revoke()}
+
 @app.get("/mcp/servers")
 def get_mcp_servers(state: AppState = Depends(get_state)):
     if not state.store:
@@ -1600,18 +1621,21 @@ class MCPAccessMiddleware:
         if scope.get("type") not in {"http", "websocket"}:
             await self.asgi_app(scope, receive, send)
             return
-        configured_token = os.getenv("DESIGNFLOW_MCP_TOKEN", "").strip()
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         supplied = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
         client_host = (scope.get("client") or ("", 0))[0]
-        if configured_token:
-            allowed = hmac.compare_digest(supplied, f"Bearer {configured_token}")
+        bearer_prefix = "Bearer "
+        supplied_token = supplied[len(bearer_prefix):] if supplied.startswith(bearer_prefix) else ""
+        access_status = mcp_access_tokens.status()
+        token_required = access_status["configured"] or access_status["environment_token_configured"]
+        if token_required:
+            allowed = mcp_access_tokens.verify(supplied_token)
         else:
             allowed = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
         if not allowed:
             response = JSONResponse(
                 {"detail": "MCP access requires localhost or a valid DESIGNFLOW_MCP_TOKEN"},
-                status_code=401 if configured_token else 403,
+                status_code=401 if token_required else 403,
             )
             await response(scope, receive, send)
             return

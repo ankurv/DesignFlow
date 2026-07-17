@@ -67,11 +67,11 @@ cd DESIGNFLOW
 python3 -m pip install -r requirements.txt
 
 # Start the application server
-python3 run.py --port 8000
+python3 run.py --port 8010
 ```
 
 For passive, project-local workflow diagnostics during development, start with
-`python3 run.py --port 8000 --debug-observer`. The observer is disabled by default,
+`python3 run.py --port 8010 --debug-observer`. The observer is disabled by default,
 redacts sensitive values, and writes suggestions under `.designflow/debug/`.
 
 Security- and state-relevant user actions are recorded by default in the server-wide
@@ -91,7 +91,7 @@ capabilities during discovery and synthesis. Set an entry's `mode` to `include` 
 `exclude` to override automatic relevance judgment, add project-specific entries, or
 remove entries that should not be considered. Existing project catalogs are never overwritten.
 
-Open **[http://localhost:8000](http://localhost:8000)** in your browser.
+Open **[http://localhost:8010](http://localhost:8010)** in your browser.
 
 ### Connect coding agents over MCP
 
@@ -109,16 +109,24 @@ MCP-capable coding agent at `http://127.0.0.1:8010/mcp/`:
 }
 ```
 
-The tools provide scoped implementation context, artifact validation, current run status,
-recent activity, and a constrained write-back channel for implementation evidence, design
-mismatches, and questions. Each tool takes the absolute `project_path`, so one DesignFlow
-server can safely serve multiple local projects without depending on whichever project is
-open in the dashboard.
+The MCP server exposes `get_project_status`, `read_artifact`,
+`get_implementation_context`, `validate_project`, `get_recent_activity`,
+`record_implementation_report`, and `list_implementation_reports`. Write-back is limited
+to implementation evidence, design mismatches, and questions. Each tool takes the absolute
+`project_path`, so one DesignFlow server can safely serve multiple local projects without
+depending on whichever project is open in the dashboard.
 
-MCP is localhost-only by default. For access from another machine, set
-`DESIGNFLOW_MCP_TOKEN` before starting DesignFlow and configure the client to send
-`Authorization: Bearer <token>`. The dashboard's third-party MCP server configuration API
-is separate at `/mcp/servers`.
+MCP is localhost-only without credentials by default. An administrator can open **MCP
+Servers → DesignFlow MCP Access**, generate a random bearer token, and copy it into the
+client's `Authorization: Bearer <token>` header. The plaintext is displayed once; DesignFlow
+stores only its SHA-256 digest. Regenerating immediately invalidates the previous generated
+token, and revocation returns the server to local-only access unless an environment token
+is also configured.
+
+For unattended deployment, `DESIGNFLOW_MCP_TOKEN` remains supported. Environment and
+UI-generated tokens are independent and either can authenticate. Use TLS through a trusted
+reverse proxy whenever MCP traffic leaves the local machine. The dashboard's third-party
+MCP server configuration API is separate at `/mcp/servers`.
 
 ### 2. Setup a Project Folder
 
@@ -147,8 +155,9 @@ designflow/
 │   ├── workspace/
 │   │   └── workspace.py    # Directory management, file writes, and diff state
 │   ├── orchestrator.py     # Main coordinator debate, planning loops, and steering
+│   ├── designflow_mcp.py   # Coding-agent MCP tools and scoped project context
 │   ├── storage.py          # Local SQLite session persistence
-│   └── server.py           # FastAPI REST API + SSE Event stream endpoints
+│   └── server.py           # FastAPI REST, SSE, and mounted MCP transport
 ├── frontend/
 │   └── index.html          # Interactive dashboard (HTML5, Tailwind, Vanilla CSS, JS)
 ├── run.py                  # Startup script

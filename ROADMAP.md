@@ -23,8 +23,8 @@ This document tracks the current state of DesignFlow, evaluating its core streng
 1. **Scalability Limitations (Single-Node Bound)**
    Currently, DesignFlow stores sessions in memory (`AuthManager`), uses local SQLite databases per project, and relies on local filesystem directories (`backend/workspace.py`) for I/O. This means the backend **cannot be load-balanced horizontally** across multiple servers. If you deploy this to AWS or GCP, you are restricted to a single monolithic instance.
 
-2. **Lack of Live Tool Execution (MCP)**
-   The AI agents debate architecture, but they do not actively *execute* tools against the user's existing codebase (e.g., they don't run `npm audit`, execute `grep` searches, or fetch live API schemas). Integrating the Model Context Protocol (MCP) more deeply into the debate loop would bridge the gap between "planning" and "reality."
+2. **MCP Execution Is Deliberately Read-Oriented Today**
+   DesignFlow now exposes a standard Streamable HTTP MCP server for coding agents. It provides scoped implementation context, validation, activity, and constrained implementation-report write-back. DesignFlow's own debating agents still do not execute arbitrary workspace commands such as `npm audit`, source searches, or cloud API calls. Adding those capabilities requires an explicit permission and sandbox model rather than widening the current safe MCP boundary.
 
 3. **No Monetization or Multi-Tenant SaaS Isolation**
    While we have user login and roles, there is no infrastructure for paywalls, subscription tiers, or strict ephemeral sandboxing (preventing one tenant's project from accessing another tenant's files on the host OS).
@@ -52,6 +52,9 @@ These are the primary options for the next major development focus.
 
 ### Track 3: Deep MCP Integration (Agentic Execution)
 *Goal: Make the Virtual Company smarter by giving them active tools.*
+- [x] Expose project status, scoped implementation context, validation, and recent activity through Streamable HTTP MCP.
+- [x] Add constrained coding-agent write-back for implementation evidence, mismatches, and questions.
+- [ ] Surface and resolve implementation reports in the DesignFlow dashboard and decision workflow.
 - [ ] Allow the Red Team agent to run security linters on the user's workspace.
 - [ ] Allow the Cloud Architect to query live AWS environments to check existing infrastructure constraints.
 - [ ] Integrate local bash execution capabilities for the AI to auto-generate scaffolding based on its plans.

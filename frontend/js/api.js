@@ -63,24 +63,6 @@ async function submitLogout() {
 
 // ── SSE connection ───────────────────────────────────────────────────────────
 
-const WORKFLOW_TEMPLATES = {
-  new_design: `Design a fresh solution for this project. Create or refresh DESIGN.md, PLAN.md, and DECISIONS.md with a practical MVP-first approach.`,
-  refine_plan: `Review the current DESIGN.md, PLAN.md, and DECISIONS.md. Refine the existing plan without restarting from scratch. Tighten sequencing, reduce ambiguity, and call out exactly what changed.`,
-  resolve_issue: `We hit an issue while following the current plan. Keep the existing design unless it must change. Identify the root cause, update only the affected parts of DESIGN.md / PLAN.md / DECISIONS.md, and add a short "what changed and why" summary.`,
-  redebate_decision: `Re-open one important architectural or product decision from DECISIONS.md. Challenge the current choice, compare alternatives, recommend the best option now, and update DESIGN.md / PLAN.md / DECISIONS.md consistently.`,
-  simplify_scope: `Simplify the current solution to the smallest credible version. Remove non-essential scope, preserve the core user outcome, and update DESIGN.md / PLAN.md / DECISIONS.md to match the leaner direction.`
-};
-
-window.applyWorkflowTemplate = function(key) {
-  const template = WORKFLOW_TEMPLATES[key];
-  const input = document.getElementById('steerInput');
-  if (!template || !input) return;
-  input.value = template;
-  input.focus();
-  input.setSelectionRange(input.value.length, input.value.length);
-  notify('Prompt template loaded. Add any project-specific detail, then send.');
-};
-
 function isCoordinatorEvent(ev) {
   return !!(ev?.data?.is_coordinator || ev?.data?.actor_role === 'coordinator' || ev?.kind === 'phase' && ev?.data?.phase === 'coordinator');
 }

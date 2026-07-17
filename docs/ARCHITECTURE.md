@@ -9,13 +9,15 @@ flowchart LR
     subgraph People["Collaborators"]
         U1["Browser · User A"]
         U2["Browser · User B"]
+        CA["MCP coding agent"]
     end
 
     subgraph Server["DesignFlow server"]
         Auth["Authentication\nBrowser session"]
         Registry["Project runtime registry\nCanonical path → runtime"]
         Runtime["Shared project runtime\nOne orchestrator per open project"]
-        API["FastAPI + SSE"]
+        API["FastAPI REST + SSE"]
+        MCP["Streamable HTTP MCP\nLocal or bearer-token access"]
         Orch["Deterministic orchestrator"]
         Team["Need-based virtual specialists"]
     end
@@ -33,6 +35,9 @@ flowchart LR
     Registry --> Runtime
     U1 <--> API
     U2 <--> API
+    CA <--> MCP
+    MCP <--> Artifacts
+    MCP <--> DB
     API <--> Runtime
     Runtime --> Orch
     Orch <--> Team
@@ -54,7 +59,7 @@ flowchart TD
     subgraph DiscoveryPhase["Discovery Phase"]
         direction LR
         D1[Check Context] --> D2{Context Missing?}
-        D2 -->|Yes| D3[Write Clarifying Question to QUESTIONS.md]
+        D2 -->|Yes| D3[Persist checkpoint in SQLite and project it to QUESTIONS.md]
         D2 -->|No| D4[Skip to Drafting]
     end
     
@@ -79,7 +84,7 @@ flowchart TD
         R1[Coordinator Resolves Critiques] --> R2[Update Artifacts]
         R2 --> R3{coordinator_completion_errors}
         R3 -->|Errors < 3 times| R4[Inject deterministic quality_failure event]
-        R3 -->|Material Decision Needed| R5[Write Checkpoint to QUESTIONS.md]
+        R3 -->|Material Decision Needed| R5[Persist structured checkpoint]
         R3 -->|Pass| R6[Done]
     end
 
@@ -113,7 +118,45 @@ flowchart TD
 4. **Deterministic Quality Gates (`_run_refinement_phase`):** The coordinator synthesizes the peer critiques. Python then checks the output for structural errors (`_coordinator_completion_errors()`). If it failed to address requirements, Python increments `_refinement_attempts` and forces the coordinator to try again *without human intervention*.
 5. **Approval Resumption (`_run_approval_phase`):** A pause stops the loop. When the user responds via `/run/steer`, the steering is added as a `user_decision` context event, and the state machine resumes whatever phase was stored in `post_approval_phase`.
 
-Questions are written to `QUESTIONS.md` for durable state and rendered inline in the main discussion window. Each checkpoint asks one material question with a small set of choices and accepts a custom response through the normal prompt input.
+Checkpoint state is stored transactionally in SQLite and projected into `QUESTIONS.md` for
+human readability. The server never reconstructs checkpoint state by parsing that file.
+Each checkpoint asks one material question with a small set of choices and accepts a custom
+response through the normal prompt input.
+
+## Coding-agent MCP boundary
+
+```mermaid
+sequenceDiagram
+    participant C as Coding agent
+    participant M as DesignFlow MCP
+    participant W as Project artifacts
+    participant D as Project database
+
+    C->>M: get_implementation_context(project_path, task)
+    M->>W: Select relevant design, plan, and decision sections
+    M-->>C: Scoped context plus validation state
+    C->>M: record_implementation_report(evidence | mismatch | question)
+    M->>D: Persist report with code references
+    M-->>C: Report identifier and status
+```
+
+The MCP application is mounted by the FastAPI process at `/mcp/` and uses the standard
+Streamable HTTP transport. Every project tool takes an explicit absolute `project_path`;
+it does not inherit the dashboard's currently selected project or browser session. Access
+is restricted to localhost when no token exists. Administrators may generate, regenerate,
+or revoke a server-wide token from the MCP Servers page; its plaintext is disclosed once
+and only its SHA-256 digest is persisted in `~/.designflow/mcp_access.json`. An optional
+`DESIGNFLOW_MCP_TOKEN` environment credential remains independently valid for unattended
+deployments. When either token exists, every MCP client—including localhost—must present a
+matching bearer token. MCP clients may read scoped implementation context,
+artifacts, validation results, run status, and recent activity. Their write boundary is
+limited to implementation evidence, design mismatches, and questions; they cannot silently
+rewrite confirmed decisions or planning artifacts.
+
+The dashboard's configuration records for third-party MCP servers are a separate concern
+and remain available through the authenticated REST API at `/mcp/servers`.
+Token status, generation, and revocation use the admin-only `/mcp/access-token` REST API.
+Remote deployments must terminate TLS before forwarding requests to DesignFlow.
 
 ## Context and restart lifecycle
 
@@ -170,11 +213,11 @@ Fallback is never automatic. A user explicitly pauses the failed provider and re
 | `.designflow/DESIGN.md` | Canonical architecture and technical design |
 | `.designflow/PLAN.md` | Requirements, risks, validation, and implementation phases |
 | `.designflow/DECISIONS.md` | Confirmed choices and trade-offs |
-| `.designflow/QUESTIONS.md` | The one active user checkpoint, if any |
+| `.designflow/QUESTIONS.md` | Human-readable projection of the active SQLite checkpoint |
 | `.designflow/CONTEXT.md` | Deterministic compact restart memory |
 | `.designflow/context_events.jsonl` | Lifecycle-aware unresolved context records |
 | `.designflow/LOGBOOK.md` | Full audit trail, excluded from routine prompts |
-| `.designflow/designflow.db` | Agents, runs, turns, usage, settings, and recovery state |
+| `.designflow/designflow.db` | Agents, runs, checkpoints, usage, recovery state, and coding-agent implementation reports |
 
 ## Current collaboration boundary
 
