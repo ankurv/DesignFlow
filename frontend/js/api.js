@@ -808,6 +808,12 @@ function appendFeed(ev) {
             <button class="btn btn-secondary btn-sm" type="button" onclick="recoverProvider('wait_and_retry', this)">Wait &amp; retry</button>
             <span class="provider-recovery-status" aria-live="polite"></span>
           </div>`;
+      } else if (ev.data.error_code === 'planning_quality_failed') {
+        detail = ev.data.details || '';
+        recoveryActionsHtml = ev.run_id ? `
+          <div class="provider-recovery-actions">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="openRunTranscript('${escAttr(String(ev.run_id))}')">View full interaction log</button>
+          </div>` : '';
       }
       kindLabel = 'error';
       break;
@@ -874,6 +880,13 @@ async function resumeInterruptedRun(sourceButton) {
   }
   if (pane) pane.classList.add('resolved');
   if (status) status.textContent = 'Saved turn restored and retry started.';
+}
+
+async function openRunTranscript(runId) {
+  const historyTab = Array.from(document.querySelectorAll('.tab')).find(tab => tab.textContent.includes('Run History'));
+  showTab('history', historyTab || null);
+  await loadRunHistory();
+  await window.loadRunTranscript(runId);
 }
 
 setInterval(() => {

@@ -22,8 +22,22 @@ class PublicProviderError:
         }
 
 
+class DesignFlowError(RuntimeError):
+    """Typed application failure that must never be reclassified as a provider error."""
+
+    code = "designflow_error"
+    public_message = "DesignFlow could not complete the workflow."
+
+
+class PlanningQualityError(DesignFlowError):
+    code = "planning_quality_failed"
+    public_message = "Planning validation failed after bounded refinement. Review the validation details and retry refinement."
+
+
 def classify_provider_error(exc: Exception) -> PublicProviderError:
     """Prefer structured SDK fields, then use bounded text matching."""
+    if isinstance(exc, DesignFlowError):
+        return PublicProviderError(exc.code, exc.public_message, None, False)
     status = getattr(exc, "status_code", None)
     try:
         status = int(status) if status is not None else None
@@ -47,8 +61,8 @@ def classify_provider_error(exc: Exception) -> PublicProviderError:
         return PublicProviderError("authentication_failed", "Provider authentication or model access failed.", status, False)
     if any(token in signal for token in ("context_length", "context length", "context window", "maximum context", "too many tokens", "token limit")):
         return PublicProviderError("context_exhausted", "Request exceeds the model context limit.", status, False)
-    if status == 404 or re.search(r"model.*(not found|unavailable|unsupported|deprecated)|unknown model|invalid model", signal):
-        return PublicProviderError("model_unavailable", "Configured model is unavailable.", status, False)
+    if status == 404 or re.search(r"\b404\b|model.*(not found|unavailable|unsupported|deprecated)|unknown model|invalid model", signal):
+        return PublicProviderError("model_unavailable", "Configured model or provider endpoint is unavailable.", status or 404, False)
     if any(token in signal for token in ("timeout", "timed out", "deadline exceeded")):
         return PublicProviderError("provider_timeout", "Model provider timed out.", status, True)
     if status is not None and status >= 500:

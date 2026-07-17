@@ -16,7 +16,7 @@ from unittest.mock import patch
 from backend.agents.base import AgentBase, AgentConfig, Message, Usage
 from backend.agents.providers import CLIAgent, GroqAgent, discover_models
 from backend.orchestrator import COORDINATOR_SYSTEM, EventKind, Orchestrator, OrchestratorPhase
-from backend.errors import classify_provider_error
+from backend.errors import PlanningQualityError, classify_provider_error
 from backend.debug_observer import DebugObserver
 from backend.audit import AuditLog
 from backend.storage import ProjectStore
@@ -3483,6 +3483,28 @@ class DeterministicRoutingTests(unittest.TestCase):
         quota = RuntimeError("insufficient_quota: add billing credits")
         quota.status_code = 429
         self.assertEqual(classify_provider_error(quota).code, "quota_exhausted")
+
+    def test_internal_planning_failure_is_never_misclassified_from_capability_words(self):
+        failure = PlanningQualityError(
+            "identity.authentication is missing acceptance evidence and authorization coverage"
+        )
+        public = classify_provider_error(failure)
+        self.assertEqual(public.code, "planning_quality_failed")
+        self.assertNotIn("Provider authentication", public.message)
+        message, code = Orchestrator._public_error(failure)
+        self.assertEqual(code, "planning_quality_failed")
+        self.assertIn("Planning validation failed", message)
+
+    def test_unstructured_404_is_reported_as_model_or_endpoint_unavailable(self):
+        public = classify_provider_error(RuntimeError("send failed: error code: 404"))
+        self.assertEqual(public.code, "model_unavailable")
+        self.assertIn("endpoint", public.message)
+
+    def test_planning_failure_ui_links_to_persisted_run_transcript(self):
+        source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
+        self.assertIn("planning_quality_failed", source)
+        self.assertIn("View full interaction log", source)
+        self.assertIn("openRunTranscript", source)
 
     def test_decision_checkpoint_state_has_an_explicit_lifecycle(self):
         from backend.server import AppState, broadcast

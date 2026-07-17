@@ -8,6 +8,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import closing
 
 from .crypto import encrypt_key, decrypt_key
 
@@ -112,6 +113,19 @@ class ProjectStore:
                     recommended INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(checkpoint_id) REFERENCES decision_checkpoints(id) ON DELETE CASCADE,
                     UNIQUE(checkpoint_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS system_recovery_actions (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    failure_category TEXT NOT NULL,
+                    affected_provider TEXT NOT NULL DEFAULT '',
+                    failed_turn_id TEXT NOT NULL DEFAULT '',
+                    retry_eligible INTEGER NOT NULL DEFAULT 0,
+                    auto_failover_eligible INTEGER NOT NULL DEFAULT 0,
+                    retry_time_known TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    resolution_action TEXT NOT NULL DEFAULT ''
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_checkpoint
                     ON decision_checkpoints(run_id) WHERE status = 'active';
@@ -271,6 +285,47 @@ class ProjectStore:
                      int(bool(option.get("recommended")))),
                 )
         return self.checkpoint(checkpoint_id)
+
+    def enqueue_recovery_action(
+        self, run_id: str, failure_category: str, affected_provider: str,
+        failed_turn_id: str, retry_eligible: bool, auto_failover_eligible: bool,
+        retry_time_known: str
+    ) -> str:
+        with self._lock:
+            action_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            self._db.execute("""
+                INSERT INTO system_recovery_actions
+                (id, run_id, failure_category, affected_provider, failed_turn_id,
+                 retry_eligible, auto_failover_eligible, retry_time_known, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                action_id, run_id, failure_category, affected_provider, failed_turn_id,
+                int(retry_eligible), int(auto_failover_eligible), retry_time_known, now
+            ))
+            self._db.commit()
+            return action_id
+
+    def active_recovery_action(self, run_id: str) -> dict:
+        with self._lock:
+            row = self._db.execute("""
+                SELECT * FROM system_recovery_actions
+                WHERE run_id = ? AND resolved_at IS NULL
+                ORDER BY created_at DESC LIMIT 1
+            """, (run_id,)).fetchone()
+            if not row:
+                return None
+            return dict(row)
+
+    def resolve_recovery_action(self, action_id: str, resolution_action: str):
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            self._db.execute("""
+                UPDATE system_recovery_actions
+                SET resolved_at = ?, resolution_action = ?
+                WHERE id = ?
+            """, (now, resolution_action, action_id))
+            self._db.commit()
 
     def checkpoint(self, checkpoint_id: str) -> dict:
         with self._lock:

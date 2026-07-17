@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 from backend.mcp_client import MCPManager
 
 from .agents.base import AgentBase, Message, Usage
-from .errors import classify_provider_error
+from .errors import PlanningQualityError, classify_provider_error
 from .run_contracts import RunContract, RunKind, classify_run_contract
 from .prompt_catalog import prompt_catalog
 from .workspace.workspace import Workspace
@@ -1040,7 +1040,7 @@ class Orchestrator:
             elif self.phase == OrchestratorPhase.COMPLETE:
                 completion_errors = self._coordinator_completion_errors("PASS")
                 if completion_errors:
-                    raise RuntimeError(
+                    raise PlanningQualityError(
                         "Planning quality gate blocked completion: " + " | ".join(completion_errors)
                     )
                 self.completion_kind = "planning_complete"
@@ -1290,7 +1290,7 @@ class Orchestrator:
                 )
                 self.phase = OrchestratorPhase.REFINEMENT
             elif errors and self.require_approval and any("user decision" in error for error in errors):
-                raise RuntimeError(
+                raise PlanningQualityError(
                     "Planning requires a material user decision, but the coordinator did not provide "
                     "one concrete validated checkpoint with 2-3 trade-off options. Internal workflow "
                     "repair prompts must never be presented as product decisions. "
@@ -1299,7 +1299,7 @@ class Orchestrator:
             elif not errors:
                 self.phase = OrchestratorPhase.COMPLETE
             else:
-                raise RuntimeError(
+                raise PlanningQualityError(
                     "Planning quality gate remained unsatisfied after bounded refinement: "
                     + " | ".join(errors)
                 )
@@ -1738,7 +1738,14 @@ class Orchestrator:
                 if not provider_error.retryable or user_selectable_recovery:
                     agent.mark_error(str(exc))
                     public_error, error_code = provider_error.message, provider_error.code
+                    action_id = ""
+                    if self.store and self.run_id:
+                        action_id = self.store.enqueue_recovery_action(
+                            self.run_id, "provider_error", agent.config.base_id or agent.config.id,
+                            turn_id, provider_error.retryable, user_selectable_recovery, ""
+                        )
                     self._failed_turn = {
+                        "action_id": action_id,
                         "turn_id": turn_id,
                         "attempt": attempt,
                         "agent_id": agent.config.id,

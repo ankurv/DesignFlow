@@ -27,7 +27,7 @@ from .agents.providers import AGENT_KINDS, create_agent, discover_models
 from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
-from .errors import classify_provider_error
+from .errors import DesignFlowError, classify_provider_error
 from .debug_observer import DebugObserver
 from .designflow_mcp import designflow_mcp_app
 from .mcp_access import mcp_access_tokens
@@ -152,7 +152,22 @@ def healthz():
 @app.get("/version")
 def version():
     return {"version": __version__}
+from enum import Enum
 
+class WorkflowState(str, Enum):
+    IDLE = "idle"
+    DISCOVERING = "discovering"
+    WAITING_FOR_DECISION = "waiting_for_decision"
+    DRAFTING = "drafting"
+    REVIEWING = "reviewing"
+    REFINING = "refining"
+    VALIDATING = "validating"
+    COMPLETED = "completed"
+    PROVIDER_ATTENTION = "provider_attention"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
+    FAILED = "failed"
 
 class AppState:
     def __init__(self):
@@ -581,6 +596,31 @@ def runtime_invariant_errors(state: AppState) -> list[str]:
         errors.append("awaiting input outside paused state")
     if state.status == "idle" and live_task:
         errors.append("idle runtime still has a live task")
+        
+    if state.store and state.run_id:
+        # Check at most one active checkpoint
+        active_checkpoints = state.store._db.execute(
+            "SELECT count(*) FROM decision_checkpoints WHERE run_id=? AND status='active'",
+            (state.run_id,)
+        ).fetchone()[0]
+        if active_checkpoints > 1:
+            errors.append(f"run {state.run_id} has {active_checkpoints} active checkpoints (max 1)")
+            
+        if state.status == "paused" and state.awaiting_input and active_checkpoints != 1:
+            errors.append("paused awaiting input but no active checkpoint exists")
+            
+        if state.status == "needs_attention":
+            active_recoveries = state.store._db.execute(
+                "SELECT count(*) FROM system_recovery_actions WHERE run_id=? AND resolved_at IS NULL",
+                (state.run_id,)
+            ).fetchone()[0]
+            if active_recoveries != 1:
+                errors.append(f"needs_attention but has {active_recoveries} active recovery actions")
+                
+        if state.status in {"done", "error"}:
+            if active_checkpoints > 0:
+                errors.append(f"completed/stopped run has {active_checkpoints} active checkpoints")
+            
     return errors
 
 
@@ -1035,7 +1075,10 @@ async def start_run(
             state.awaiting_input = False
             logger.exception("Orchestrator run failed")
             public_error, error_code = Orchestrator._public_error(exc)
-            broadcast(Event(kind=EventKind.ERROR, data={"error": public_error, "error_code": error_code}), state)
+            diagnostic = str(exc)[:4000] if isinstance(exc, DesignFlowError) else ""
+            broadcast(Event(kind=EventKind.ERROR, data={
+                "error": public_error, "error_code": error_code, "details": diagnostic,
+            }), state)
             if state.store and state.run_id:
                 agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
                 state.store.finish_run(
@@ -1060,9 +1103,13 @@ async def start_run(
 
 
 @app.post("/run/reset")
-def reset_run(state: AppState = Depends(get_state)):
+async def reset_run(state: AppState = Depends(get_state)):
     if state.status == "running":
         raise HTTPException(400, "Cannot reset while running. Stop first.")
+
+    if state.run_task and not state.run_task.done():
+        state.run_task.cancel()
+        await asyncio.gather(state.run_task, return_exceptions=True)
 
     if state.store:
         state.store.clear_run_state()
