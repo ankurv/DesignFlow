@@ -187,6 +187,29 @@ class Workspace:
             }, indent=2))
         return stage
 
+    def freeze_planning_evidence(self, goal: str) -> dict:
+        """Persist immutable user/run evidence and its selected contract snapshot."""
+        target = (
+            self._artifact_stage_dir.parent / "planning_evidence.json"
+            if self._artifact_stage_dir is not None
+            else self.root / "planning_evidence.json"
+        )
+        if target.exists():
+            try:
+                return json.loads(target.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+        evidence = (goal or self.brief()).strip()
+        selected = self._select_capability_contracts(evidence)
+        payload = {
+            "schema_version": 1,
+            "goal": evidence,
+            "capability_contract_ids": [item["id"] for item in selected],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
     def promote_staged_artifacts(self) -> bool:
         """Archive and transactionally promote the complete staged artifact set."""
         if self._artifact_stage_dir is None:
@@ -232,6 +255,9 @@ class Workspace:
                     destination.write_bytes(content)
             raise
         self._mark_stage("promoted", changed=True)
+        evidence = self._artifact_stage_dir.parent / "planning_evidence.json"
+        if evidence.exists():
+            shutil.copy2(evidence, self.root / "planning_evidence.json")
         canonical.refresh_context()
         return True
 
@@ -388,6 +414,31 @@ class Workspace:
         self._archive_artifact(key, current)
         self.write(key, result)
         return True, "merged"
+
+    def replace_complete_artifact(self, key: str, update: str, title: str) -> tuple[bool, str]:
+        """Replace a staged synthesis as one normalized document, never concatenate generations."""
+        preamble, sections = self._markdown_h2_sections(update)
+        if not sections:
+            return False, f"Rejected complete {key.upper()}.md synthesis because it contained no `##` sections."
+        protocol = {name.casefold() for name in self.PROTOCOL_HEADERS}
+        by_heading = {
+            heading.casefold(): body
+            for heading, body in sections
+            if heading.casefold() not in protocol
+        }
+        order = list(dict.fromkeys(
+            heading.casefold() for heading, _ in reversed(sections)
+            if heading.casefold() not in protocol
+        ))[::-1]
+        if not order:
+            return False, f"Rejected complete {key.upper()}.md synthesis because it contained only protocol sections."
+        current = self.read(key)
+        if current != "(empty)":
+            self._archive_artifact(key, current)
+        heading = next((line for line in preamble.splitlines() if line.startswith("# ")), f"# {title}")
+        result = "\n\n".join((heading, *(by_heading[item] for item in order))).rstrip() + "\n"
+        self.write(key, result)
+        return True, "replaced"
 
     def clear_questions(self):
         path = self._file("questions")
@@ -936,8 +987,7 @@ class Workspace:
             + cls.engineering_invariants_markdown()
         )
 
-    def selected_capability_contracts(self) -> list[dict]:
-        """Select behavioral contracts from explicit modes and project evidence."""
+    def _select_capability_contracts(self, evidence: str) -> list[dict]:
         try:
             catalog = json.loads(self.read("capabilities"))
         except json.JSONDecodeError:
@@ -945,7 +995,7 @@ class Workspace:
         modes = {str(item.get("id")): str(item.get("mode", "auto")) for item in catalog.get("capabilities", [])}
         # Selection is anchored to the user-owned brief. Generated artifacts
         # must not recursively activate more contracts by mentioning them.
-        evidence = self.brief().lower()
+        evidence = (evidence or "").lower()
         contracts = self.capability_contract_catalog().get("contracts", [])
 
         def signal_is_present(signal: str) -> bool:
@@ -968,6 +1018,47 @@ class Workspace:
             if mode == "include" or any(signal_is_present(signal) for signal in signals):
                 selected.append(contract)
         return selected
+
+    def selected_capability_contracts(self) -> list[dict]:
+        """Return the frozen run/baseline contract set, or select from the saved brief."""
+        evidence_path = (
+            self._artifact_stage_dir.parent / "planning_evidence.json"
+            if self._artifact_stage_dir is not None
+            else self.root / "planning_evidence.json"
+        )
+        catalog = self.capability_contract_catalog()
+        contracts = {item["id"]: item for item in catalog.get("contracts", [])}
+        if evidence_path.exists():
+            try:
+                frozen = json.loads(evidence_path.read_text(encoding="utf-8"))
+                return [contracts[item_id] for item_id in frozen.get("capability_contract_ids", []) if item_id in contracts]
+            except json.JSONDecodeError:
+                pass
+        return self._select_capability_contracts(self.brief())
+
+    def staged_artifact_summary(self, run_id: str = "") -> dict:
+        """Expose preserved working artifacts explicitly without making them canonical."""
+        candidates = []
+        root = self.root / "run_artifacts"
+        if run_id:
+            candidates = [root / run_id]
+        elif root.exists():
+            candidates = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+        for candidate in candidates:
+            manifest = candidate / "manifest.json"
+            working = candidate / "working"
+            if not manifest.exists() or not working.exists():
+                continue
+            try:
+                metadata = json.loads(manifest.read_text())
+            except json.JSONDecodeError:
+                metadata = {}
+            files = {}
+            for key, filename in (("design", "DESIGN.md"), ("plan", "PLAN.md"), ("decisions", "DECISIONS.md")):
+                path = working / filename
+                files[key] = path.read_text(errors="replace") if path.exists() else "(empty)"
+            return {"run_id": candidate.name, "status": metadata.get("status", "working"), "files": files}
+        return {}
 
     def capability_contracts_context(self) -> str:
         selected = self.selected_capability_contracts()

@@ -315,6 +315,7 @@ class Orchestrator:
         self._selected_peer_names: list[str] = []
         self._refinement_attempts = 0
         self._deterministic_feedback = ""
+        self._checkpoint_validation_errors: list[str] = []
         self._pending_user_input = ""
         self.idea = ""
         self.task = ""
@@ -1067,13 +1068,17 @@ class Orchestrator:
                 self._discovery_question_keys.add(question_key)
                 self._discovery_questions_asked += 1
             payload = self._pending_discovery_checkpoint or self._checkpoint_payload_from_text(question)
-            self._enqueue_checkpoint_payloads([payload])
-            self.post_approval_phase = (
-                OrchestratorPhase.DISCOVERY
-                if self._discovery_questions_asked < self.max_discovery_questions
-                else OrchestratorPhase.DRAFTING
-            )
-            self.phase = OrchestratorPhase.APPROVAL
+            self._checkpoint_validation_errors = self._checkpoint_quality_errors(payload)
+            if not self._checkpoint_validation_errors and self._enqueue_checkpoint_payloads([payload]):
+                self.post_approval_phase = (
+                    OrchestratorPhase.DISCOVERY
+                    if self._discovery_questions_asked < self.max_discovery_questions
+                    else OrchestratorPhase.DRAFTING
+                )
+                self.phase = OrchestratorPhase.APPROVAL
+            else:
+                self._deterministic_feedback = "\n".join(self._checkpoint_validation_errors)
+                self.phase = OrchestratorPhase.DISCOVERY
         else:
             self.phase = OrchestratorPhase.DRAFTING
         self.save_state()
@@ -1162,6 +1167,30 @@ class Orchestrator:
         ]
         return self._enqueue_checkpoint_payloads(payloads)
 
+    @staticmethod
+    def _checkpoint_quality_errors(payload: dict) -> list[str]:
+        errors = []
+        question = str(payload.get("question", "")).strip()
+        rationale = str(payload.get("rationale", "")).strip()
+        options = payload.get("options", [])
+        combined = " ".join((
+            question, rationale,
+            *(str(item.get("summary", "")) + " " + str(item.get("consequence", "")) for item in options),
+        ))
+        if not question.endswith("?"):
+            errors.append("Decision checkpoint must contain one explicit question ending in '?'.")
+        if len(options) not in {2, 3}:
+            errors.append("Decision checkpoint must offer exactly 2 or 3 distinct options.")
+        if len(rationale) < 30:
+            errors.append("Decision checkpoint must explain the concrete product or architecture consequence.")
+        if re.search(r"\bemail\b.{0,50}\bmore secure than\b.{0,30}\bphone", combined, re.I) or re.search(
+            r"\bphone\b.{0,50}\bmore secure than\b.{0,30}\bemail", combined, re.I
+        ):
+            errors.append(
+                "Decision checkpoint makes an unsupported channel-level security ranking; compare explicit threats, recovery, privacy, abuse, cost, and discoverability instead."
+            )
+        return errors
+
     async def _run_drafting_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "drafting", "status": "running", "step": step}))
         new_steering = "\n".join(filter(None, (self._pending_user_input, await self._drain_steer())))
@@ -1175,7 +1204,7 @@ class Orchestrator:
         )
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
-        self._apply_coordinator_agent_response(coordinator.name, response)
+        self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=True)
         self.phase = OrchestratorPhase.PEER_REVIEW
         self.save_state()
 
@@ -1228,7 +1257,7 @@ class Orchestrator:
         )
         full_ctx = self._agent_context(coordinator)
         response = await self._send_agent_basic(coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True)
-        self._apply_coordinator_agent_response(coordinator.name, response)
+        self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=True)
         self.ws.resolve_context_events({"peer_critique", "user_steering", "user_decision", "quality_failure"})
         self._refinement_attempts += 1
 
@@ -1236,11 +1265,19 @@ class Orchestrator:
         if self._is_none_text(decision):
             decision = ""
 
-        if decision and self._enqueue_checkpoint_text(decision):
+        decision_payloads = [
+            self._checkpoint_payload_from_text(item)
+            for item in self.ws.split_checkpoint_questions(decision)
+        ] if decision else []
+        self._checkpoint_validation_errors = [
+            error for payload in decision_payloads for error in self._checkpoint_quality_errors(payload)
+        ]
+        if decision and not self._checkpoint_validation_errors and self._enqueue_checkpoint_payloads(decision_payloads):
             self.post_approval_phase = OrchestratorPhase.COMPLETE
             self.phase = OrchestratorPhase.APPROVAL
         else:
             errors = self._coordinator_completion_errors("PASS")
+            errors = [*self._checkpoint_validation_errors, *errors]
             if errors and self._refinement_attempts < 3:
                 self._deterministic_feedback = "\n".join(f"- {error}" for error in errors)
                 self.ws.add_context_event(
@@ -1948,7 +1985,9 @@ class Orchestrator:
         if t.startswith("none ") or t.startswith("none-") or t.startswith("*none"): return True
         return False
 
-    def _apply_coordinator_agent_response(self, agent_name: str, response: str) -> set[str]:
+    def _apply_coordinator_agent_response(
+        self, agent_name: str, response: str, replace_complete: bool = False,
+    ) -> set[str]:
         written_files: set[str] = set()
         for filename, content in self.ws.parse_files(response).items():
             self.ws.write_src(filename, content)
@@ -1958,7 +1997,8 @@ class Orchestrator:
 
         plan_update = self.ws.parse_section(response, "PLAN_UPDATE")
         if plan_update:
-            written, reason = self.ws.merge_artifact_update("plan", plan_update, "Plan")
+            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+            written, reason = writer("plan", plan_update, "Plan")
             if written:
                 written_files.add("PLAN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
@@ -1967,7 +2007,8 @@ class Orchestrator:
 
         decisions_update = self.ws.parse_section(response, "DECISIONS_UPDATE")
         if decisions_update:
-            written, reason = self.ws.merge_artifact_update("decisions", decisions_update, "Key Decisions")
+            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+            written, reason = writer("decisions", decisions_update, "Key Decisions")
             if written:
                 written_files.add("DECISIONS.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
@@ -1976,7 +2017,8 @@ class Orchestrator:
 
         design_update = self.ws.parse_section(response, "DESIGN_UPDATE")
         if design_update:
-            written, reason = self.ws.merge_artifact_update("design", design_update, "Architecture Design")
+            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+            written, reason = writer("design", design_update, "Architecture Design")
             if written:
                 written_files.add("DESIGN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))

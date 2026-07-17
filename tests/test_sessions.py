@@ -118,6 +118,20 @@ class AuditLogTests(unittest.TestCase):
 
 
 class StructuredCheckpointTests(unittest.TestCase):
+    def test_checkpoint_quality_rejects_unsupported_authentication_security_ranking(self):
+        payload = Orchestrator._checkpoint_payload_from_text("""Should sign-in use phone numbers, email addresses, or both?
+
+Why this matters: Email authentication may be more secure than phone authentication and affects recovery.
+
+- [A] Phone numbers — Familiar contact discovery with SIM-swap and delivery risks.
+- [B] Email addresses — Device-independent verification with mailbox takeover risks.
+- [C] Both — More recovery flexibility with additional linking complexity.
+
+Recommendation: C
+""")
+        errors = Orchestrator._checkpoint_quality_errors(payload)
+        self.assertTrue(any("unsupported channel-level security ranking" in error for error in errors), errors)
+
     def test_run_contract_and_verified_outcome_are_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ProjectStore(Path(directory))
@@ -566,6 +580,20 @@ class CrossCuttingDesignTests(unittest.TestCase):
 
 
 class ProductCapabilityCatalogTests(unittest.TestCase):
+    def test_ui_run_goal_freezes_chat_product_contracts_without_designflow_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            canonical = Workspace(directory)
+            canonical.ensure()
+            staged = canonical.staged_for_run("chat-run")
+            evidence = staged.freeze_planning_evidence("Design a WhatsApp-like product")
+            selected = set(evidence["capability_contract_ids"])
+            self.assertFalse(canonical.brief())
+            self.assertTrue({
+                "identity.authentication", "identity.authorization", "ux.notifications",
+                "data.persistence", "api.contract", "ops.jobs", "reliability.failure", "client.offline",
+            }.issubset(selected))
+            self.assertEqual(selected, {item["id"] for item in staged.selected_capability_contracts()})
+
     def test_server_owned_engineering_invariants_cannot_be_omitted_or_redefined(self):
         generated = """# Agent Guidelines for this Project
 
@@ -720,6 +748,23 @@ class ProductCapabilityCatalogTests(unittest.TestCase):
 
 
 class ArtifactMergeSafetyTests(unittest.TestCase):
+    def test_complete_refinement_replaces_prior_structure_without_duplication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write("design", "# Design\n\n## Product Baseline\nOld.\n\n## Architecture\nOld architecture.\n")
+            written, mode = workspace.replace_complete_artifact(
+                "design",
+                "# Design Document\n\n## Product Goal\nNew.\n\n## Architecture\nNew architecture.\n",
+                "Architecture Design",
+            )
+            self.assertTrue(written)
+            self.assertEqual(mode, "replaced")
+            result = workspace.read("design")
+            self.assertNotIn("Product Baseline", result)
+            self.assertEqual(result.count("## Architecture"), 1)
+            self.assertIn("New architecture", result)
+
     def test_staged_artifacts_leave_canonical_visible_until_promotion(self):
         with tempfile.TemporaryDirectory() as directory:
             canonical = Workspace(directory)
@@ -910,6 +955,26 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
 
 
 class SessionTests(unittest.TestCase):
+    def test_staged_artifact_api_exposes_preserved_draft_without_changing_canonical(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(client.post("/project/open", json={"path": directory}).status_code, 200)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            state.workspace.write("design", "Canonical design")
+            staged = state.workspace.staged_for_run("preserved-run")
+            staged.write("design", "Substantial unfinished draft")
+            staged.preserve_staged_artifacts("stopped")
+            response = client.get("/workspace/staged/preserved-run")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "stopped")
+            self.assertIn("unfinished draft", response.json()["files"]["design"])
+            self.assertEqual(state.workspace.read("design"), "Canonical design")
+        client.post("/auth/logout")
+
     def test_export_api_always_writes_server_owned_engineering_invariants(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -3138,8 +3203,8 @@ class DeterministicRoutingTests(unittest.TestCase):
 
     def test_prompt_catalog_validates_versions_placeholders_and_protocol_markers(self):
         from backend.prompt_catalog import prompt_catalog
-        self.assertEqual(prompt_catalog.version("coordinator_system"), "2.0.0")
-        self.assertEqual(prompt_catalog.versions()["coordinator_system"], "2.0.0")
+        self.assertEqual(prompt_catalog.version("coordinator_system"), "2.1.0")
+        self.assertEqual(prompt_catalog.versions()["coordinator_system"], "2.1.0")
         self.assertEqual(prompt_catalog.version("agents_export"), "2.0.0")
         rendered = prompt_catalog.render(
             "intent_router_task", request="refine it",

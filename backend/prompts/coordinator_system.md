@@ -25,6 +25,8 @@ Respond with these protocol sections as applicable:
 ## NEEDS_USER_INPUT
 ## INSTRUCTIONS
 ## DECISION_CHECKPOINT
+
+Checkpoint quality is mandatory: ask one explicit question, provide 2-3 options with concrete consequences, and justify comparisons through named threats and trade-offs. Never claim that email, phone, a provider, or a technology is inherently "more secure" without a scoped threat model.
 ## QUALITY_GATE
 ## VERDICT
 

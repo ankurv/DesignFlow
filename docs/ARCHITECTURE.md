@@ -90,6 +90,12 @@ A plan may justify an exclusion, but it cannot silently omit a selected lifecycl
 The persisted run state records selected contract IDs and prompt versions so a planning run is
 diagnosable after prompts or the contract catalog evolve.
 
+When a goal is entered through the UI without a repository `DESIGNFLOW.md`, the staged run freezes
+that goal and the resulting capability-contract IDs in `planning_evidence.json`. This snapshot is
+the authoritative evidence for the run and is copied to canonical project metadata only after a
+successful artifact promotion. Stopped and interrupted working artifacts remain available through
+the staged-artifact API and UI preview, but are visibly labeled non-canonical.
+
 ```mermaid
 flowchart TD
     %% Entry Point

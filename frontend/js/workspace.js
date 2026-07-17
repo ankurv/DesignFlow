@@ -429,6 +429,22 @@ async function loadWsFile(key) {
   }
 }
 
+async function previewStagedDraft(runId) {
+  try {
+    const response = await fetch(`/workspace/staged/${encodeURIComponent(runId)}`);
+    const staged = await response.json();
+    if (!response.ok) throw new Error(staged.detail || 'Staged draft is unavailable');
+    document.getElementById('designCockpitView').style.display = 'none';
+    document.getElementById('dashboardView').style.display = 'none';
+    document.getElementById('fileViewContainer').style.display = 'flex';
+    const files = staged.files || {};
+    const content = `> Preserved ${staged.status} draft from run ${staged.run_id}. This is not the canonical baseline.\n\n# DESIGN.md\n\n${files.design || '(empty)'}\n\n# PLAN.md\n\n${files.plan || '(empty)'}\n\n# DECISIONS.md\n\n${files.decisions || '(empty)'}`;
+    renderFileContent('staged-draft', content);
+  } catch (error) {
+    notify(error.message || 'Could not load the staged draft', true);
+  }
+}
+
 async function refreshWorkspace() {
   const ws = await fetch('/workspace').then(r=>r.json());
   refreshDebugInsights();

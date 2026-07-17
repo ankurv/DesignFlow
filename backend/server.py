@@ -948,6 +948,10 @@ async def start_run(
     state.last_transition = "run_started"
     state.awaiting_input = False
     if state.store:
+        # A project may have been opened from another browser runtime before
+        # process/session reconciliation. There can be only one active logical
+        # run in its database; preserve abandoned rows as interrupted first.
+        state.store.reconcile_interrupted_runs()
         if resumes_saved_run and saved_run_id:
             state.store.resume_run(state.run_id)
         else:
@@ -960,6 +964,7 @@ async def start_run(
         state.debug_observer.start_run(state.run_id, task or product_goal, effective_mode)
 
     run_workspace = state.workspace.staged_for_run(state.run_id)
+    run_workspace.freeze_planning_evidence(product_goal)
     state.orchestrator = Orchestrator(
         agents=agents,
         workspace=run_workspace,
@@ -1491,6 +1496,18 @@ def get_file(key: str, state: AppState = Depends(get_state)):
     if key == "questions":
         state.workspace.normalize_checkpoint_queue()
     return {"key": key, "content": state.workspace.read(key)}
+
+
+@app.get("/workspace/staged/{run_id}")
+def get_staged_workspace(run_id: str, state: AppState = Depends(get_state)):
+    if not state.workspace:
+        raise HTTPException(404, "No active workspace")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id):
+        raise HTTPException(400, "Invalid run id")
+    staged = state.workspace.staged_artifact_summary(run_id)
+    if not staged:
+        raise HTTPException(404, "No preserved staged artifacts for this run")
+    return staged
 
 
 class FileUpdateBody(BaseModel):
