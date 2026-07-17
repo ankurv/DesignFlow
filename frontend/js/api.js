@@ -574,6 +574,7 @@ async function restoreRecentActivity(limit = 8) {
     if (payload.resumable && !events.some(event => event.data?.restart_recovery)) {
       appendFeed({
         kind: 'error', agent: 'DesignFlow', historical: true,
+        run_id: payload.run_id,
         timestamp: new Date().toISOString(),
         data: {
           error: 'The previous run was interrupted before it could finish.',
@@ -793,9 +794,11 @@ function appendFeed(ev) {
       }
       if (ev.data.recoverable && !ev.data.restart_recovery) summary += ' You can retry after resolving the provider issue.';
       if (ev.historical && ev.data.restart_recovery) {
+        const activeRunId = ev.run_id || document.getElementById('runId')?.textContent?.trim();
         recoveryActionsHtml = `
           <div class="provider-recovery-actions interrupted-run-actions">
             <button class="btn btn-primary btn-sm" type="button" onclick="resumeInterruptedRun(this)">Retry saved turn</button>
+            ${activeRunId ? `<button class="btn btn-secondary btn-sm" type="button" onclick="previewStagedDraft('${escAttr(String(activeRunId))}')">Preview staged draft</button>` : ''}
             <span class="provider-recovery-status" aria-live="polite">Restores the exact saved workflow position using the currently available provider pool.</span>
           </div>`;
       } else if (!ev.historical && ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(ev.data.error_code)) {
