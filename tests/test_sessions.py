@@ -3212,8 +3212,9 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertIn("historical: true", api_js)
         self.assertIn("restoreRecentActivity()", state_js)
         self.assertIn('@app.get("/run/recent-activity")', server)
-        self.assertIn("Continue with available provider", api_js)
+        self.assertIn("Retry saved turn", api_js)
         self.assertIn("resumeInterruptedRun(this)", api_js)
+        self.assertIn("ev.data.error || ev.data.message", api_js)
 
     def test_paused_agents_do_not_present_stale_quota_capacity(self):
         source = (Path(__file__).parents[1] / "frontend" / "js" / "agents.js").read_text()

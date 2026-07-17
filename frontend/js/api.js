@@ -784,7 +784,9 @@ function appendFeed(ev) {
       updateStatus('done');
       break;
     case 'error':
-      summary = ev.data.error_code ? String(ev.data.error || 'Agent request failed.') : friendlyProviderError(ev.data.error || ev.data.message);
+      summary = ev.data.error_code
+        ? String(ev.data.error || ev.data.message || 'Agent request failed.')
+        : friendlyProviderError(ev.data.error || ev.data.message);
       if (ev.historical && ev.data.provider_paused) {
         summary = `Previous quota failure from ${ev.data.provider_agent || 'a model'}. That provider is now paused and will not be used.`;
       }
@@ -792,8 +794,8 @@ function appendFeed(ev) {
       if (ev.historical && ev.data.restart_recovery) {
         recoveryActionsHtml = `
           <div class="provider-recovery-actions interrupted-run-actions">
-            <button class="btn btn-primary btn-sm" type="button" onclick="resumeInterruptedRun(this)">Continue with available provider</button>
-            <span class="provider-recovery-status" aria-live="polite">The saved workflow position will be restored.</span>
+            <button class="btn btn-primary btn-sm" type="button" onclick="resumeInterruptedRun(this)">Retry saved turn</button>
+            <span class="provider-recovery-status" aria-live="polite">Restores the exact saved workflow position using the currently available provider pool.</span>
           </div>`;
       } else if (!ev.historical && ['quota_exhausted', 'rate_limited', 'provider_timeout'].includes(ev.data.error_code)) {
         recoveryActionsHtml = `
@@ -859,15 +861,15 @@ async function resumeInterruptedRun(sourceButton) {
   const pane = sourceButton?.closest('.provider-recovery-actions');
   if (sourceButton) sourceButton.disabled = true;
   const status = pane?.querySelector('.provider-recovery-status');
-  if (status) status.textContent = 'Restoring the interrupted run…';
+  if (status) status.textContent = 'Restoring and retrying the saved turn…';
   const resumed = await startRun('continue', {hiddenPrompt: true});
   if (!resumed) {
     if (sourceButton) sourceButton.disabled = false;
-    if (status) status.textContent = 'Could not resume. Check the available agents and try again.';
+    if (status) status.textContent = 'Could not retry. Check the available agents and try again.';
     return;
   }
   if (pane) pane.classList.add('resolved');
-  if (status) status.textContent = 'Run resumed with the available agent pool.';
+  if (status) status.textContent = 'Saved turn restored and retry started.';
 }
 
 setInterval(() => {
