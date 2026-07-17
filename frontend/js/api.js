@@ -548,6 +548,7 @@ function connectSSE(resetHistory = false) {
   const eventsUrl = tabSession ? `/events?session_id=${encodeURIComponent(tabSession)}` : '/events';
   const es = new EventSource(eventsUrl);
   activeEventSource = es;
+  es.onopen = () => fetchAgentStatus();
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
     const eventId = String(ev.event_id || e.lastEventId || '');
