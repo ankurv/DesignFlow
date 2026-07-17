@@ -920,9 +920,10 @@ async def start_run(
     if state.debug_observer:
         state.debug_observer.start_run(state.run_id, task or product_goal, effective_mode)
 
+    run_workspace = state.workspace.staged_for_run(state.run_id)
     state.orchestrator = Orchestrator(
         agents=agents,
-        workspace=state.workspace,
+        workspace=run_workspace,
         event_cb=lambda e: broadcast(e, state),
         max_debate_rounds=body.max_debate_rounds,
         max_tokens=body.max_tokens,
@@ -939,6 +940,7 @@ async def start_run(
         try:
             snapshot = await state.orchestrator.run(product_goal, task=task)
             if state.status != "idle":
+                state.orchestrator.ws.promote_staged_artifacts()
                 state.status = "done"
                 state.awaiting_input = False
                 if state.store and state.run_id:
@@ -958,8 +960,11 @@ async def start_run(
                         pass
                 broadcast(Event(kind=EventKind.DONE, data={"workspace": snapshot or {}}), state)
         except asyncio.CancelledError:
-            pass
+            if state.orchestrator and hasattr(state.orchestrator, "ws"):
+                state.orchestrator.ws.preserve_staged_artifacts("stopped")
         except Exception as exc:
+            if state.orchestrator and hasattr(state.orchestrator, "ws"):
+                state.orchestrator.ws.preserve_staged_artifacts("error")
             state.status = "error"
             state.awaiting_input = False
             logger.exception("Orchestrator run failed")
@@ -1064,6 +1069,8 @@ async def stop_run(state: AppState = Depends(get_state)):
 
     if state.orchestrator:
         state.orchestrator.stop()
+        if hasattr(state.orchestrator, "ws"):
+            state.orchestrator.ws.preserve_staged_artifacts("stopped")
         state.orchestrator.resume()
         for agent in state.orchestrator.agents:
             if agent.status == AgentStatus.WAITING:
@@ -1159,7 +1166,8 @@ async def answer_checkpoint(
         raise HTTPException(409, str(exc)) from exc
     answer = answered["answer"]
     if state.workspace:
-        state.workspace.record_user_decision(answered["question"], answer)
+        decision_workspace = state.orchestrator.ws if state.orchestrator else state.workspace
+        decision_workspace.record_user_decision(answered["question"], answer)
         if next_checkpoint:
             state.workspace.write("questions", "# Decision Checkpoint\n\n" + checkpoint_projection(next_checkpoint))
         else:

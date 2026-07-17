@@ -1197,14 +1197,24 @@ class Orchestrator:
                 )
                 self.phase = OrchestratorPhase.REFINEMENT
             elif errors and self.require_approval and any("user decision" in error for error in errors):
-                checkpoint = (
-                    "Decision: Is this planning baseline ready to hand to a coding agent?\n\n"
-                    "- [A] Approve the baseline and continue with implementation discovery\n"
-                    "- [B] Request another focused refinement pass\n\n"
-                    "Recommendation: A — proceed while treating Known Unknowns and Discovery Checkpoints as required follow-up work."
-                )
+                unresolved = self.ws.unresolved_confirmation_question()
+                if unresolved:
+                    checkpoint = (
+                        f"Decision: The agents require your confirmation on the following choice:\n\n"
+                        f"{unresolved}\n\n"
+                        "Recommendation: Provide your answer below so the agents can record it in the ledger and proceed."
+                    )
+                else:
+                    checkpoint = (
+                        "Decision: What unresolved product decision must be settled before this baseline can complete?\n\n"
+                        "- [A] I’ll provide the missing decision as a custom answer\n"
+                        "- [B] Return to refinement and identify the exact unresolved decision\n\n"
+                        "Recommendation: B — do not approve a baseline until the actual decision is visible."
+                    )
                 if self._enqueue_checkpoint_text(checkpoint):
-                    self.post_approval_phase = OrchestratorPhase.COMPLETE
+                    # The answer must be synthesized back into all staged
+                    # artifacts before they can be promoted.
+                    self.post_approval_phase = OrchestratorPhase.REFINEMENT
                     self.phase = OrchestratorPhase.APPROVAL
                 else:
                     self.phase = OrchestratorPhase.COMPLETE

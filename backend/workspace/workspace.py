@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -70,6 +72,7 @@ class Workspace:
         self.legacy_brief_path = self.project_root / "AGENTFLOW.md"
         self._checksums: dict[str, dict[str, str]] = {}
         self._active_logbook_run_id = ""
+        self._artifact_stage_dir: Path | None = None
 
     @property
     def path(self) -> str:
@@ -156,7 +159,95 @@ class Workspace:
             "capabilities": "product_capabilities.json",
             "personas": "agent_personas.json",
         }
+        if self._artifact_stage_dir is not None and key in self.FILES:
+            return self._artifact_stage_dir / names[key]
         return self.root / names[key]
+
+    def staged_for_run(self, run_id: str) -> "Workspace":
+        """Return a run-local artifact view while canonical UI files stay stable."""
+        if not run_id.strip():
+            raise ValueError("A run id is required for staged artifacts")
+        stage = Workspace(str(self.project_root))
+        stage.root = self.root
+        stage._artifact_stage_dir = self.root / "run_artifacts" / run_id / "working"
+        stage._artifact_stage_dir.mkdir(parents=True, exist_ok=True)
+        stage._active_logbook_run_id = self._active_logbook_run_id
+        for key in self.FILES:
+            source = self._file(key)
+            target = stage._file(key)
+            if not target.exists() and source.exists():
+                shutil.copy2(source, target)
+        manifest = stage._artifact_stage_dir.parent / "manifest.json"
+        if not manifest.exists():
+            manifest.write_text(json.dumps({
+                "run_id": run_id,
+                "status": "working",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }, indent=2))
+        return stage
+
+    def promote_staged_artifacts(self) -> bool:
+        """Archive and transactionally promote the complete staged artifact set."""
+        if self._artifact_stage_dir is None:
+            return False
+        staged = {key: self._file(key) for key in self.FILES}
+        if not all(path.exists() for path in staged.values()):
+            raise ValueError("Cannot promote an incomplete staged artifact set")
+        canonical = Workspace(str(self.project_root))
+        canonical.root = self.root
+        if all(
+            staged[key].read_bytes() == canonical._file(key).read_bytes()
+            for key in self.FILES if canonical._file(key).exists()
+        ) and all(canonical._file(key).exists() for key in self.FILES):
+            self._mark_stage("promoted", changed=False)
+            return False
+
+        revision = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backups: dict[str, bytes | None] = {}
+        prepared: dict[str, Path] = {}
+        try:
+            for key in self.FILES:
+                destination = canonical._file(key)
+                backups[key] = destination.read_bytes() if destination.exists() else None
+                if destination.exists():
+                    archive = self.root / "artifact_history" / key
+                    archive.mkdir(parents=True, exist_ok=True)
+                    (archive / f"{revision}-{self._md5(destination.read_text(errors='replace'))[:10]}.md").write_bytes(
+                        backups[key] or b""
+                    )
+                temporary = destination.with_name(f".{destination.name}.{revision}.tmp")
+                temporary.write_bytes(staged[key].read_bytes())
+                prepared[key] = temporary
+            for key in self.FILES:
+                os.replace(prepared[key], canonical._file(key))
+        except Exception:
+            for temporary in prepared.values():
+                temporary.unlink(missing_ok=True)
+            for key, content in backups.items():
+                destination = canonical._file(key)
+                if content is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    destination.write_bytes(content)
+            raise
+        self._mark_stage("promoted", changed=True)
+        canonical.refresh_context()
+        return True
+
+    def _mark_stage(self, status: str, **extra) -> None:
+        if self._artifact_stage_dir is None:
+            return
+        manifest = self._artifact_stage_dir.parent / "manifest.json"
+        payload = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat(), **extra}
+        if manifest.exists():
+            try:
+                payload = {**json.loads(manifest.read_text()), **payload}
+            except json.JSONDecodeError:
+                pass
+        manifest.write_text(json.dumps(payload, indent=2))
+
+    def preserve_staged_artifacts(self, status: str) -> None:
+        self._mark_stage(status)
 
     def read(self, key: str) -> str:
         path = self._file(key)
@@ -935,13 +1026,14 @@ class Workspace:
         if decisions == "(empty)" or len(decision_body) < 40:
             errors.append("DECISIONS.md must record substantive choices, trade-offs, and rationale.")
 
+        unresolved_question = self.unresolved_confirmation_question(decisions)
         unresolved_confirmation = re.search(
             r"^#{2,6}\s+.*(?:questions?|recommendations?).{0,30}(?:for\s+)?confirmation.*$"
             r"([\s\S]*?)(?=^#{1,6}\s|\Z)",
             decisions,
             re.MULTILINE | re.IGNORECASE,
         )
-        if unresolved_confirmation and re.search(
+        if unresolved_question and unresolved_confirmation and re.search(
             r"(?:^\s*[-*]\s+|\?|\b(?:confirm|choose|decide|approve)\b)",
             unresolved_confirmation.group(1),
             re.MULTILINE | re.IGNORECASE,
@@ -992,6 +1084,20 @@ class Workspace:
                 errors.append("QUESTIONS.md still contains unresolved user decisions.")
 
         return errors
+
+    def unresolved_confirmation_question(self, decisions: str | None = None) -> str:
+        """Return the first actual question and options still parked in a confirmation section."""
+        text = decisions if decisions is not None else self.read("decisions")
+        for match in re.finditer(
+            r"^#{2,6}\s+.*(?:questions?|recommendations?).{0,30}(?:for\s+)?confirmation.*$"
+            r"([\s\S]*?)(?=^#{1,6}\s|\Z)",
+            text or "",
+            re.MULTILINE | re.IGNORECASE,
+        ):
+            body = match.group(1).strip()
+            if "?" in body:
+                return body
+        return ""
 
     @staticmethod
     def parse_section(text: str, header: str) -> str:

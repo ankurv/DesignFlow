@@ -534,6 +534,42 @@ class ProductCapabilityCatalogTests(unittest.TestCase):
 
 
 class ArtifactMergeSafetyTests(unittest.TestCase):
+    def test_staged_artifacts_leave_canonical_visible_until_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            canonical = Workspace(directory)
+            canonical.ensure()
+            canonical.write("design", "# Design\n\n## Architecture\nStable design.\n")
+            canonical.write("plan", "# Plan\n\n## Tasks\nStable plan.\n")
+            canonical.write("decisions", "# Decisions\n\n## Accepted\nStable decision.\n")
+
+            staged = canonical.staged_for_run("run-stage")
+            staged.write("design", "# Design\n\n## Architecture\nCandidate design.\n")
+            self.assertIn("Stable design", canonical.read("design"))
+            self.assertIn("Candidate design", staged.read("design"))
+
+            self.assertTrue(staged.promote_staged_artifacts())
+            self.assertIn("Candidate design", canonical.read("design"))
+            revisions = list((canonical.root / "artifact_history" / "design").glob("*.md"))
+            self.assertEqual(len(revisions), 1)
+            self.assertIn("Stable design", revisions[0].read_text())
+            manifest = json.loads((canonical.root / "run_artifacts" / "run-stage" / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "promoted")
+
+    def test_stopped_stage_is_preserved_without_changing_canonical(self):
+        with tempfile.TemporaryDirectory() as directory:
+            canonical = Workspace(directory)
+            canonical.ensure()
+            canonical.write("design", "Stable")
+            canonical.write("plan", "Stable")
+            canonical.write("decisions", "Stable")
+            staged = canonical.staged_for_run("run-stopped")
+            staged.write("design", "Unfinished candidate")
+            staged.preserve_staged_artifacts("stopped")
+            self.assertEqual(canonical.read("design"), "Stable")
+            self.assertEqual(staged.read("design"), "Unfinished candidate")
+            manifest = json.loads((canonical.root / "run_artifacts" / "run-stopped" / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "stopped")
+
     def test_section_update_preserves_unmentioned_existing_sections_and_archives_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -626,6 +662,10 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
             )
             errors = workspace.validate_planning_artifacts()
             self.assertTrue(any("user decision checkpoint" in error for error in errors), errors)
+            self.assertEqual(
+                workspace.unresolved_confirmation_question(),
+                "Should live trading be enabled?",
+            )
 
     def test_validation_preserves_explicit_observer_optionality(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1381,6 +1421,38 @@ Decision 2: Choose retention.
                 # Check that the next prompt received the steering response!
                 self.assertIn("Primary users are small friend groups", boss.received[-1][-1]["content"])
             asyncio.run(run_test())
+
+    def test_unresolved_confirmation_surfaces_actual_question_then_refines(self):
+        unresolved_decisions = (
+            VALID_DECISIONS
+            + "\n## Questions for Confirmation\n- Should signal labels avoid language that implies recommended trades?\n"
+        )
+        boss = StatefulFake(
+            AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
+            replies=[
+                f"## DESIGN_UPDATE\n{VALID_DESIGN}\n"
+                f"## PLAN_UPDATE\n{VALID_PLAN}\n"
+                f"## DECISIONS_UPDATE\n{unresolved_decisions}\n"
+            ],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write("design", VALID_DESIGN)
+            workspace.write("plan", VALID_PLAN)
+            workspace.write("decisions", unresolved_decisions)
+            orchestrator = Orchestrator([boss], workspace, require_approval=True)
+            orchestrator._coordinator_name = "boss"
+            orchestrator.phase = OrchestratorPhase.REFINEMENT
+            orchestrator._refinement_attempts = 2
+            orchestrator._running = True
+
+            asyncio.run(orchestrator._run_refinement_phase(boss, 1))
+
+            self.assertEqual(orchestrator.phase, OrchestratorPhase.APPROVAL)
+            self.assertEqual(orchestrator.post_approval_phase, OrchestratorPhase.REFINEMENT)
+            question = workspace.read("questions")
+            self.assertIn("Should signal labels avoid language", question)
+            self.assertNotIn("Is this planning baseline ready", question)
 
     def test_need_based_review_selects_small_relevant_panel(self):
         agents = [
