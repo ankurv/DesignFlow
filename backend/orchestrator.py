@@ -1088,13 +1088,18 @@ class Orchestrator:
         lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
         question_candidates = [
             line for line in lines
-            if re.search(r"\b(?:decision|question)(?:\s+\d+)?\b", re.sub(r"[*_`]", "", line), re.I)
-            and not line.startswith("-")
+            if line.endswith("?") and not line.startswith("-")
+            and not line.lower().startswith("recommendation:")
         ]
-        raw_question = question_candidates[-1] if question_candidates else next(
+        legacy_candidates = [
+            line for line in lines
+            if re.search(r"\b(?:decision|question)(?:\s+\d+)?\b", re.sub(r"[*_`]", "", line), re.I)
+            and "option" not in line.lower() and not line.lower().startswith("recommendation:")
+        ]
+        raw_question = question_candidates[0] if question_candidates else (legacy_candidates[-1] if legacy_candidates else next(
             (line for line in lines if not line.startswith("-") and not line.lower().startswith("recommendation:")),
             "Decision required",
-        )
+        ))
         question = re.sub(r"^\s*(?:\d+[.)]\s*)?[*_`]*", "", raw_question)
         question = re.sub(r"[*_`]+", "", question).strip().rstrip(":")
         rationale_line = next((line for line in lines if line.lower().startswith("why this matters:")), "")
@@ -1285,27 +1290,12 @@ class Orchestrator:
                 )
                 self.phase = OrchestratorPhase.REFINEMENT
             elif errors and self.require_approval and any("user decision" in error for error in errors):
-                unresolved = self.ws.unresolved_confirmation_question()
-                if unresolved:
-                    checkpoint = (
-                        f"Decision: The agents require your confirmation on the following choice:\n\n"
-                        f"{unresolved}\n\n"
-                        "Recommendation: Provide your answer below so the agents can record it in the ledger and proceed."
-                    )
-                else:
-                    checkpoint = (
-                        "Decision: What unresolved product decision must be settled before this baseline can complete?\n\n"
-                        "- [A] I’ll provide the missing decision as a custom answer\n"
-                        "- [B] Return to refinement and identify the exact unresolved decision\n\n"
-                        "Recommendation: B — do not approve a baseline until the actual decision is visible."
-                    )
-                if self._enqueue_checkpoint_text(checkpoint):
-                    # The answer must be synthesized back into all staged
-                    # artifacts before they can be promoted.
-                    self.post_approval_phase = OrchestratorPhase.REFINEMENT
-                    self.phase = OrchestratorPhase.APPROVAL
-                else:
-                    self.phase = OrchestratorPhase.COMPLETE
+                raise RuntimeError(
+                    "Planning requires a material user decision, but the coordinator did not provide "
+                    "one concrete validated checkpoint with 2-3 trade-off options. Internal workflow "
+                    "repair prompts must never be presented as product decisions. "
+                    + " | ".join(errors)
+                )
             elif not errors:
                 self.phase = OrchestratorPhase.COMPLETE
             else:

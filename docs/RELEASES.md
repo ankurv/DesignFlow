@@ -25,6 +25,7 @@ reject invalid or divergent versions before a release is built.
 - Added brief-driven capability behavioral contracts for common application lifecycles, deterministic design/traceability gates, explicit overrides, and run-level prompt/contract provenance.
 - Added server-owned engineering invariants to planning and every exported `AGENTS.md`, plus deterministic rejection of explicit credential, logging, and query-construction anti-patterns.
 - Froze UI-entered run goals and capability selections as planning evidence, reconciled abandoned active rows before new runs, exposed preserved staged drafts, normalized complete refinements instead of accumulating sections, and added checkpoint-quality gates.
+- Removed internal “identify the missing decision” approval prompts, fixed recommendation lines being parsed as questions, and quarantine persisted malformed checkpoints when a project opens.
 
 ## Current baseline
 

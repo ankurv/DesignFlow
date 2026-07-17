@@ -402,6 +402,36 @@ class ProjectStore:
             ).fetchall()]
         return [self.checkpoint(checkpoint_id) for checkpoint_id in ids]
 
+    def reject_malformed_checkpoints(self) -> list[str]:
+        """Quarantine legacy/meta checkpoints that cannot be valid user decisions."""
+        now = datetime.now(timezone.utc).isoformat()
+        rejected = []
+        with self._lock, self._db:
+            rows = self._db.execute(
+                """SELECT id, decision_id, question FROM decision_checkpoints
+                   WHERE status IN ('active', 'pending')"""
+            ).fetchall()
+            for row in rows:
+                question = str(row["question"] or "").strip()
+                malformed = (
+                    not question.endswith("?")
+                    or question.lower().startswith("recommendation:")
+                    or "what unresolved product decision must be settled" in question.lower()
+                )
+                if not malformed:
+                    continue
+                rejected.append(str(row["id"]))
+                self._db.execute(
+                    "UPDATE decision_checkpoints SET status='rejected', answered_at=? WHERE id=?",
+                    (now, row["id"]),
+                )
+                if row["decision_id"]:
+                    self._db.execute(
+                        "UPDATE decisions SET status='rejected', updated_at=? WHERE id=? AND status='proposed'",
+                        (now, row["decision_id"]),
+                    )
+        return rejected
+
     def answered_checkpoint_questions(self) -> list[str]:
         """Return durable answered questions for cross-run duplicate detection."""
         with self._lock:

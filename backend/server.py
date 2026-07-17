@@ -184,6 +184,14 @@ class AppState:
         self.workspace = workspace
         self.store = ProjectStore(workspace.root)
         self.store.reconcile_interrupted_runs()
+        rejected_checkpoints = self.store.reject_malformed_checkpoints()
+        if rejected_checkpoints:
+            saved_run_id = str((self.store.load_run_state() or {}).get("run_id", ""))
+            current = self.store.current_checkpoint(saved_run_id)
+            if current:
+                workspace.write("questions", "# Decision Checkpoint\n\n" + Orchestrator._checkpoint_projection(current))
+            else:
+                workspace.clear_questions()
         self.debug_observer = DebugObserver(workspace.root) if getattr(app.state, "debug_observer_enabled", False) else None
         self.configs = self.store.load_agents()
         self.event_log.clear()

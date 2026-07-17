@@ -955,6 +955,36 @@ class ArtifactMergeSafetyTests(unittest.TestCase):
 
 
 class SessionTests(unittest.TestCase):
+    def test_project_open_quarantines_persisted_internal_meta_checkpoint(self):
+        from fastapi.testclient import TestClient
+        import backend.server
+
+        client = TestClient(backend.server.app)
+        self.assertEqual(client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code, 200)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            store = ProjectStore(workspace.root)
+            store.start_run("bad-checkpoint", "Build it")
+            store.save_run_state({"run_id": "bad-checkpoint", "idea": "Build it"})
+            store.enqueue_checkpoint(
+                "bad-checkpoint", "discovery",
+                "Recommendation: B — do not approve until the actual decision is visible.",
+                "What unresolved product decision must be settled before completion?",
+                [{"label": "A", "summary": "Provide missing decision"},
+                 {"label": "B", "summary": "Return to refinement"}],
+            )
+            workspace.write("questions", "# Decision Checkpoint\n\nInternal workflow repair prompt")
+            store.close()
+
+            response = client.post("/project/open", json={"path": directory})
+            self.assertEqual(response.status_code, 200, response.text)
+            state = backend.server.app_states[str(Path(directory).resolve())]
+            rejected = state.store.run_checkpoints("bad-checkpoint")[0]
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertEqual(state.workspace.read("questions"), "(empty)")
+        client.post("/auth/logout")
+
     def test_staged_artifact_api_exposes_preserved_draft_without_changing_canonical(self):
         from fastapi.testclient import TestClient
         import backend.server
@@ -1886,7 +1916,7 @@ Decision 2: Choose retention.
                 self.assertIn("Primary users are small friend groups", boss.received[-1][-1]["content"])
             asyncio.run(run_test())
 
-    def test_unresolved_confirmation_surfaces_actual_question_then_refines(self):
+    def test_unresolved_confirmation_without_options_fails_instead_of_showing_meta_popup(self):
         unresolved_decisions = (
             VALID_DECISIONS
             + "\n## Questions for Confirmation\n- Should signal labels avoid language that implies recommended trades?\n"
@@ -1910,13 +1940,9 @@ Decision 2: Choose retention.
             orchestrator._refinement_attempts = 2
             orchestrator._running = True
 
-            asyncio.run(orchestrator._run_refinement_phase(boss, 1))
-
-            self.assertEqual(orchestrator.phase, OrchestratorPhase.APPROVAL)
-            self.assertEqual(orchestrator.post_approval_phase, OrchestratorPhase.REFINEMENT)
-            question = workspace.read("questions")
-            self.assertIn("Should signal labels avoid language", question)
-            self.assertNotIn("Is this planning baseline ready", question)
+            with self.assertRaisesRegex(RuntimeError, "concrete validated checkpoint"):
+                asyncio.run(orchestrator._run_refinement_phase(boss, 1))
+            self.assertNotIn("What unresolved product decision", workspace.read("questions"))
 
     def test_need_based_review_selects_small_relevant_panel(self):
         agents = [
