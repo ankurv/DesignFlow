@@ -994,6 +994,13 @@ class Orchestrator:
             elif self.phase == OrchestratorPhase.APPROVAL:
                 await self._run_approval_phase(step)
             elif self.phase == OrchestratorPhase.COMPLETE:
+                completion_errors = self._coordinator_completion_errors("PASS")
+                if completion_errors:
+                    raise RuntimeError(
+                        "Planning quality gate blocked completion: " + " | ".join(completion_errors)
+                    )
+                self.completion_kind = "planning_complete"
+                self.completion_files = ["DESIGN.md", "PLAN.md", "DECISIONS.md"]
                 self._emit(Event(EventKind.PHASE, data={"phase": "coordinator", "status": "complete", "step": step}))
                 if self.store:
                     self.store.clear_run_state()
@@ -1245,8 +1252,13 @@ class Orchestrator:
                     self.phase = OrchestratorPhase.APPROVAL
                 else:
                     self.phase = OrchestratorPhase.COMPLETE
-            else:
+            elif not errors:
                 self.phase = OrchestratorPhase.COMPLETE
+            else:
+                raise RuntimeError(
+                    "Planning quality gate remained unsatisfied after bounded refinement: "
+                    + " | ".join(errors)
+                )
         self.save_state()
 
     async def _run_approval_phase(self, step):

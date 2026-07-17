@@ -291,16 +291,21 @@ class ProjectStore:
         return self.checkpoint(row["id"]) if row else {}
 
     def latest_current_checkpoint(self) -> dict:
-        """Recover the latest unresolved checkpoint after a process restart."""
+        """Recover a checkpoint only from the latest resumable run."""
         with self._lock, self._db:
+            latest = self._db.execute(
+                "SELECT run_id, status FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            if not latest or latest["status"] not in {
+                "running", "paused", "needs_attention", "interrupted"
+            }:
+                return {}
             row = self._db.execute(
-                """SELECT c.id FROM decision_checkpoints c
-                   LEFT JOIN runs r ON r.run_id=c.run_id
-                   WHERE c.status IN ('active', 'pending')
-                   ORDER BY COALESCE(r.started_at, c.created_at) DESC,
-                            CASE c.status WHEN 'active' THEN 0 ELSE 1 END,
-                            c.sequence
-                   LIMIT 1"""
+                """SELECT id FROM decision_checkpoints
+                   WHERE run_id=? AND status IN ('active', 'pending')
+                   ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, sequence
+                   LIMIT 1""",
+                (latest["run_id"],),
             ).fetchone()
             if row:
                 checkpoint = self._db.execute(

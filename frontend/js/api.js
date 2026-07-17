@@ -868,7 +868,9 @@ function appendFeed(ev) {
   const wasNearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   feed.appendChild(div);
   if (wasNearBottom) feed.scrollTop = feed.scrollHeight;
-  if (window.mermaid) { try { mermaid.run({ querySelector: '.mermaid' }); } catch(e) {} }
+  // Live feed diagrams are visible here. Architecture-tab diagrams have their
+  // own visibility-aware renderer and must not be measured while hidden.
+  if (window.mermaid) { try { mermaid.run({ querySelector: '#feed .mermaid' }); } catch(e) {} }
 }
 
 async function resumeInterruptedRun(sourceButton) {
@@ -1536,11 +1538,12 @@ function extractLiveInsights(ev) {
       insightDiv.style.borderLeft = '3px solid var(--accent)';
       
       const agentLabel = document.createElement('div');
-      agentLabel.style.fontSize = '11px';
+      agentLabel.style.fontSize = '12px';
       agentLabel.style.fontWeight = 'bold';
       agentLabel.style.color = 'var(--muted)';
       agentLabel.style.marginBottom = '6px';
       agentLabel.style.textTransform = 'uppercase';
+      agentLabel.style.letterSpacing = '0.05em';
       agentLabel.textContent = ev.agent || 'Agent';
       
       const content = document.createElement('div');

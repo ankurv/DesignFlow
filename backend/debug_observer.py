@@ -97,6 +97,31 @@ class DebugObserver:
         ]
         files = [str(event.get("data", {}).get("file", "")) for event in events if event.get("kind") == "file_write"]
         insights = []
+        unresolved_errors: dict[str, dict] = {}
+        recovered_error_count = 0
+        for index, event in enumerate(events):
+            kind = event.get("kind", "")
+            data = event.get("data", {})
+            turn_id = str(data.get("turn_id", ""))
+            agent = str(event.get("agent", ""))
+            key = turn_id or f"{agent}:{data.get('error_code', '')}:{index}"
+            if kind == "error":
+                unresolved_errors[key] = event
+                continue
+            if kind == "turn_start" and data.get("resumed") and turn_id in unresolved_errors:
+                unresolved_errors.pop(turn_id, None)
+                recovered_error_count += 1
+                continue
+            if kind == "turn_end":
+                resolved_keys = [candidate for candidate, failed in unresolved_errors.items()
+                                 if (turn_id and candidate == turn_id)
+                                 or (not turn_id and failed.get("agent") == agent)]
+                for candidate in resolved_keys:
+                    unresolved_errors.pop(candidate, None)
+                    recovered_error_count += 1
+            if kind == "done" or (kind == "phase" and data.get("status") == "stopped"):
+                recovered_error_count += len(unresolved_errors)
+                unresolved_errors.clear()
 
         # Turn events also carry their current phase, so counting every event
         # double-counts a single review. A phase event represents one entry.
@@ -116,10 +141,20 @@ class DebugObserver:
                 "provider_retries", "medium", f"The run emitted {kinds['retry']} provider retries.",
                 "Surface the retry reason and next retry time near the active prompt.",
             ))
-        if kinds["error"]:
+        if unresolved_errors:
+            recoverable = sum(
+                1 for event in unresolved_errors.values() if event.get("data", {}).get("recoverable")
+            )
             insights.append(self._insight(
-                "run_errors", "high", f"The observed timeline contains {kinds['error']} errors.",
-                "Review the error events and ensure the UI presents a recovery action.",
+                "run_errors", "high",
+                f"The run has {len(unresolved_errors)} unresolved error(s); {recoverable} are recoverable.",
+                "Present a recovery action only for the unresolved failed turn.",
+            ))
+        elif kinds["error"] and recovered_error_count:
+            insights.append(self._insight(
+                "recovered_run_errors", "low",
+                f"The timeline contains {kinds['error']} historical error event(s), all subsequently resolved or terminated.",
+                "No recovery action is required unless a new unresolved error occurs.",
             ))
         if discovery_fallbacks:
             insights.append(self._insight(

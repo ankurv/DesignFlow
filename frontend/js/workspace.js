@@ -390,16 +390,9 @@ async function loadWsFile(key) {
               notify('Copied diagram source code!');
             });
 
-            if (window.mermaid) {
-              try {
-                mermaid.run({ nodes: [target] });
-                requestAnimationFrame(() => requestAnimationFrame(() => setupMermaidViewport(viewport, canvas, target, controls)));
-              } catch (mErr) {
-                console.error('Failed to render Mermaid graph', mErr);
-                target.innerHTML = `<div style="color:var(--red);font-size:12px;font-family:var(--font)">Diagram parse error: ${escHtml(mErr.message)}</div>`;
-              }
-            }
+            target._mermaidControls = controls;
           });
+          if (currentDashboardTab === 'architecture') renderArchitectureDiagrams();
         } else {
           // Empty State
           diagramsContainer.innerHTML = `
@@ -477,8 +470,13 @@ async function refreshDebugInsights() {
   if (!section || !container) return;
   try {
     const data = await fetch('/debug/insights').then(response => response.json());
-    section.style.display = data.enabled ? 'flex' : 'none';
-    if (!data.enabled) return;
+    section.dataset.enabled = data.enabled ? 'true' : 'false';
+    const debugTab = document.getElementById('dashboardTab-debug');
+    if (debugTab) debugTab.style.display = data.enabled ? '' : 'none';
+    if (!data.enabled) {
+      if (currentDashboardTab === 'debug') showDashboardTab('guide');
+      return;
+    }
     const insights = data.insights || [];
     container.innerHTML = insights.length ? insights.map(item => `
       <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg2)">
@@ -487,9 +485,58 @@ async function refreshDebugInsights() {
         <div style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-top:6px">${escHtml(item.suggestion || '')}</div>
       </div>`).join('') : `<div style="color:var(--muted);font-size:13px">${escHtml(data.message || 'No improvement suggestions yet.')}</div>`;
   } catch (err) {
-    section.style.display = 'none';
+    section.dataset.enabled = 'false';
+    const debugTab = document.getElementById('dashboardTab-debug');
+    if (debugTab) debugTab.style.display = 'none';
   }
 }
+
+let currentDashboardTab = 'guide';
+
+async function renderArchitectureDiagrams() {
+  const panel = document.getElementById('mermaidMapContainer');
+  if (!panel?.classList.contains('active') || !window.mermaid) return;
+  // Wait until the tab has a real width before Mermaid measures and renders.
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const targets = [...panel.querySelectorAll('.mermaid-figure')];
+  const pending = targets.filter(target => !target.querySelector('svg'));
+  pending.forEach(target => target.removeAttribute('data-processed'));
+  try {
+    if (pending.length) await mermaid.run({nodes: pending});
+    for (const target of targets) {
+      if (!target.querySelector('svg') || target.dataset.viewportReady === 'true') continue;
+      const wrapper = target.closest('.mermaid-diagram-card');
+      const viewport = wrapper?.querySelector('.mermaid-viewport');
+      const canvas = wrapper?.querySelector('.mermaid-canvas');
+      if (!viewport || !canvas) continue;
+      setupMermaidViewport(viewport, canvas, target, target._mermaidControls || {});
+      target.dataset.viewportReady = 'true';
+    }
+  } catch (error) {
+    console.error('Failed to render Mermaid graph', error);
+    pending.forEach(target => {
+      target.removeAttribute('data-processed');
+      target.innerHTML = `<div class="mermaid-render-error">Diagram parse error: ${escHtml(error.message)}</div>`;
+    });
+  }
+}
+
+window.showDashboardTab = function(name) {
+  const requested = String(name || 'guide');
+  const button = document.getElementById(`dashboardTab-${requested}`);
+  if (!button || button.style.display === 'none') return;
+  currentDashboardTab = requested;
+  document.querySelectorAll('.dashboard-tab').forEach(tab => {
+    const selected = tab === button;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
+  document.querySelectorAll('.dashboard-tab-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.dataset.dashboardTab === requested);
+  });
+  document.getElementById('dashboardView')?.scrollTo({top: 0, behavior: 'auto'});
+  if (requested === 'architecture') renderArchitectureDiagrams();
+};
 
 async function loadRunHistory() {
   const data = await fetch('/runs').then(r=>r.json());

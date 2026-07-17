@@ -370,6 +370,20 @@ Decision 2: How long should events be retained?
             self.assertEqual(restored["question"], "First current question")
             reopened.close()
 
+    def test_completed_latest_run_does_not_resurface_older_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store.start_run("old", "old")
+            store.enqueue_checkpoint(
+                "old", "approval", "Stale question", "",
+                [{"label": "A", "summary": "Old answer"}],
+            )
+            store.finish_run("old", "interrupted", [])
+            store.start_run("latest", "latest")
+            store.finish_run("latest", "done", [])
+            self.assertEqual(store.latest_current_checkpoint(), {})
+            store.close()
+
 
 class UsageSerializationTests(unittest.TestCase):
     def test_usage_round_trip_ignores_derived_total_tokens(self):
@@ -1176,6 +1190,15 @@ class SessionTests(unittest.TestCase):
             event.kind.value == "turn_start" and event.data.get("resumed")
             for event in events
         ))
+
+    def test_complete_phase_cannot_bypass_planning_artifact_validation(self):
+        workspace = Workspace(tempfile.mkdtemp())
+        workspace.init("Design an incomplete system")
+        orchestrator = Orchestrator([], workspace, require_approval=False)
+        orchestrator._running = True
+        orchestrator.phase = OrchestratorPhase.COMPLETE
+        with self.assertRaisesRegex(RuntimeError, "quality gate blocked completion"):
+            asyncio.run(orchestrator._run_state_machine(None))
 
     def test_quota_exhaustion_waits_for_user_recovery_instead_of_long_retry(self):
         events = []
@@ -2970,6 +2993,33 @@ class DeterministicRoutingTests(unittest.TestCase):
         self.assertIn("const capacityLabel = isPaused ? 'Paused'", source)
         self.assertIn("Disabled and excluded from new agent assignments", source)
 
+    def test_dashboard_memory_and_insights_have_dedicated_accessible_tabs(self):
+        root = Path(__file__).parents[1] / "frontend"
+        html = (root / "index.html").read_text()
+        css = (root / "css" / "style.css").read_text()
+        self.assertIn('id="decisionMemoryBody" class="md-content dashboard-scroll-body"', html)
+        self.assertIn('id="liveInsightsContainer" class="dashboard-scroll-body dashboard-insights-list"', html)
+        self.assertEqual(html.count('tabindex="0"'), 2)
+        workspace_js = (root / "js" / "workspace.js").read_text()
+        self.assertIn('role="tablist"', html)
+        self.assertIn('data-dashboard-tab="decisions"', html)
+        self.assertIn('data-dashboard-tab="consensus"', html)
+        self.assertIn(".dashboard-tab-panel.active", css)
+        self.assertIn("window.showDashboardTab = function(name)", workspace_js)
+        self.assertNotIn("max-height: clamp(220px, 34vh, 360px)", css)
+        self.assertIn("font-size: 15px !important", css)
+
+    def test_architecture_diagrams_render_only_after_tab_is_visible(self):
+        root = Path(__file__).parents[1] / "frontend" / "js"
+        workspace_js = (root / "workspace.js").read_text()
+        api_js = (root / "api.js").read_text()
+        self.assertIn("async function renderArchitectureDiagrams()", workspace_js)
+        self.assertIn("requestAnimationFrame(() => requestAnimationFrame(resolve))", workspace_js)
+        self.assertIn("if (pending.length) await mermaid.run({nodes: pending})", workspace_js)
+        self.assertIn("requested === 'architecture'", workspace_js)
+        self.assertIn("querySelector: '#feed .mermaid'", api_js)
+        self.assertNotIn("querySelector: '.mermaid'", api_js)
+
     def test_decision_modal_owns_checkpoint_identity_and_can_resume_after_restart(self):
         source = (Path(__file__).parents[1] / "frontend" / "js" / "api.js").read_text()
         self.assertIn("bodyEl.dataset.checkpointId = checkpoint.id", source)
@@ -3032,6 +3082,40 @@ class DeterministicRoutingTests(unittest.TestCase):
             observer.close()
             insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())["insights"]
             self.assertFalse(any(item["code"] == "repeated_peer_review" for item in insights), insights)
+
+    def test_debug_observer_reports_only_unresolved_errors_as_high(self):
+        with tempfile.TemporaryDirectory() as directory:
+            observer = DebugObserver(Path(directory), max_events=30)
+            observer.start_run("run-errors", "Design the system", "auto")
+            for attempt in range(1, 7):
+                observer.observe({"kind": "error", "agent": "researcher", "data": {
+                    "turn_id": "turn-1", "attempt": attempt,
+                    "error_code": "quota_exhausted", "recoverable": True,
+                }})
+                observer.observe({"kind": "turn_start", "agent": "researcher", "data": {
+                    "turn_id": "turn-1", "attempt": attempt + 1, "resumed": True,
+                }})
+            observer.observe({"kind": "turn_end", "agent": "researcher", "data": {
+                "turn_id": "turn-1", "attempt": 7,
+            }})
+            observer.close()
+            insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())["insights"]
+            self.assertFalse(any(item["code"] == "run_errors" for item in insights), insights)
+            recovered = next(item for item in insights if item["code"] == "recovered_run_errors")
+            self.assertEqual(recovered["severity"], "low")
+
+    def test_debug_observer_keeps_latest_unresolved_error_actionable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            observer = DebugObserver(Path(directory), max_events=20)
+            observer.start_run("run-error", "Design the system", "auto")
+            observer.observe({"kind": "error", "agent": "researcher", "data": {
+                "turn_id": "turn-2", "error_code": "quota_exhausted", "recoverable": True,
+            }})
+            observer.close()
+            insights = json.loads((Path(directory) / "debug" / "insights.json").read_text())["insights"]
+            active = next(item for item in insights if item["code"] == "run_errors")
+            self.assertEqual(active["severity"], "high")
+            self.assertIn("1 unresolved", active["evidence"])
 
     def test_finish_run_closes_unfinished_turns(self):
         with tempfile.TemporaryDirectory() as directory:

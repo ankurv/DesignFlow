@@ -247,8 +247,15 @@
         <div id="designCockpitView" style="margin-top: 12px; display:flex; flex-direction:column; flex:1; min-height:0;"></div>
         
         <div id="dashboardView" style="margin-top: 12px; display:none; flex-direction:column; gap:16px; flex:1; overflow-y:auto; padding-right:8px; padding-left:20px; padding-bottom:40px;">
+          <div class="dashboard-tabs" role="tablist" aria-label="Architecture dashboard sections">
+            <button class="dashboard-tab active" id="dashboardTab-guide" role="tab" aria-selected="true" aria-controls="workflowShortcutSection" onclick="showDashboardTab('guide')">Guide</button>
+            <button class="dashboard-tab" id="dashboardTab-decisions" role="tab" aria-selected="false" aria-controls="decisionMemorySection" onclick="showDashboardTab('decisions')">Decision Memory</button>
+            <button class="dashboard-tab" id="dashboardTab-consensus" role="tab" aria-selected="false" aria-controls="liveInsightsSection" onclick="showDashboardTab('consensus')">Consensus</button>
+            <button class="dashboard-tab" id="dashboardTab-architecture" role="tab" aria-selected="false" aria-controls="mermaidMapContainer" onclick="showDashboardTab('architecture')">Architecture</button>
+            <button class="dashboard-tab" id="dashboardTab-debug" role="tab" aria-selected="false" aria-controls="debugInsightsSection" onclick="showDashboardTab('debug')" style="display:none">Diagnostics</button>
+          </div>
           <!-- Live Insights Stream -->
-          <div id="workflowShortcutSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
+          <div id="workflowShortcutSection" class="dashboard-tab-panel active" data-dashboard-tab="guide" role="tabpanel" aria-labelledby="dashboardTab-guide" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px;">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔁 Iterate After You Hit an Issue</h4>
             <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
               <button class="btn btn-secondary btn-sm" onclick="applyWorkflowTemplate('resolve_issue')">Turn an issue into a plan fix</button>
@@ -258,25 +265,25 @@
             <div style="font-size:13px; color:var(--muted); line-height:1.7;">Use these shortcuts to keep the design loop lightweight: preserve the current design, point to the specific issue you hit, and ask the team to revise only the affected parts with a short change summary.</div>
           </div>
 
-          <div id="decisionMemorySection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
-            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🧠 Decision Memory</h4>
-            <div id="decisionMemoryBody" class="md-content" style="font-size:13.5px; line-height:1.65; color:#cbd5e1;">No key decisions captured yet.</div>
+          <div id="decisionMemorySection" class="dashboard-scroll-card dashboard-tab-panel" data-dashboard-tab="decisions" role="tabpanel" aria-labelledby="dashboardTab-decisions">
+            <h4>🧠 Decision Memory</h4>
+            <div id="decisionMemoryBody" class="md-content dashboard-scroll-body" role="region" aria-label="Decision memory" tabindex="0">No key decisions captured yet.</div>
           </div>
 
-          <div id="liveInsightsSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:flex; flex-direction:column;">
-            <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted); display:flex; align-items:center; gap:8px;">
+          <div id="liveInsightsSection" class="dashboard-scroll-card dashboard-tab-panel" data-dashboard-tab="consensus" role="tabpanel" aria-labelledby="dashboardTab-consensus">
+            <h4 class="dashboard-card-title-live">
               <div class="status-indicator running" style="width:6px;height:6px"></div> Live Consensus Insights
             </h4>
-            <div id="liveInsightsContainer" style="display:flex; flex-direction:column; gap:12px; font-size:13.5px; line-height:1.6; color:#cbd5e1;">
+            <div id="liveInsightsContainer" class="dashboard-scroll-body dashboard-insights-list" role="region" aria-label="Live consensus insights" tabindex="0">
               <div style="color:var(--muted); font-style:italic;" id="liveInsightsEmpty">No insights gathered yet. Start a run to see live team decisions!</div>
             </div>
           </div>
-          <div id="debugInsightsSection" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px; display:none; flex-direction:column;">
+          <div id="debugInsightsSection" class="dashboard-tab-panel" data-dashboard-tab="debug" role="tabpanel" aria-labelledby="dashboardTab-debug" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:24px;">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">🔎 Debug Observer Insights</h4>
             <div id="debugInsightsContainer" style="display:flex; flex-direction:column; gap:10px"></div>
           </div>
           <!-- Mermaid visual map container -->
-          <div id="mermaidMapContainer" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:20px; display:none; flex-direction:column; flex:1">
+          <div id="mermaidMapContainer" class="dashboard-tab-panel" data-dashboard-tab="architecture" role="tabpanel" aria-labelledby="dashboardTab-architecture" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); padding:20px; flex-direction:column; flex:1">
             <h4 style="font-family:var(--heading-font); margin:0 0 16px 0; font-size:13px; text-transform:uppercase; color:var(--text-muted)">📐 Visual Architecture & Flow Diagrams</h4>
             <div id="mermaidDiagramsContainer" style="display:flex; flex-direction:column; gap:24px; flex:1"></div>
           </div>
