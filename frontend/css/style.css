@@ -1,41 +1,48 @@
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
   :root {
-    --bg:       #0a0f1a;
-    --bg2:      #0f1523;
-    --bg3:      #151d2c;
-    --border:   #334155;
-    --border2:  #475569;
-    --text:     #f1f5f9;
-    --muted:    #aebdd0;
-    --text-muted: #cbd5e1;
-    --accent:   #aeb7ff;
-    --accent-button: #4f5bd5;
-    --accent-hover: #5f6ce0;
-    --accent-glow: rgba(118, 131, 255, 0.16);
-    --accent2:  #a7b1ff;
+    /* Premium High-Contrast Dark Palette */
+    --bg:       #09090b;       /* Zinc-950 base */
+    --bg2:      #18181b;       /* Zinc-900 elevated */
+    --bg3:      #27272a;       /* Zinc-800 elevated */
+    --border:   #3f3f46;       /* Zinc-700 borders */
+    --border2:  #52525b;       /* Zinc-600 borders */
+    --text:     #fafafa;       /* Zinc-50 bright text */
+    --text-muted: #d4d4d8;     /* Zinc-300 secondary text (was too dim/blue) */
+    --muted:    #a1a1aa;       /* Zinc-400 tertiary text/icons */
+    
+    --accent:   #818cf8;       /* Indigo-400 */
+    --accent-button: #6366f1;  /* Indigo-500 button */
+    --accent-hover: #4f46e5;   /* Indigo-600 */
+    --accent-glow: rgba(99, 102, 241, 0.16);
+    --accent2:  #a5b4fc;       /* Indigo-300 */
+    
     --green:    #10b981;
     --yellow:   #f59e0b;
     --red:      #ef4444;
     --teal:     #14b8a6;
     --orange:   #f97316;
     --radius:   12px;
+    
     --font:     'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --heading-font: var(--font);
     --mono:     'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
-    --fs-2xs:   10px;
-    --fs-xs:    11px;
-    --fs-sm:    12px;
-    --fs-md:    13px;
-    --fs-lg:    14px;
-    --fs-xl:    16px;
-    --fs-2xl:   20px;
-    --fs-display: 26px;
+    
+    /* Bumped font sizes for dramatically improved readability */
+    --fs-2xs:   11px;
+    --fs-xs:    12px;
+    --fs-sm:    13px;
+    --fs-md:    14px;
+    --fs-lg:    15px;
+    --fs-xl:    17px;
+    --fs-2xl:   22px;
+    --fs-display: 28px;
   }
   
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { font-family: var(--font); }
-  body { background: radial-gradient(circle at top right, #182033 0%, var(--bg) 44%, #080c15 100%); color: var(--text); font-family: inherit;
+  /* Sleek, deep radial gradient that doesn't wash out the contrast */
+  body { background: radial-gradient(circle at top right, #1c1c24 0%, var(--bg) 40%, #050505 100%); color: var(--text); font-family: inherit;
          font-size: var(--fs-lg); line-height: 1.6; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
   button, input, textarea, select, option { font: inherit; }
 
