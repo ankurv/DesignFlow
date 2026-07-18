@@ -90,15 +90,12 @@ function renderSingleCard(cfg, idx) {
               <span class="health-dot ${statusInfo.status}" title="${escAttr(hoverTitle)}" style="width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle;margin-left:4px"></span>
               ${badgeHTML}
               ${isCoordinator ? '<span style="font-size:11px;color:var(--yellow);font-weight:600">👑 Coordinator</span>' : ''}
+              <button type="button" class="agent-capacity-pill ${capacityClass}" style="margin-top:0; margin-left:6px;" onclick="toggleAgentCapacity('${uid}')">Capacity: ${capacityLabel}</button>
             </div>
-            <div class="agent-card-subtitle">
+            <div class="agent-card-subtitle" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:2px;">
               <span><strong>Kind:</strong> ${cfg.kind}</span>
-              <span>·</span>
-              <span><strong>Model:</strong> ${escHtml(cfg.model || 'default')}</span>
-              <span>·</span>
-              <span><strong>Role:</strong> ${escHtml(cfg.role || 'none')}</span>
             </div>
-            <button type="button" class="agent-capacity-pill ${capacityClass}" onclick="toggleAgentCapacity('${uid}')">Capacity: ${capacityLabel}</button>
+
             <div class="agent-capacity-details" id="capacity-${uid}" hidden>
               <div><strong>${isLocal ? 'Local runtime' : 'Provider capacity'}</strong><span>${isPaused ? 'Disabled and excluded from new agent assignments' : isLocal ? 'No cloud credits required' : runtimeBlocked ? escHtml(friendlyProviderError(capacity.error)) : statusInfo.status === 'failed' ? escHtml(friendlyProviderError(statusInfo.error)) : 'Inference endpoint is reachable'}</span></div>
               <div><strong>Local usage</strong><span>${Number(capacity.total_tokens || 0).toLocaleString()} tokens · ${costText}</span></div>
@@ -145,34 +142,28 @@ function renderAgentEditor() {
   const connectionError = data.extra?.connection_error || '';
 
   panel.innerHTML = `
-    <div class="agent-editor-header">
-      <div><span class="agent-editor-eyebrow">Project team</span><h3>${isNew ? 'Add agent' : 'Edit agent'}</h3></div>
-      <button class="agent-editor-close" onclick="cancelEditAgent()" aria-label="Close editor">×</button>
-    </div>
+
     <div class="agent-editor-form" data-form-type="other">
-      <div class="form-group"><label>Agent name *</label><input name="agent_display_name" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.name || '')}" placeholder="e.g. Security reviewer" oninput="editingAgentData.name=this.value"></div>
-      <div class="form-group"><label>Specialty</label><input name="agent_specialty" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.role || '')}" placeholder="e.g. security, UX, backend" oninput="editingAgentData.role=this.value"></div>
+      <div class="form-group"><label>Name *</label><input name="agent_display_name" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.name || '')}" oninput="editingAgentData.name=this.value"></div>
       <div class="agent-source-switch"><button type="button" class="${!isCli && !isOllama ? 'active' : ''}" onclick="changeEditingAgentKind('openai')">API key</button><button type="button" class="${isOllama ? 'active' : ''}" onclick="changeEditingAgentKind('ollama')">Ollama</button><button type="button" class="${isCli ? 'active' : ''}" onclick="changeEditingAgentKind('cli')">CLI</button></div>
       ${isCli ? `
         <div class="form-group"><label>Command *</label><input name="agent_cli_command" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.cli_command || '')}" placeholder="e.g. my-agent --stdio" oninput="editingAgentData.cli_command=this.value"></div>
         <p class="agent-field-note">CLI agents run this local command and do not need an API key or URL.</p>
       ` : isOllama ? `
-        <div class="form-group"><label>Ollama URL <span class="label-optional">Optional</span></label><input name="agent_ollama_url" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.base_url || '')}" placeholder="http://localhost:11434" oninput="editingAgentData.base_url=this.value"></div>
-        <button type="button" class="btn btn-secondary agent-verify-btn" onclick="discoverAgentModels('${editingAgentId}')">Test connection and find models</button>
+        <p class="agent-field-note">Ollama agents connect to localhost by default. Add base_url to config to override.</p>
       ` : `
         <div class="form-group"><label>API key *</label><input type="text" class="masked-input" name="agent_provider_credential" value="${escAttr(data.api_key || '')}" placeholder="Paste your provider key" oninput="editingAgentData.api_key=this.value" onchange="detectAndVerifyProvider('${editingAgentId}')" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></div>
-        <div class="agent-detection-status ${connectionVerified ? 'success' : connectionError ? 'failed' : ''}">${connectionVerified ? `✓ ${escHtml(providerLabel)} verified · ${models.length} models found` : connectionError ? escHtml(connectionError) : 'Provider and models will be detected when you enter the key.'}</div>
+        <div class="form-group"><label>Provider</label><select onchange="changeEditingAgentKind(this.value)">${KINDS.filter(k => !['cli','ollama'].includes(k)).map(k=>`<option value="${k}" ${k===data.kind?'selected':''}>${k.charAt(0).toUpperCase()+k.slice(1)}</option>`).join('')}</select></div>
       `}
-      ${!isCli ? `<details class="agent-advanced" ${(data.extra?.advanced_open || data.extra?.show_available_models) ? 'open' : ''} ontoggle="editingAgentData.extra.advanced_open=this.open"><summary>Advanced settings</summary><div class="agent-advanced-fields">
-        ${!isOllama ? `<div class="form-group"><label>Provider</label><select onchange="changeEditingAgentKind(this.value)">${KINDS.filter(k => !['cli','ollama'].includes(k)).map(k=>`<option value="${k}" ${k===data.kind?'selected':''}>${k.charAt(0).toUpperCase()+k.slice(1)}</option>`).join('')}</select></div><div class="form-group"><label>Base URL <span class="label-optional">Optional</span></label><input name="agent_provider_url" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value="${escAttr(data.base_url || '')}" placeholder="Use detected provider default" oninput="editingAgentData.base_url=this.value"></div>` : ''}
-        <div class="form-group"><label>Preferred model</label><input name="agent_model" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" list="model-options-editor" value="${escAttr(data.model || '')}" placeholder="${modelPlaceholder(data.kind)}" oninput="editingAgentData.model=this.value"><datalist id="model-options-editor">${models.map(model => `<option value="${escAttr(model)}"></option>`).join('')}</datalist></div>
-        <label class="agent-coordinator-option" style="margin-bottom:12px"><input type="checkbox" ${data.extra?.prefer_free_models ? 'checked' : ''} onchange="editingAgentData.extra = editingAgentData.extra || {}; editingAgentData.extra.prefer_free_models = this.checked; if(this.checked) editingAgentData.model = ''; if(editingAgentData.extra.available_models) discoverAgentModels('${editingAgentId}')"><span><strong>Prefer free/open-source models</strong><small>Prioritize free models during discovery.</small></span></label>
-        <button type="button" class="btn btn-secondary" onclick="toggleAvailableModels()">${data.extra?.show_available_models ? 'Hide' : 'Show'} available models (${models.length})</button>
-        ${data.extra?.show_available_models ? `<div class="available-model-list">${models.length ? models.map(model => `<button type="button" onclick="selectAgentModel('${escAttr(model)}')" class="available-model-chip ${model === data.model ? 'selected' : ''}">${escHtml(model)}</button>`).join('') : '<span>No models loaded yet. Test the connection first.</span>'}</div>` : ''}
+      ${!isCli ? `<details class="agent-advanced" ${(data.extra?.advanced_open) ? 'open' : ''} ontoggle="editingAgentData.extra.advanced_open=this.open"><summary>Advanced settings</summary><div class="agent-advanced-fields">
+        <div class="form-group"><textarea name="agent_extra" autocomplete="off" spellcheck="false" rows="6" style="font-family: monospace; font-size: 11.5px; resize: vertical; line-height: 1.4;" onchange="try { const parsed = JSON.parse(this.value || '{}'); const extra = editingAgentData.extra || {}; const internalKeys = ['advanced_open', 'detected_provider', 'connection_verified', 'connection_error']; const internalData = {}; internalKeys.forEach(k => { if (k in extra) internalData[k] = extra[k]; }); editingAgentData.extra = { ...parsed, ...internalData }; this.style.borderColor=''; } catch(e) { this.style.borderColor='var(--danger)'; }">${escAttr((()=>{
+          const extraFiltered = Object.fromEntries(Object.entries(data.extra || {}).filter(([k]) => !['advanced_open', 'detected_provider', 'connection_verified', 'connection_error'].includes(k)));
+          if (!('base_url' in extraFiltered)) extraFiltered.base_url = data.base_url || "";
+          return JSON.stringify(extraFiltered, null, 2);
+        })())}</textarea></div>
       </div></details>` : ''}
-      <label class="agent-coordinator-option"><input type="checkbox" ${data.extra?.is_coordinator ? 'checked' : ''} onchange="editingAgentData.extra.is_coordinator=this.checked"><span><strong>Team coordinator</strong><small>Manages the debate and execution loop.</small></span></label>
     </div>
-    <div class="agent-form-actions"><button class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button class="btn btn-primary" onclick="saveAgent('${agentId}')">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
+    <div class="agent-form-actions"><button type="button" class="btn btn-secondary btn-sm" style="margin-right:auto;" onclick="testAgentConnection('${agentId}', event)">Test</button><button type="button" class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button type="button" class="btn btn-primary" onclick="saveAgent('${agentId}')">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
   const form = panel.querySelector('.agent-editor-form');
   if (form) form.scrollTop = previousScrollTop;
 }
@@ -209,89 +200,65 @@ window.detectAndVerifyProvider = async function(uid) {
   editingAgentData.base_url = detected.baseUrl;
   editingAgentData.extra = editingAgentData.extra || {};
   editingAgentData.extra.detected_provider = detected.label;
-  delete editingAgentData.extra.available_models;
   delete editingAgentData.extra.connection_verified;
   delete editingAgentData.extra.connection_error;
   renderAgentEditor();
-  await discoverAgentModels(uid);
 };
 
-window.toggleAvailableModels = function() {
-  editingAgentData.extra = editingAgentData.extra || {};
-  editingAgentData.extra.show_available_models = !editingAgentData.extra.show_available_models;
-  renderAgentEditor();
-};
-
-window.selectAgentModel = function(model) {
-  editingAgentData.model = model;
-  renderAgentEditor();
-};
-
-function modelPlaceholder(kind) {
-  return {claude:'claude-sonnet-4-6',openai:'gpt-4o',groq:'llama-3.3-70b-versatile',gemini:'gemini-2.5-flash',ollama:'llama3',cli:''}[kind]||'';
-}
-
-window.discoverAgentModels = async function(uid) {
+window.testAgentConnection = async function(uid, event) {
   if (!editingAgentData || !editingAgentData.kind) return;
+  const modal = document.getElementById('agentTestModal');
+  const modalContent = document.getElementById('agentTestModalContent');
+  const modalTitle = document.getElementById('agentTestModalTitle');
+  const modalSubtitle = document.getElementById('agentTestModalSubtitle');
+
   if (editingAgentData.kind === 'cli') {
-    notify('CLI agents do not expose a model catalog.', true);
+    modalTitle.textContent = 'CLI Agent';
+    modalTitle.style.color = 'var(--text)';
+    modalSubtitle.textContent = '';
+    modalContent.innerHTML = 'CLI agents do not expose a model catalog.';
+    modal.style.display = 'flex';
     return;
   }
+  const oldBtn = event?.currentTarget;
+  if (oldBtn) { oldBtn.textContent = 'Testing...'; oldBtn.disabled = true; }
   try {
     const response = await fetch('/agents/models', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        name: editingAgentData.name || 'model-discovery',
-        kind: editingAgentData.kind,
-        role: editingAgentData.role || '',
-        model: editingAgentData.model || '',
-        api_key: editingAgentData.api_key || '',
-        base_url: editingAgentData.base_url || '',
-        cli_command: editingAgentData.cli_command || '',
-        system_prompt: editingAgentData.system_prompt || '',
-        max_history_turns: Number(editingAgentData.max_history_turns || 20),
-        extra: editingAgentData.extra || {},
+        ...editingAgentData,
+        base_url: editingAgentData.extra?.base_url || editingAgentData.base_url || '',
+        max_history_turns: 20
       })
     });
     const data = await response.json();
     if (!data.ok) {
-      notify(friendlyProviderError(data.error), true);
-      return;
-    }
-    editingAgentData.extra = editingAgentData.extra || {};
-    editingAgentData.extra.available_models = data.models || [];
-    if (!editingAgentData.model && data.models?.length) {
-      editingAgentData.model = data.models[0];
-    }
-    const testResponse = await fetch('/agents/test', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        ...editingAgentData,
-        max_history_turns: Number(editingAgentData.max_history_turns || 20),
-      })
-    });
-    const testResult = await testResponse.json();
-    editingAgentData.extra.connection_verified = !!testResult.ok;
-    if (testResult.ok) {
-      delete editingAgentData.extra.connection_error;
+      modalTitle.textContent = 'Connection Failed';
+      modalTitle.style.color = '#ef4444';
+      modalSubtitle.textContent = 'Please check your configuration or API key.';
+      modalContent.innerHTML = escHtml(friendlyProviderError(data.error));
+      modal.style.display = 'flex';
     } else {
-      const rawError = String(testResult.error || 'Inference test failed');
-      editingAgentData.extra.connection_error = editingAgentData.extra.detected_provider === 'NVIDIA NIM' && /403|forbidden|authorization failed/i.test(rawError)
-        ? 'NVIDIA catalog access works, but inference is not enabled for this key. Check NVIDIA API credits or model access.'
-        : friendlyProviderError(rawError);
-    }
-    renderAgentEditor();
-    if (testResult.ok) {
-      notify(`Verified inference and found ${data.models.length} compatible models.`);
-    } else {
-      notify(editingAgentData.extra.connection_error, true);
+      const models = data.models || [];
+      modalTitle.textContent = 'Connection Successful';
+      modalTitle.style.color = '#22c55e';
+      modalSubtitle.textContent = `Found ${models.length} available models.`;
+      modalContent.innerHTML = escHtml(models.join('\n'));
+      modal.style.display = 'flex';
     }
   } catch (err) {
-    notify('Could not query provider models.', true);
+      modalTitle.textContent = 'Network Error';
+      modalTitle.style.color = '#ef4444';
+      modalSubtitle.textContent = 'Failed to reach the provider.';
+      modalContent.innerHTML = escHtml(err.message || 'Unknown network error occurred.');
+      modal.style.display = 'flex';
+  } finally {
+    if (oldBtn) { oldBtn.textContent = 'Test'; oldBtn.disabled = false; }
   }
 };
+
+
 
 function setEditingExtra(key, value) {
   if (!editingAgentData.extra) editingAgentData.extra = {};
@@ -339,8 +306,12 @@ async function saveAgent(agentId) {
 
   const payload = {...editingAgentData};
   payload.extra = {...(payload.extra || {})};
-  delete payload.extra.show_available_models;
   delete payload.extra.advanced_open;
+  
+  if (payload.extra.base_url) {
+    payload.base_url = payload.extra.base_url;
+    delete payload.extra.base_url;
+  }
   const isNew = agentId.startsWith('new-');
 
   // If this agent is coordinator, clear coordinator status on others locally
@@ -480,7 +451,7 @@ function addNewAgentCard() {
     api_key: '',
     system_prompt: '',
     max_history_turns: 20,
-    extra: { is_coordinator: false }
+    extra: { is_coordinator: false, prefer_free_models: true }
   };
 
   projectAgentConfigs.push(newAgent);

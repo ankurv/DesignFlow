@@ -545,7 +545,7 @@
   .agent-config-layout.editor-open { max-width: none; grid-template-columns: minmax(520px, 1.05fr) minmax(380px, .8fr); }
   .agent-list-pane { min-width: 0; overflow-y: auto; padding-right: 6px; }
   .agent-scope-banner { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-  .agent-editor-panel { align-self: stretch; background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; height: calc(100vh - 155px); min-height: 420px; overflow: hidden; padding: 24px; box-shadow: 0 12px 30px rgba(0,0,0,.18); display: flex; flex-direction: column; }
+  .agent-editor-panel { align-self: flex-start; position: sticky; top: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; max-height: calc(100vh - 80px); min-height: 420px; overflow: hidden; padding: 24px; box-shadow: 0 12px 30px rgba(0,0,0,.18); display: flex; flex-direction: column; }
   .agent-editor-panel[hidden] { display: none; }
   .agent-editor-empty { min-height: 370px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }
   .agent-editor-empty-icon { width: 42px; height: 42px; display: grid; place-items: center; border: 1px dashed var(--border2); border-radius: 50%; color: var(--accent2); font-size: var(--fs-2xl); }
@@ -556,7 +556,7 @@
   .agent-editor-eyebrow { color: var(--accent2); text-transform: uppercase; letter-spacing: .07em; font-size: var(--fs-2xs); font-weight: 700; }
   .agent-editor-close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 25px; line-height: 1; padding: 0 2px; }
   .agent-editor-close:hover { color: var(--text); }
-  .agent-editor-form { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow-y: auto; padding-right: 8px; padding-bottom: 8px; }
+  .agent-editor-form { display: flex; flex-direction: column; gap: 16px; min-height: 0; max-height: 55vh; overflow-y: auto; padding-right: 8px; padding-bottom: 8px; }
   .agent-source-switch { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
   .agent-source-switch button { border: 0; border-radius: 7px; padding: 8px; background: transparent; color: var(--muted); font: 600 11.5px var(--font); cursor: pointer; }
   .agent-source-switch button.active { background: var(--bg3); color: var(--text); box-shadow: 0 1px 5px rgba(0,0,0,.25); }
@@ -565,7 +565,7 @@
   .agent-detection-status.failed { color: var(--red); border-style: solid; border-color: rgba(239,68,68,.25); background: rgba(239,68,68,.04); }
   .agent-verify-btn { width: 100%; }
   .agent-advanced { border-top: 1px solid var(--border); padding-top: 12px; }
-  .agent-advanced summary { color: var(--accent2); cursor: pointer; font-size: var(--fs-sm); font-weight: 650; user-select: none; }
+  .agent-advanced summary { color: var(--text-muted); cursor: pointer; font-size: var(--fs-sm); font-weight: 650; text-transform: uppercase; letter-spacing: 0.02em; user-select: none; }
   .agent-advanced-fields { display: flex; flex-direction: column; gap: 14px; padding-top: 14px; }
   .available-model-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px; max-height: 170px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--muted); font-size: var(--fs-xs); }
   .available-model-chip { border: 1px solid var(--border2); border-radius: 999px; background: var(--bg2); color: var(--text-muted); padding: 5px 9px; font: 500 10.5px var(--mono); cursor: pointer; }
@@ -671,7 +671,7 @@
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 10px 12px;
+    padding: 8px 12px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     margin-bottom: 0;
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -1006,7 +1006,7 @@
   font-size: var(--fs-display);
   line-height: 1.15;
   margin: 0;
-  max-width: 640px;
+  max-width: 800px;
 }
 .cockpit-empty-state p {
   margin: 0;
@@ -1957,6 +1957,7 @@ body.project-open .cockpit-export-btn { display: inline-flex; }
   border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.12);
   background: rgba(255,255,255,0.02);
+  min-height: 0;
 }
 .recent-projects-modal {
   margin-top: 2px;
@@ -1989,6 +1990,12 @@ body.project-open .cockpit-export-btn { display: inline-flex; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
+  padding-right: 4px;
+  min-height: 0;
+}
+.recent-projects-modal .recent-projects-list {
+  max-height: 250px;
 }
 .recent-project-btn {
   width: 100%;

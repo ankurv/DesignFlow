@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css?v=20260712j">
+  <link rel="stylesheet" href="/css/style.css?v=20260718t">
 </head>
 <body>
 
@@ -27,15 +27,14 @@
 </div>
 <header>
   <div class="logo">Design<span>Flow</span></div>
+  <div class="spacer"></div>
   <div class="status-pill">
     <div class="status-dot" id="statusDot"></div>
     <span id="statusText">idle</span>
   </div>
-  <div class="spacer"></div>
-  <span id="loggedInUserLabel" style="color:var(--text); font-weight:600; margin-right:15px; font-size:13px; display:none;"></span>
-  <button class="header-btn" onclick="submitLogout()" id="logoutBtn" style="margin-right:15px; display:none;">Logout</button>
-  <button class="header-btn" onclick="shutdownServer()" id="shutdownBtn" style="display:none; color: var(--red);">Shutdown Server</button>
-
+  <span id="loggedInUserLabel" style="color:var(--text); font-weight:600; margin-left:15px; font-size:13px; display:none;"></span>
+  <button class="header-btn" onclick="submitLogout()" id="logoutBtn" style="margin-left:15px; display:none;">Logout</button>
+  <button class="header-btn" onclick="shutdownServer()" id="shutdownBtn" style="margin-left:15px; display:none; color: var(--red);">Shutdown Server</button>
 </header>
 
 <div class="project-strip" style="padding: 10px 24px;">
@@ -288,15 +287,11 @@
   <div class="panel" id="panel-config">
     <div class="config-layout agent-config-layout">
       <section class="agent-list-pane">
-        <h2>Project Agents</h2>
-        <p class="muted-note">Use different models and specialties to challenge assumptions from multiple angles.</p>
-        <div id="activeScopeBanner" class="agent-scope-banner">
-          <div style="display:flex; flex-direction:column; gap:2px">
-            <span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.06em">Project-specific team</span>
-            <span style="font-family:var(--heading-font); font-size:15px; font-weight:700; color:var(--text)">Agents are saved only in the open project</span>
-          </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+          <h2 style="margin:0;">Project Agents</h2>
           <button class="btn btn-primary btn-sm" onclick="addNewAgentCard()">＋ Add Agent</button>
         </div>
+        <p class="muted-note" style="margin-bottom:20px;">Use different models and specialties to challenge assumptions from multiple angles.</p>
         <div class="agent-cards" id="agentCardsContainer"></div>
       </section>
       <aside class="agent-editor-panel" id="agentEditorPanel" hidden></aside>
@@ -387,7 +382,7 @@
   <script src="/js/state.js?v=20260712a"></script>
   <script src="/js/api.js?v=20260712d"></script>
   <script src="/js/workspace.js?v=20260710q"></script>
-  <script src="/js/agents.js?v=20260712f"></script>
+  <script src="/js/agents.js?v=20260718q"></script>
   <script src="/js/main.js?v=20260712a"></script>
 
 <!-- Login Modal -->
@@ -444,5 +439,20 @@
     <button id="projectRestoreRetry" class="btn btn-primary" type="button" onclick="retryProjectRestoration()" style="display:none;">Retry restoration</button>
   </div>
 </div>
+
+<div id="agentTestModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.72); z-index:9998; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
+  <div style="background:var(--bg2); width:min(680px, calc(100vw - 32px)); padding:28px; border-radius:16px; border:1px solid var(--border); display:flex; flex-direction:column; gap:16px; box-shadow:0 24px 60px rgba(0,0,0,0.35);">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px;">
+      <div>
+        <h2 id="agentTestModalTitle" style="margin:0; color:var(--text); font-family:var(--heading-font);">Connection Test</h2>
+        <p id="agentTestModalSubtitle" style="margin:8px 0 0; color:var(--muted); line-height:1.6;">Verifying provider configuration and retrieving available models.</p>
+      </div>
+      <button class="btn btn-secondary" onclick="document.getElementById('agentTestModal').style.display='none'">Close</button>
+    </div>
+    <div id="agentTestModalContent" style="max-height: 400px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 13px; color: var(--text); white-space: pre-wrap;">
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
