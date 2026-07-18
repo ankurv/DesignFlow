@@ -377,10 +377,16 @@ class ProjectStore:
                     for word in lowered
                 )] or ranked[:1]
                 preamble = str(document["preamble"] or "").strip() if document else ""
-                if preamble and (artifact == "decisions" or not rows):
-                    chunk = f"[{artifact}:document v{document['version']}]\n{preamble}"
+                if preamble:
+                    preamble_text = preamble if (artifact == "decisions" or not rows) else (preamble[:600] + ("..." if len(preamble) > 600 else ""))
+                    chunk = f"[{artifact}:document v{document['version']}]\n{preamble_text}"
                     blocks.append(chunk[:remaining])
                     remaining -= min(len(chunk), remaining)
+                if rows and remaining > 0:
+                    toc = "\n".join(f"- {row['heading']}" for row in rows)
+                    toc_chunk = f"[{artifact}:Table of Contents]\n{toc}"
+                    blocks.append(toc_chunk[:remaining])
+                    remaining -= min(len(toc_chunk), remaining)
                 for row in selected:
                     chunk = f"[{artifact}:{row['heading']} v{row['version']}]\n{row['body']}".strip()
                     if remaining <= 0:

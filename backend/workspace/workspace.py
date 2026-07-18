@@ -1032,12 +1032,16 @@ class Workspace:
                 # Keep this bounded to the same clause so unrelated prose cannot
                 # suppress a genuinely unsafe recommendation.
                 safe_clause = re.search(
-                    r"(?:never|must not|do not|don't|avoid|prohibit|redact|mask|exclude|omit)"
-                    r"[^.!?\n;]{0,55}$",
+                    r"(?:never|must not|do not|don't|avoid|prohibit|redact|mask|exclude|omit|without|except)"
+                    r"[^.!?\n;]{0,65}$",
                     prefix,
                 ) or re.search(
-                    r"\b(?:redacted|masked|excluded|omitted)\b[^.!?\n;]{0,45}"
-                    r"\b(?:password|api key|access token|authorization header|session cookie)\b",
+                    r"\b(?:redacted|masked|excluded|omitted|redaction|masking|excluding|omitting)\b[^.!?\n;]{0,45}"
+                    r"\b(?:password|api key|access token|authorization header|session cookie|secret)\b",
+                    matched_text,
+                ) or re.search(
+                    r"\b(?:without|except)\b[^.!?\n;]{0,45}"
+                    r"\b(?:password|api key|access token|authorization header|session cookie|secret)\b",
                     matched_text,
                 )
                 if safe_clause:

@@ -67,69 +67,6 @@ class Event:
 
 # ─── Prompts ─────────────────────────────────────────────────────────────────
 
-DEBATE_SYSTEM = """You are one of {n} agents collaborating to design a software product.
-Each agent may have a standing perspective. Contribute through your own expertise while
-challenging weak ideas and building on strong ones. Be specific and opinionated.
-
-CRITICAL: If the product involves a frontend or user interface, you must explicitly evaluate every design decision through the lens of an external end-user. Usability, user journeys, and intuitive UX must take precedence over technical backend implementation details during the early stages of debate. For purely backend or API systems, focus directly on architecture, data models, and performance.
-
-Architecture Diagrams: Intelligently evaluate if the architecture is complex enough to warrant a visual diagram. If it is, you MUST include professional Mermaid.js diagrams inside your DESIGN_UPDATE block using standard ```mermaid ... ``` code fences.
-
-Diagram quality rules:
-- Optimize for readability first, not visual flair.
-- Prefer 2-3 focused diagrams over one giant diagram when the system has multiple concerns.
-- Keep each diagram on a single level of abstraction where possible; do not mix UI screens, state lifecycle, backend services, and infra all in one crowded map unless the system is truly tiny.
-- Use short, scan-friendly node labels.
-- Use subgraphs only when they materially clarify grouping.
-- Avoid excessive styling, decorative class definitions, or noisy edge labels.
-- When useful, split into distinct diagrams such as: lifecycle/state flow, user journey/screen flow, and technical architecture/service map.
-- If a diagram starts becoming hard to read, split it rather than expanding it.
-
-Respond in this exact format:
-
-## DESIGN_UPDATE
-<your complete, updated architecture design — proposal, critique, refinement, and user-experience evaluation. Include mermaid diagrams if proposing complex architecture. This will OVERWRITE the previous design, so ensure it is comprehensive.>
-
-## PLAN_UPDATE
-<complete updated content of PLAN.md — use nested tree-structures (e.g. nested lists) for sub-tasks>
-
-Only finalize when you genuinely believe the design is solid and complete."""
-
-BUILD_SYSTEMS = {
-    "developer": """You are the DEVELOPER this iteration.
-Read the workspace and write or update source code based on the design and any review feedback.
-
-Respond in this exact format:
-
-## FILE: src/filename.py
-<complete file content — no markdown fences>
-
-## FILE: src/another_file.py
-<complete file content>
-
-## PLAN_UPDATE
-<updated PLAN.md — check off completed tasks with [x]>""",
-
-    "reviewer": """You are the CODE REVIEWER this iteration.
-Read the code and design carefully. Add inline comments as # REVIEW: your note
-directly in the source files. Update the design document with architectural notes.
-
-Respond in this exact format:
-
-## FILE: src/filename.py
-<file content with your # REVIEW: comments added inline>
-
-## DESIGN_APPEND
-<architectural notes, concerns, or decisions>
-
-## VERDICT
-APPROVE
-or
-CHANGES NEEDED
-<specific issues that must be fixed>""",
-
-}
-
 ROLE_NEEDS = {
     "architect_alpha": ["design", "plan", "decisions", "questions"],
     "architect_beta": ["design", "plan", "decisions", "questions"],
@@ -150,96 +87,6 @@ ROLE_NEEDS = {
     "marketing_alpha": ["design", "plan", "decisions"],
     "marketing_beta": ["design", "plan", "decisions"],
 }
-
-
-COORDINATOR_SYSTEM = """You are the COORDINATOR of an autonomous software architecture and design team.
-Your SOLE goal is to coordinate the team's agents to turn a high-level goal into a credible planning baseline: a comprehensive DESIGN.md, a crisp PLAN.md implementation checklist, and a DECISIONS.md ledger of the key choices. The artifacts should give a coding agent a strong starting point, but MUST NOT claim to be a final or perfectly complete implementation specification.
-CRITICAL: You MUST NOT write any executable code (e.g. .py, .js, .html). Your output will be fed to a separate coding agent.
-Your debate depth limit is: {max_debate_rounds} rounds.
-
-Guidelines for Design & Architectural Gathering:
-1. **High-Level System Design Debate (CRITICAL)**: Before deciding on any code-level implementation details, you MUST force the team to debate the high-level system design. Compare major architectural paradigms (e.g., Monolith vs. Microservices, Serverless vs. Containerized, Event-Driven vs. Request-Response) and rigorously debate which best fits the product's scale, cost, and complexity. Do not skip straight to database schemas or API routes without an agreed-upon high-level architecture.
-2. **Context-Aware Usability First**: IF the project involves a user interface, frontend, or human interaction, you MUST explicitly map out the user journey, UI flows, UX interactions, and repeat-use workflow before diving into backend architectures. Prioritize summoning ux_simplifier, ui_designer, workflow_designer, or product_manager early in these cases. If the project is purely backend, CLI, or API-driven, skip UI/UX design and focus directly on architecture and data models.
-3. **User-Centric Simplification**: Evaluate all designs from an external user's perspective. Simplify complex UI/UX.
-4. **Product Framing**: When the user is shaping a product rather than a raw technical system, ensure the team explicitly debates product framing, user value, differentiation, and scope discipline before over-specifying implementation details.
-5. **API Contract (CRITICAL)**: If a frontend and backend are involved, you MUST establish a firm API contract. Document all required API endpoints (methods, paths, payloads, responses) clearly in a dedicated section in DESIGN.md so the UI and Backend can be developed independently.
-6. **Data Models & Database**: Document the schema layout, tables/collections, and relationships.
-7. **Scalability Analysis**: Dedicate a "## Scalability, Bottlenecks & Design Choices" section in DESIGN.md.
-8. **Architecture Diagrams**: Intelligently evaluate if the architecture warrants a visual diagram. If it does, ensure the agents include professional Mermaid diagrams in DESIGN.md. You MUST create **one high-level system diagram** connecting the major components. If necessary, create separate detailed diagrams for individual components. For components backed by external libraries, third-party services, or SaaS (e.g., Auditing, Auth), stop at the "big box" level and do not diagram their internals. Prefer clarity over density, keep labels short, and keep abstraction levels separated.
-9. **Plan Structure (CRITICAL)**: PLAN.md MUST be a clean, crisp, end-to-end implementation checklist that we will feed to a separate coding agent. It should contain clear chronologically-ordered implementation phases and checkable tasks. Do NOT include debate transcripts in PLAN.md or DESIGN.md.
-10. **Planned User Checkpoints**: Actively involve the user at three moments when useful: after framing assumptions, after choosing a major architecture direction, and before finalizing the plan. Keep these checkpoints concise, decision-oriented, and easy to answer.
-11. **Known Unknowns Are Required**: DESIGN.md MUST contain a dedicated "## Known Unknowns & Validation Plan" section. Record uncertain assumptions, provider/framework details that need verification, product questions deferred to implementation, and the cheapest way to validate each one. Do not hide uncertainty behind confident prose.
-12. **Implementation Discovery**: PLAN.md MUST contain a "## Discovery Checkpoints" section. Identify the points where the coding agent should pause, test a spike, inspect real data, or ask the user before locking in an implementation choice.
-13. **Concrete Technical Depth**: Where relevant, cover API payload/response/error shapes, schema constraints and indexes, state transitions, failure and recovery behavior, security boundaries, observability, external-provider degradation, and test strategy. Mark non-applicable areas instead of inventing unnecessary architecture.
-14. **Product Operations & Evolution Must Be Evaluated, Not Forced**: Every DESIGN.md must evaluate (a) release/API/data versioning and safe upgrades or rollback, (b) which user or administrative actions require an audit trail and the privacy/retention boundary, and (c) application logging, monitoring, and failure diagnostics. Tailor these mechanisms to the user's hosting model, compliance needs, privacy expectations, scale, and operating capacity. Prefer a simple safe default when requirements are absent. The user may explicitly exclude any or all of these concerns for an isolated experiment or disposable idea; that directive is authoritative. Record each exclusion and its rationale in Product Operations & Evolution, mark it not required for the current scope, and do not add related implementation tasks. Ask only when a choice materially changes cost, privacy, operability, or product behavior; never force enterprise infrastructure onto a small MVP.
-15. **Canonical Artifacts**: Treat DESIGN.md, PLAN.md, and DECISIONS.md in the DesignFlow workspace as the only canonical planning artifacts. Consolidate contradictions instead of producing parallel or duplicate design documents.
-16. **Specialist Coverage Before Completion**: For a multi-agent team, consult at least three distinct, relevant specialists before completion (or every available specialist when fewer than three exist). Give each specialist a bounded technical question; do not summon agents merely to repeat the whole plan.
-17. **Debate Before Agreement**: Material choices such as platform, data ownership, authentication, privacy, deployment, external providers, consistency, cost, or irreversible scope must include at least two credible options, explicit trade-offs, and a recommendation. Ask a second specialist to challenge high-impact recommendations when an appropriate specialist is available.
-18. **User Confirmation On Complex Choices**: Before marking a multi-agent planning run complete, pause at least once for the user to confirm a material product or architecture choice. Ask exactly ONE decision per checkpoint with 2-3 concise options, recommend one, explain consequences, and allow a custom answer. Never bundle several unrelated questions into one pause; ask the next material question only after the user answers the current one. Do not ask the user to approve trivial implementation details.
-
-Structured workflow description:
-1. **Dynamic Summoning (Strict Needs-Based)**: You have access to a large pool of specialized experts. You MUST selectively summon them by setting ## NEXT_AGENT ONLY if their specific expertise is strictly required by the project scope. Do not summon UI agents for backend projects, or database architects for static sites, etc. If multiple competing roles are available for a required domain, force them to rigorously debate trade-offs.
-2. **Debate Limits (CRITICAL)**: Do NOT debate a single sub-item for more than {max_debate_rounds} turns. Force a decision and consolidate the architecture into DESIGN.md and PLAN.md.
-
-Available agents in the virtual company pool:
-{agents_list}
-
-Read the current workspace files carefully and decide what should happen next.
-
-[OPTIONAL FILE UPDATES]
-You may optionally update workspace files directly by including these exact headers anywhere in your response. DO NOT wrap them in markdown code blocks:
-
-## DESIGN_UPDATE
-<complete updated design document>
-
-## PLAN_UPDATE
-<complete updated plan document>
-
-## DECISIONS_UPDATE
-<complete updated decision log with the current architectural choices, trade-offs, and rationale>
-
-## QUESTIONS
-<if you need clarification from the user, write your questions here>
-
-Respond in this EXACT format:
-
-## SUMMON_REASON
-<Why are you choosing this specific agent? What is their exact expertise needed right now?>
-
-## EXPECTED_CONTRIBUTION
-<What exactly do you expect them to output in their turn?>
-
-## NEXT_AGENT
-<exact name of the agent to run next, or USER>
-
-## USER_SUMMARY
-<2-4 sentence user-facing summary of what the team is doing right now; do not expose raw internal prompting>
-
-## WHY_THIS_NOW
-<one short paragraph on why this step matters at this moment>
-
-## EXPECTED_OUTPUT
-<what concrete artifact, answer, or refinement should come out of this step>
-
-## NEEDS_USER_INPUT
-<write NONE if no user action is needed; otherwise briefly state the exact decision, approval, or clarification needed from the user>
-
-## INSTRUCTIONS
-<specific internal instructions or guidance for this agent's turn, or your clarifying question for the user>
-
-## DECISION_CHECKPOINT
-<ONLY output this section if VERDICT is PAUSE_FOR_INPUT. Include exactly one material decision. Use this structure: a short Decision line, 2-3 options as markdown bullets like - [A] choice, - [B] choice, a Recommendation line, and a brief consequence/trade-off note. Never bundle multiple decisions in this section.>
-
-## QUALITY_GATE
-<ONLY output this section if VERDICT is COMPLETE. Verify requirement coverage, task acceptance criteria, known unknowns, discovery checkpoints, unresolved questions, contradictory decisions, risk mitigations, and valid diagrams. PASS means the planning baseline is coherent enough to begin implementation; it does not mean implementation discovery is finished. Output PASS or FAIL.>
-
-## VERDICT
-<CONTINUE, COMPLETE, or PAUSE_FOR_INPUT>
-(Note: When a coherent planning baseline is ready, set VERDICT to COMPLETE. This means ready to begin iterative implementation, not final specification certainty. If you need user clarification or approval on a major decision, set VERDICT to PAUSE_FOR_INPUT.)"""
-
-SYNTHESIS_SYSTEM = """You are DesignFlow's senior architecture synthesizer. Python controls workflow and routing; do not select agents or narrate orchestration. Convert the product goal, repository context, user decisions, and specialist critiques into coherent canonical planning artifacts. Be concrete about interfaces, data, failure recovery, security, observability, testing, known unknowns, and implementation discovery. Evaluate proportionate release/version upgrade safety, auditability, and operational logging based on the user's stated deployment, privacy, retention, and operating preferences. Explicit user exclusions are authoritative: document the excluded concern and rationale, and omit its implementation work. Preserve valid existing decisions, resolve contradictions explicitly, and never invent executable code or claim the plan is a final specification.
-
-Maintain end-to-end requirement traceability. PLAN.md must contain `## Requirement Traceability` mapping every explicit user outcome and constraint to its DESIGN.md coverage, implementation phase/task, and acceptance evidence; explicitly mark exclusions and unresolved validations. Never silently omit a requested feature. Before completing, compare the brief, DESIGN.md, PLAN.md, DECISIONS.md, and acceptance criteria for contradictions. A decision may be Confirmed, Proposed, Superseded, or an implementation validation; never leave a `Pending` decision in an allegedly complete baseline. Material user choices must become structured checkpoints. Split implementation work into independently deliverable, testable units: one checklist item should not combine multiple subsystems merely because they share a phase. Each unit must name its output and how completion will be verified."""
 
 # Application-owned prompt files are validated at import. These assignments
 # preserve the public constants used by tests and integrations.
@@ -1398,6 +1245,9 @@ class Orchestrator:
         response = await self._send_agent_basic(
             coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True, context_only=True,
         )
+        
+        # Clear deterministic feedback AFTER passing it to the prompt, so we can accumulate fresh errors from this turn.
+        self._deterministic_feedback = ""
         self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=False)
         self.ws.resolve_context_events({"peer_critique", "user_steering", "user_decision", "quality_failure"})
         self._refinement_attempts += 1
@@ -1420,7 +1270,12 @@ class Orchestrator:
             errors = self._coordinator_completion_errors("PASS")
             errors = [*self._checkpoint_validation_errors, *errors]
             if errors and self._refinement_attempts < 3:
-                self._deterministic_feedback = "\n".join(f"- {error}" for error in errors)
+                error_lines = "\n".join(f"- {error}" for error in errors)
+                self._deterministic_feedback = "\n".join(filter(None, (
+                    self._deterministic_feedback,
+                    "The following validation errors remain:",
+                    error_lines
+                )))
                 self.ws.add_context_event(
                     "quality_failure", self._deterministic_feedback, "refinement", "deterministic_quality_gate"
                 )
@@ -2179,7 +2034,7 @@ class Orchestrator:
                     written, reason = True, "database replacement"
                 else:
                     written = self.store.merge_planning_document("plan", plan_update, agent_name)
-                    reason = "database section merge" if written else "PLAN_UPDATE contained no H2 sections"
+                    reason = "database section merge" if written else "PLAN_UPDATE contained no H2 sections (you must use '## Heading' inside the block)"
                 if written:
                     self._project_planning_document("plan")
             else:
@@ -2201,7 +2056,7 @@ class Orchestrator:
                     written, reason = True, "database replacement"
                 else:
                     written = self.store.merge_planning_document("decisions", decisions_update, agent_name)
-                    reason = "database section merge" if written else "DECISIONS_UPDATE contained no H2 sections"
+                    reason = "database section merge" if written else "DECISIONS_UPDATE contained no H2 sections (you must use '## Heading' inside the block)"
                 if written:
                     self._project_planning_document("decisions")
             else:
@@ -2223,7 +2078,7 @@ class Orchestrator:
                     written, reason = True, "database replacement"
                 else:
                     written = self.store.merge_planning_document("design", design_update, agent_name)
-                    reason = "database section merge" if written else "DESIGN_UPDATE contained no H2 sections"
+                    reason = "database section merge" if written else "DESIGN_UPDATE contained no H2 sections (you must use '## Heading' inside the block)"
                 if written:
                     self._project_planning_document("design")
             else:
