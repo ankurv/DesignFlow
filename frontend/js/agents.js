@@ -1,5 +1,5 @@
 // ── Agent config ──────────────────────────────────────────────────────────────
-const KINDS = ['claude','openai','groq','gemini','cli','ollama'];
+const KINDS = ['claude','openai','groq','gemini','cli','ollama','aws-bedrock'];
 let projectAgentConfigs = [];
 let editingAgentId = null;
 let editingAgentData = {};
@@ -152,16 +152,16 @@ function renderAgentEditor() {
       ` : isOllama ? `
         <p class="agent-field-note">Ollama agents connect to localhost by default. Add base_url to config to override.</p>
       ` : `
-        <div class="form-group"><label>API key *</label><input type="text" class="masked-input" name="agent_provider_credential" value="${escAttr(data.api_key || '')}" placeholder="Paste your provider key" oninput="editingAgentData.api_key=this.value" onchange="detectAndVerifyProvider('${editingAgentId}')" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></div>
+        <div class="form-group"><label>${data.kind === 'aws-bedrock' ? 'Bearer Token *' : 'API key *'}</label><input type="text" class="masked-input" name="agent_provider_credential" value="${escAttr(data.api_key || '')}" placeholder="Paste your provider key" oninput="editingAgentData.api_key=this.value" onchange="detectAndVerifyProvider('${editingAgentId}')" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></div>
         <div class="form-group"><label>Provider</label><select onchange="changeEditingAgentKind(this.value)">${KINDS.filter(k => !['cli','ollama'].includes(k)).map(k=>`<option value="${k}" ${k===data.kind?'selected':''}>${k.charAt(0).toUpperCase()+k.slice(1)}</option>`).join('')}</select></div>
       `}
-      ${!isCli ? `<details class="agent-advanced" ${(data.extra?.advanced_open) ? 'open' : ''} ontoggle="editingAgentData.extra.advanced_open=this.open"><summary>Advanced settings</summary><div class="agent-advanced-fields">
+      <details class="agent-advanced" ${(data.extra?.advanced_open) ? 'open' : ''} ontoggle="editingAgentData.extra.advanced_open=this.open"><summary>Advanced settings</summary><div class="agent-advanced-fields">
         <div class="form-group"><textarea name="agent_extra" autocomplete="off" spellcheck="false" rows="6" style="font-family: monospace; font-size: 11.5px; resize: vertical; line-height: 1.4;" onchange="try { const parsed = JSON.parse(this.value || '{}'); const extra = editingAgentData.extra || {}; const internalKeys = ['advanced_open', 'detected_provider', 'connection_verified', 'connection_error']; const internalData = {}; internalKeys.forEach(k => { if (k in extra) internalData[k] = extra[k]; }); editingAgentData.extra = { ...parsed, ...internalData }; this.style.borderColor=''; } catch(e) { this.style.borderColor='var(--danger)'; }">${escAttr((()=>{
           const extraFiltered = Object.fromEntries(Object.entries(data.extra || {}).filter(([k]) => !['advanced_open', 'detected_provider', 'connection_verified', 'connection_error'].includes(k)));
           if (!('base_url' in extraFiltered)) extraFiltered.base_url = data.base_url || "";
           return JSON.stringify(extraFiltered, null, 2);
         })())}</textarea></div>
-      </div></details>` : ''}
+      </div></details>
     </div>
     <div class="agent-form-actions"><button type="button" class="btn btn-secondary btn-sm" style="margin-right:auto;" onclick="testAgentConnection('${agentId}', event)">Test</button><button type="button" class="btn btn-secondary" onclick="cancelEditAgent()">Cancel</button><button type="button" class="btn btn-primary" onclick="saveAgent('${agentId}')">${isNew ? 'Add agent' : 'Save changes'}</button></div>`;
   const form = panel.querySelector('.agent-editor-form');
@@ -175,6 +175,11 @@ function changeEditingAgentKind(kind) {
   delete editingAgentData.extra.detected_provider;
   delete editingAgentData.extra.connection_verified;
   delete editingAgentData.extra.connection_error;
+  
+  if (kind === 'aws-bedrock' && !editingAgentData.extra.aws_region) {
+    editingAgentData.extra.aws_region = 'us-east-1';
+  }
+  
   renderAgentEditor();
 }
 

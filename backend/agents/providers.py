@@ -61,6 +61,21 @@ def discover_models(config: AgentConfig) -> list[str]:
             kwargs["base_url"] = config.base_url
         models = anthropic.Anthropic(**kwargs).models.list()
         ids = [item.id for item in models.data]
+    elif kind == "aws-bedrock":
+        import boto3
+        key = config.api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+        if key:
+            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = key
+            
+        region = config.extra.get("aws_region", "us-east-1")
+        client = boto3.client("bedrock", region_name=region)
+        resp = client.list_foundation_models()
+        model_list = resp.get("modelSummaries", [])
+        ids = [
+            m["modelId"] for m in model_list 
+            if m.get("modelLifecycle", {}).get("status") == "ACTIVE" 
+            and "anthropic" in m.get("providerName", "").lower()
+        ]
     elif kind == "gemini":
         import google.generativeai as genai
         key = config.api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -106,9 +121,7 @@ class ClaudeAgent(AgentBase):
         base_url = getattr(self.config, "base_url", "")
         platform = self.config.extra.get("platform", "standard")
         
-        if platform == "bedrock":
-            self._client = anthropic.AnthropicBedrock()
-        elif platform == "vertex":
+        if platform == "vertex":
             self._client = anthropic.AnthropicVertex()
         else:
             kwargs = {}
@@ -773,6 +786,117 @@ class CLIAgent(AgentBase):
         return self._provider_session_id
 
 
+
+
+class AWSBedrockAgent(AgentBase):
+    def __init__(self, config: AgentConfig):
+        super().__init__(config)
+        self._configure_client()
+
+    def _configure_client(self):
+        import anthropic
+        key = self.config.api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+        if key:
+            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = key
+        
+        kwargs = {}
+        if "aws_region" in self.config.extra:
+            kwargs["aws_region"] = self.config.extra["aws_region"]
+        
+        self._client = anthropic.AnthropicBedrock(**kwargs)
+
+    def reconfigure(self, config: AgentConfig):
+        previous_key = self.config.api_key
+        super().reconfigure(config)
+        if config.api_key != previous_key:
+            self._configure_client()
+
+    def _raw_send(self, messages: list[dict], system: str, mcp_tools: list[dict] = None, tool_handler: Callable = None) -> tuple[str, Usage]:
+        from typing import Callable
+        system_value = system if system else ""
+        
+        current_messages = list(messages)
+        total_input = 0
+        total_cached = 0
+        total_output = 0
+        
+        claude_tools = []
+        if mcp_tools:
+            for t in mcp_tools:
+                claude_tools.append({
+                    "name": t["name"],
+                    "description": t["description"],
+                    "input_schema": t["inputSchema"],
+                })
+
+        iterations = 0
+        while iterations < 10:
+            iterations += 1
+            
+            kwargs = {
+                "model": self.config.model or "anthropic.claude-3-sonnet-20240229-v1:0",
+                "max_tokens": self.config.extra.get("max_tokens", 2000),
+                "system": system_value,
+                "messages": current_messages,
+            }
+            if claude_tools:
+                kwargs["tools"] = claude_tools
+
+            response = self._client.messages.create(**kwargs)
+            
+            raw = response.usage
+            cached = int(getattr(raw, "cache_read_input_tokens", 0) or 0)
+            cache_write = int(getattr(raw, "cache_creation_input_tokens", 0) or 0)
+            total_input += int(getattr(raw, "input_tokens", 0) or 0) + cached + cache_write
+            total_cached += cached
+            total_output += int(getattr(raw, "output_tokens", 0) or 0)
+            
+            if response.stop_reason == "tool_use":
+                assistant_message = {"role": "assistant", "content": []}
+                tool_results = []
+                
+                for block in response.content:
+                    if block.type == "text":
+                        assistant_message["content"].append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        assistant_message["content"].append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input
+                        })
+                        try:
+                            if not tool_handler:
+                                raise RuntimeError("No tool_handler provided")
+                            res_text = tool_handler(block.name, block.input)
+                            is_error = False
+                        except Exception as e:
+                            res_text = str(e)
+                            is_error = True
+                            
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": res_text,
+                            "is_error": is_error
+                        })
+                current_messages.append(assistant_message)
+                current_messages.append({"role": "user", "content": tool_results})
+            else:
+                text_content = [b.text for b in response.content if b.type == "text"]
+                usage = Usage(
+                    input_tokens=total_input,
+                    cached_input_tokens=total_cached,
+                    output_tokens=total_output,
+                )
+                return "\n".join(text_content), usage
+                
+        return "Error: Agent exceeded maximum tool execution limit.", Usage(
+            input_tokens=total_input,
+            cached_input_tokens=total_cached,
+            output_tokens=total_output,
+        )
+
 class OllamaAgent(AgentBase):
     def __init__(self, config: AgentConfig):
         super().__init__(config)
@@ -812,6 +936,7 @@ AGENT_KINDS: dict[str, type[AgentBase]] = {
     "gemini": GeminiAgent,
     "cli": CLIAgent,
     "ollama": OllamaAgent,
+    "aws-bedrock": AWSBedrockAgent,
 }
 
 

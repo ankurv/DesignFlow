@@ -222,8 +222,22 @@ class AgentBase(ABC):
         if ephemeral_context:
             raw_msgs[-1]["content"] = f"{raw_msgs[-1]['content']}\n\n{ephemeral_context}"
 
+        import os
+        log_prompts = os.environ.get("DESIGNFLOW_LOG_PROMPTS") == "1"
+        if log_prompts:
+            print(f"\n{'='*20} LLM REQUEST ({self.name}) {'='*20}")
+            print(f"SYSTEM:\n{system}\n{'-'*50}")
+            for m in raw_msgs:
+                print(f"{m['role'].upper()}:\n{m['content']}\n{'-'*50}")
+            if mcp_tools:
+                print(f"TOOLS: {len(mcp_tools)} provided")
+
         try:
             reply, usage = self._raw_send(raw_msgs, system, mcp_tools=mcp_tools, tool_handler=tool_handler)
+            if log_prompts:
+                print(f"\n{'='*20} LLM RESPONSE ({self.name}) {'='*20}")
+                print(f"{reply}\n{'='*55}\n")
+
         except Exception as exc:
             if self._attempt_is_current(attempt_token):
                 self.status = AgentStatus.ERROR
