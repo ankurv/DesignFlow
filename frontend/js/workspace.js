@@ -245,20 +245,20 @@ async function saveFileEdit(filename) {
       renderFileContent(filename, currentFileContent);
     } else {
       const err = await res.json();
-      alert('Failed to save file: ' + (err.detail || JSON.stringify(err)));
+      window.appAlert('Failed to save file: ' + (err.detail || JSON.stringify(err)), "Error");
     }
   } catch (err) {
     console.error(err);
-    alert('Failed to save file: ' + err.message);
+    window.appAlert('Failed to save file: ' + err.message, "Error");
   }
 }
 
-async function createNewFile() {
+window.createNewFile = async function() {
   if (!projectOpen) {
     notify('Open a project first', true);
     return;
   }
-  const filename = prompt('Enter new file path (e.g. src/utils.py):');
+  const filename = await window.appPrompt('Enter new file path (e.g. src/utils.py):', "New File");
   if (!filename || !filename.trim()) return;
   
   const encodedName = filename.trim().split('/').map(encodeURIComponent).join('/');
@@ -276,11 +276,11 @@ async function createNewFile() {
       startFileEdit(filename.trim());
     } else {
       const err = await res.json();
-      alert('Failed to create file: ' + (err.detail || JSON.stringify(err)));
+      window.appAlert('Failed to create file: ' + (err.detail || JSON.stringify(err)), "Error");
     }
   } catch (err) {
     console.error(err);
-    alert('Failed to create file: ' + err.message);
+    window.appAlert('Failed to create file: ' + err.message, "Error");
   }
 }
 

@@ -99,3 +99,78 @@ setInterval(() => {
       .catch(() => {});
   }
 }, 20000);
+
+// ── Custom Dialogs ─────────────────────────────────────────────────────────────
+window.appDialog = function(options) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('customDialogOverlay');
+    const titleEl = document.getElementById('customDialogTitle');
+    const msgEl = document.getElementById('customDialogMessage');
+    const inputWrapper = document.getElementById('customDialogInputWrapper');
+    const inputEl = document.getElementById('customDialogInput');
+    const cancelBtn = document.getElementById('customDialogCancelBtn');
+    const confirmBtn = document.getElementById('customDialogConfirmBtn');
+
+    titleEl.textContent = options.title || 'Notification';
+    msgEl.textContent = options.message || '';
+    
+    // Configure buttons
+    cancelBtn.style.display = options.showCancel ? 'inline-flex' : 'none';
+    confirmBtn.textContent = options.confirmText || 'OK';
+    if (options.isDanger) {
+      confirmBtn.className = 'btn btn-danger';
+    } else {
+      confirmBtn.className = 'btn btn-primary';
+    }
+
+    // Configure Input
+    if (options.isPrompt) {
+      inputWrapper.style.display = 'block';
+      inputEl.value = options.defaultValue || '';
+    } else {
+      inputWrapper.style.display = 'none';
+      inputEl.value = '';
+    }
+
+    overlay.style.display = 'flex';
+    if (options.isPrompt) inputEl.focus();
+
+    const cleanup = () => {
+      overlay.style.display = 'none';
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+      inputEl.onkeydown = null;
+    };
+
+    cancelBtn.onclick = () => {
+      cleanup();
+      resolve(options.isPrompt ? null : false);
+    };
+
+    const submit = () => {
+      cleanup();
+      resolve(options.isPrompt ? inputEl.value : true);
+    };
+
+    confirmBtn.onclick = submit;
+    
+    if (options.isPrompt) {
+      inputEl.onkeydown = (e) => {
+        if (e.key === 'Enter') submit();
+        if (e.key === 'Escape') cancelBtn.onclick();
+      };
+    }
+  });
+};
+
+window.appAlert = function(message, title = 'Notification') {
+  return window.appDialog({ title, message, showCancel: false });
+};
+
+window.appConfirm = function(message, title = 'Confirm', confirmText = 'Confirm', isDanger = false) {
+  return window.appDialog({ title, message, showCancel: true, confirmText, isDanger });
+};
+
+window.appPrompt = function(message, title = 'Input Required', defaultValue = '') {
+  return window.appDialog({ title, message, showCancel: true, isPrompt: true, defaultValue, confirmText: 'Submit' });
+};

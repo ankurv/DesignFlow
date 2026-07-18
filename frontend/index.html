@@ -38,8 +38,8 @@
 </header>
 
 <div class="project-strip" style="padding: 10px 24px;">
-  <span class="project-label" style="font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;">Current Project:</span>
-  <span class="project-state" id="projectState" style="font-size: 13px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
+  <span class="project-label" style="font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em;">Current Project:</span>
+  <span class="project-state" id="projectState" style="font-size: 14px; margin-right: 16px; margin-left: 8px; font-weight:700; color:var(--text); letter-spacing: -0.2px;">No project open</span>
   <button class="btn btn-secondary btn-sm" id="openProjectBtn" onclick="openProject()" style="border-radius: 20px;">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:2px"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
     Switch Project
@@ -126,17 +126,7 @@
   <!-- ── Live Feed ── -->
   <div class="panel" id="panel-chat">
     <div class="chat-layout">
-      <!-- Sidebar is hidden per user request, agents and inline tracker removed from here -->
-      <div class="chat-sidebar" style="display:none;">
-        <div class="sidebar-section" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:20px;">
-          <div style="display:none; flex-direction:column;">
-            <div class="sidebar-label">Agents</div>
-            <div id="agentList"></div>
-          </div>
-          
-          <div id="inlineTaskTracker" style="display:none;"></div>
-        </div>
-      </div>
+      <!-- Sidebar removed -->
       <div class="feed-area cockpit-shell">
         <div id="cockpitEmptyState" class="cockpit-empty-state">
           <div class="cockpit-empty-badge">DesignFlow</div>
@@ -387,7 +377,7 @@
 
 <!-- Login Modal -->
 <div id="loginModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
-  <div style="background:var(--surface); padding:40px; border-radius:12px; border:1px solid var(--border); width:400px; display:flex; flex-direction:column; gap:20px;">
+  <div style="background:var(--bg2); padding:40px; border-radius:12px; border:1px solid var(--border); width:400px; display:flex; flex-direction:column; gap:20px;">
     <h2 style="margin:0; text-align:center; color:var(--text);">Login to DesignFlow</h2>
     <div>
       <label style="color:var(--muted); font-size:12px; margin-bottom:5px; display:block;">Username</label>
@@ -450,6 +440,22 @@
       <button class="btn btn-secondary" onclick="document.getElementById('agentTestModal').style.display='none'">Close</button>
     </div>
     <div id="agentTestModalContent" style="max-height: 400px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 13px; color: var(--text); white-space: pre-wrap;">
+    </div>
+  </div>
+</div>
+
+<div id="customDialogOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.72); z-index:10000; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
+  <div style="background:var(--bg2); width:min(480px, calc(100vw - 32px)); padding:28px; border-radius:16px; border:1px solid var(--border); display:flex; flex-direction:column; gap:16px; box-shadow:0 24px 60px rgba(0,0,0,0.35);">
+    <div>
+      <h2 id="customDialogTitle" style="margin:0; color:var(--text); font-family:var(--heading-font); font-size:18px;"></h2>
+      <p id="customDialogMessage" style="margin:12px 0 0; color:var(--text-muted); line-height:1.6; font-size:14px; white-space:pre-wrap;"></p>
+    </div>
+    <div id="customDialogInputWrapper" style="display:none;">
+      <input type="text" id="customDialogInput" class="input-modern" autocomplete="off" spellcheck="false" style="width:100%; margin-top:4px;">
+    </div>
+    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
+      <button id="customDialogCancelBtn" class="btn btn-secondary">Cancel</button>
+      <button id="customDialogConfirmBtn" class="btn btn-primary">Confirm</button>
     </div>
   </div>
 </div>

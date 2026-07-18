@@ -1191,14 +1191,14 @@ async function recoverProvider(action, sourceButton = null) {
 
 async function resetRun() {
   if (runStatus === 'running') return;
-  if (!confirm("Are you sure you want to reset? This will clear the conversational history (but keep your project files intact).")) return;
+  if (!(await window.appConfirm("Are you sure you want to reset? This will clear the conversational history (but keep your project files intact).", "Reset Run", "Reset", true))) return;
   try {
     await fetch('/run/reset', { method: 'POST' });
     document.getElementById('feed').innerHTML = '';
     notify('Run state reset.');
   } catch (err) {
     console.error(err);
-    alert('Failed to reset run.');
+    window.appAlert('Failed to reset run.', 'Error');
   }
 }
 
@@ -1593,10 +1593,10 @@ async function exportContext() {
     }
 
     const data = await res.json();
-    alert(`Planning baseline successfully exported directly to your project folder!\n\nPlan: ${data.plan_file}\nRules: ${data.agents_file}`);
+    window.appAlert(`Planning baseline successfully exported directly to your project folder!\n\nPlan: ${data.plan_file}\nRules: ${data.agents_file}`, 'Success');
     await updateWorkspaceInfo();
   } catch (e) {
-    alert('Failed to export plan: ' + e.message);
+    window.appAlert('Failed to export plan: ' + e.message, 'Error');
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -1664,7 +1664,7 @@ async function loadUsers() {
 
 async function changeMyPassword() {
     const np = document.getElementById('newPassword').value;
-    if (!np) return alert("Enter a new password");
+    if (!np) { await window.appAlert("Enter a new password", "Error"); return; }
     
     const res = await fetch('/users/password', {
         method: 'PUT',
@@ -1672,30 +1672,30 @@ async function changeMyPassword() {
         body: JSON.stringify({username: currentUser.username, new_password: np})
     });
     if (res.ok) {
-        alert("Password updated!");
+        window.appAlert("Password updated!", "Success");
         document.getElementById('newPassword').value = '';
     } else {
-        alert("Failed to update password");
+        window.appAlert("Failed to update password", "Error");
     }
 }
 
 async function resetUserPassword(username) {
-    const np = prompt(`Enter new password for ${username}:`);
+    const np = await window.appPrompt(`Enter new password for ${username}:`, "Reset Password");
     if (!np) return;
     const res = await fetch('/users/password', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({username: username, new_password: np})
     });
-    if (res.ok) alert(`Password for ${username} updated!`);
-    else alert("Failed to reset password");
+    if (res.ok) window.appAlert(`Password for ${username} updated!`, "Success");
+    else window.appAlert("Failed to reset password", "Error");
 }
 
 async function addUser() {
     const u = document.getElementById('newUsername').value;
     const p = document.getElementById('newUserPassword').value;
     
-    if (!u || !p) return alert("Fill in all fields");
+    if (!u || !p) { await window.appAlert("Fill in all fields", "Error"); return; }
     
     const res = await fetch('/users', {
         method: 'POST',
@@ -1709,7 +1709,7 @@ async function addUser() {
         loadUsers();
     } else {
         const errData = await res.json().catch(()=>({}));
-        alert("Failed to add user: " + (errData.detail || "Unknown error"));
+        window.appAlert("Failed to add user: " + (errData.detail || "Unknown error"), "Error");
     }
 }
 
@@ -1723,7 +1723,7 @@ async function deleteUser(username) {
         loadUsers();
     } else {
         const err = await res.json().catch(()=>({}));
-        alert("Failed to delete user: " + (err.detail || "Unknown error"));
+        window.appAlert("Failed to delete user: " + (err.detail || "Unknown error"), "Error");
     }
 }
 
@@ -1771,7 +1771,7 @@ async function updateTokens() {
 }
 
 async function shutdownServer() {
-  if (confirm("Are you sure you want to shut down the server? You will need to restart it manually from the terminal.")) {
+  if (await window.appConfirm("Are you sure you want to shut down the server? You will need to restart it manually from the terminal.", "Shutdown Server", "Shutdown", true)) {
     try {
       const res = await fetch('/admin/shutdown', { method: 'POST' });
       if (res.ok) {
@@ -1783,7 +1783,7 @@ async function shutdownServer() {
         }
       } else {
         const text = await res.text();
-        alert("Failed to shut down: " + text);
+        window.appAlert("Failed to shut down: " + text, "Error");
       }
     } catch (e) {
       // The fetch interceptor already handles network errors and shows the login screen

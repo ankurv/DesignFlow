@@ -411,7 +411,7 @@ window.refreshAgentHealth = async function(uid, idx) {
 };
 
 async function deleteAgent(agentId) {
-  if (!confirm("Are you sure you want to delete this agent?")) return;
+  if (!(await window.appConfirm("Are you sure you want to delete this agent?", "Delete Agent", "Delete", true))) return;
   const url = `/agents/${agentId}`;
   try {
     const response = await fetch(url, { method: 'DELETE' });
@@ -515,7 +515,7 @@ async function loadMCPAccessToken() {
 
 async function generateMCPAccessToken() {
   const button = document.getElementById('mcpGenerateTokenButton');
-  if (button?.dataset.configured === 'true' && !confirm('Regenerate the token? Existing clients using the UI-generated token will immediately lose access.')) return;
+  if (button?.dataset.configured === 'true' && !(await window.appConfirm('Regenerate the token? Existing clients using the UI-generated token will immediately lose access.', 'Regenerate Token', 'Regenerate', true))) return;
   const response = await fetch('/mcp/access-token', { method: 'POST' });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -539,7 +539,7 @@ async function copyMCPAccessToken() {
 }
 
 async function revokeMCPAccessToken() {
-  if (!confirm('Revoke the UI-generated MCP token? Connected clients using it will immediately lose access.')) return;
+  if (!(await window.appConfirm('Revoke the UI-generated MCP token? Connected clients using it will immediately lose access.', 'Revoke Token', 'Revoke', true))) return;
   const response = await fetch('/mcp/access-token', { method: 'DELETE' });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -620,7 +620,7 @@ async function addMCPServer() {
 }
 
 async function deleteMCPServer(id) {
-  if (!confirm('Delete this MCP server?')) return;
+  if (!(await window.appConfirm('Delete this MCP server?', 'Delete Server', 'Delete', true))) return;
   const res = await fetch('/mcp/servers/' + id, { method: 'DELETE' });
   if (res.ok) {
     notify('MCP server deleted');
