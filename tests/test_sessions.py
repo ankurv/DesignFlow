@@ -530,6 +530,24 @@ VALID_DECISIONS = """## Accepted Decisions
 
 
 class CrossCuttingDesignTests(unittest.TestCase):
+    def test_product_goal_is_recovered_and_artifacts_must_remain_aligned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.ensure()
+            workspace.write("design", "# Design\n\n**Product goal:** Build a WhatsApp-like encrypted messaging product.\n")
+            workspace.write("plan", "# Plan\n")
+            workspace.write("decisions", "# Decisions\n")
+
+            goal = workspace.product_goal()
+
+            self.assertEqual(goal, "Build a WhatsApp-like encrypted messaging product.")
+            self.assertTrue(workspace.validate_goal_alignment(goal))
+            workspace.write(
+                "design",
+                "# Design\n\nA WhatsApp-like messaging architecture with encrypted conversations.\n",
+            )
+            self.assertEqual(workspace.validate_goal_alignment(goal), [])
+
     def test_plural_diagram_request_requires_multiple_views(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
@@ -2006,6 +2024,26 @@ Decision 2: Choose retention.
             self.assertIn("api_designer", names)
             self.assertNotIn("product_manager", names)
 
+    def test_debate_reserves_a_turn_for_opposing_architect(self):
+        agents = [
+            StatefulFake(AgentConfig(name=name, kind="openai", model="gpt-4o"))
+            for name in (
+                "architect_alpha", "architect_beta", "product_manager",
+                "api_designer", "ui_designer", "security_auditor",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief("Design a WhatsApp-like messaging product.")
+            orchestrator = Orchestrator(agents, workspace, require_approval=False)
+            orchestrator.idea = workspace.brief()
+            orchestrator._coordinator_name = "architect_alpha"
+
+            selected = orchestrator._select_peer_review_agents()
+
+            self.assertEqual(selected[0].name, "architect_beta")
+            self.assertEqual(len(selected), 3)
+
     def test_strong_model_is_reserved_for_synthesis(self):
         cheap_manager = StatefulFake(AgentConfig(
             name="manager", kind="gemini", model="gemini-2.5-flash",
@@ -2340,7 +2378,7 @@ Decision 2: Choose retention.
     def test_only_empty_or_continuation_prompts_resume_previous_workflow(self):
         from backend.server import is_continuation_prompt
 
-        for prompt in ("", "continue", "Please resume the design", "keep going", "carry on with the review"):
+        for prompt in ("", "continue", "retry", "retry the last run", "Please resume the design", "keep going", "carry on with the review"):
             self.assertTrue(is_continuation_prompt(prompt), prompt)
         for prompt in ("Design a billing API", "Add SSO", "Replace Postgres with DynamoDB"):
             self.assertFalse(is_continuation_prompt(prompt), prompt)
@@ -3167,14 +3205,14 @@ class FrontendPrivacyTests(unittest.TestCase):
 class DeterministicRoutingTests(unittest.TestCase):
     def test_typed_contract_is_authoritative_for_routing_and_outputs(self):
         artifact = classify_run_contract(
-            "Refine DESIGN.md and generate more visual diagrams", "auto"
+            "Update DESIGN.md directly with more visual diagrams", "auto"
         )
         self.assertEqual(artifact.kind, RunKind.ARTIFACT_EDIT)
         self.assertEqual(artifact.target_artifacts, ("DESIGN.md",))
         self.assertTrue(artifact.requires_diagram_delta)
         self.assertEqual(classify_run_contract("Why Kafka?", "auto").kind, RunKind.CHAT)
         self.assertEqual(classify_run_contract("refine the design", "auto").kind,
-                         RunKind.INTENT_ROUTING)
+                         RunKind.PLANNING_WORKFLOW)
         self.assertEqual(classify_run_contract("Make this substantially better", "auto").kind,
                          RunKind.INTENT_ROUTING)
         self.assertEqual(classify_run_contract("How should we refine the design?", "auto").kind,
@@ -3256,10 +3294,16 @@ class DeterministicRoutingTests(unittest.TestCase):
     def test_targeted_artifact_edits_use_one_agent(self):
         prompt = "Update DESIGN.md to include a Mermaid architecture diagram."
         self.assertTrue(Orchestrator._is_targeted_artifact_update(prompt))
-        self.assertTrue(Orchestrator._is_targeted_artifact_update(
+        self.assertFalse(Orchestrator._is_targeted_artifact_update(
             "refine design and generate more visual diagrams of the design"
         ))
         self.assertFalse(Orchestrator._should_run_team_workflow(prompt, "auto"))
+        self.assertTrue(Orchestrator._should_run_team_workflow(
+            "refine design and generate more visual diagrams of the design", "auto"
+        ))
+        self.assertFalse(Orchestrator._should_run_team_workflow(
+            "Update DESIGN.md directly as a bounded document edit; use one agent and do not start a debate.", "auto"
+        ))
         self.assertTrue(Orchestrator._should_run_team_workflow(
             "Debate the options, then update DESIGN.md", "auto"
         ))
@@ -3276,7 +3320,10 @@ class DeterministicRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "produced no applicable"):
                 asyncio.run(orchestrator.run(
                     "Design a trading platform",
-                    task="refine design and generate more visual diagrams of the design",
+                    task=(
+                        "Update DESIGN.md directly with a Mermaid diagram as a bounded document edit; "
+                        "use one agent and do not start a debate."
+                    ),
                 ))
 
     def test_done_message_distinguishes_artifact_chat_and_planning_completion(self):

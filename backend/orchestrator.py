@@ -688,10 +688,22 @@ class Orchestrator:
                 domains.append("product")
             scored.append((score, domains[0] if domains else agent.name.lower(), agent))
 
-        selected: list[AgentBase] = []
-        used_domains: set[str] = set()
+        # A planning "debate" must contain an adversarial architecture turn.
+        # Domain diversity used to let product/API/UI reviewers consume all
+        # three slots, silently excluding Architect Beta even when Architect
+        # Alpha synthesized the draft. Reserve the first slot for an available
+        # opposing architect so the product's core debate promise is real.
+        opposing_architect = next(
+            (
+                agent for agent in sorted(candidates, key=lambda item: item.name)
+                if agent.name.lower().startswith("architect_")
+            ),
+            None,
+        )
+        selected: list[AgentBase] = [opposing_architect] if opposing_architect else []
+        used_domains: set[str] = {"architecture"} if opposing_architect else set()
         for score, domain, agent in sorted(scored, key=lambda item: (-item[0], item[2].name)):
-            if score <= 0 or domain in used_domains:
+            if agent in selected or score <= 0 or domain in used_domains:
                 continue
             selected.append(agent)
             used_domains.add(domain)
@@ -1960,6 +1972,7 @@ class Orchestrator:
         if not self._quality_gate_passed(quality_gate):
             errors.append("Coordinator QUALITY_GATE must start with PASS before completion.")
         errors.extend(self.ws.validate_planning_artifacts())
+        errors.extend(self.ws.validate_goal_alignment(self.idea))
         specialists = [agent for agent in self.agents if agent.name != self._coordinator_name]
         required_specialists = min(3, len(specialists))
         if len(self._consulted_specialists) < required_specialists:
@@ -1967,6 +1980,13 @@ class Orchestrator:
             errors.append(
                 f"Consult {missing} more distinct relevant specialist(s) before completion "
                 f"({len(self._consulted_specialists)}/{required_specialists} consulted)."
+            )
+        opposing_architects = {
+            agent.name for agent in specialists if agent.name.lower().startswith("architect_")
+        }
+        if opposing_architects and not opposing_architects.intersection(self._consulted_specialists):
+            errors.append(
+                "An opposing architect must complete an adversarial review before a planning debate can finish."
             )
         if self.require_approval and required_specialists >= 2 and self._user_checkpoint_count < 1:
             errors.append(

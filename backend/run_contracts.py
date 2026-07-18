@@ -87,9 +87,18 @@ def classify_run_contract(text: str, mode: str = "auto", local_intent: str = "")
     if local_intent:
         return RunContract(RunKind.STATUS_QUERY, request, local_intent=local_intent)
 
-    explicit_team = mode in {"debate", "all"} or bool(re.search(
-        r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized,
+    bounded_direct_edit = bool(re.search(
+        r"\b(?:one agent|single agent|bounded (?:document )?edit|do not (?:start a )?debate|without (?:a )?debate|update directly)\b",
+        normalized,
     ))
+    substantive_design_refinement = bool(re.search(
+        r"\b(?:refine|revise|improve|challenge)\b.*\b(?:design|architecture|diagram)s?\b",
+        normalized,
+    )) and not bounded_direct_edit and not normalized.endswith("?")
+    explicit_team_request = bool(re.search(
+        r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized,
+    )) and not bounded_direct_edit
+    explicit_team = mode in {"debate", "all"} or substantive_design_refinement or explicit_team_request
     targets = _artifact_targets(normalized)
     edit_verb = bool(re.search(
         r"\b(?:add|append|include|insert|update|edit|fix|refresh|refine|revise|improve|generate|create)\b",

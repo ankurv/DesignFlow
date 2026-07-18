@@ -343,9 +343,12 @@ function renderStructuredCheckpoint(checkpoint) {
 window.openDecisionModal = function() {
   const modal = document.getElementById('decisionModal');
   if (!modal) return;
+  const wasOpen = modal.style.display !== 'none';
   modal.style.display = 'grid';
   document.body.classList.add('decision-modal-open');
-  setTimeout(() => modal.querySelector('input[name="decisionChoice"], #decisionCustomInput')?.focus(), 0);
+  if (!wasOpen) {
+    setTimeout(() => modal.querySelector('input[name="decisionChoice"], #decisionCustomInput')?.focus(), 0);
+  }
 };
 
 window.closeDecisionModal = function() {
@@ -363,11 +366,20 @@ function renderInteractiveQuestionPanel(content, checkpoint = null) {
   if (!hasQuestion) {
     pendingPane.style.display = 'none';
     delete bodyEl.dataset.checkpointId;
+    delete bodyEl.dataset.renderKey;
     return false;
   }
 
   pendingPane.style.display = 'flex';
+  const renderKey = checkpoint
+    ? `checkpoint:${JSON.stringify(checkpoint)}`
+    : `legacy:${content}`;
+  if (bodyEl.dataset.renderKey === renderKey && bodyEl.firstElementChild) {
+    openDecisionModal();
+    return true;
+  }
   bodyEl.innerHTML = checkpoint ? renderStructuredCheckpoint(checkpoint) : renderQuestionBody(content);
+  bodyEl.dataset.renderKey = renderKey;
   if (checkpoint?.id) bodyEl.dataset.checkpointId = checkpoint.id;
   else delete bodyEl.dataset.checkpointId;
   const customInput = document.getElementById('decisionCustomInput');
