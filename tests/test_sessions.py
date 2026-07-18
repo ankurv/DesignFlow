@@ -1941,6 +1941,56 @@ Decision 2: Choose retention.
             self.assertEqual(store.planning_state_counts(), {})
             store.close()
 
+    def test_sqlite_multi_section_merge_preserves_omitted_sections(self):
+        from backend.storage import ProjectStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = ProjectStore(Path(tmpdir))
+            store.replace_planning_document(
+                "plan",
+                "# Plan\n\n"
+                "## Requirements\n\nOriginal requirements.\n\n"
+                "## Risks\n\nOriginal risks.\n\n"
+                "## Acceptance Criteria\n\nOriginal acceptance.\n\n"
+                "## Implementation Phases\n\n- [ ] Original task.\n",
+                "coordinator",
+            )
+
+            store.merge_planning_document(
+                "plan",
+                "## Requirements\n\nUpdated requirements.\n\n"
+                "## Risks\n\nUpdated risks.\n\n"
+                "## Acceptance Criteria\n\nUpdated acceptance.",
+                "coordinator",
+            )
+
+            rendered = store.planning_document("plan")
+            self.assertIn("Updated requirements.", rendered)
+            self.assertIn("Updated risks.", rendered)
+            self.assertIn("Updated acceptance.", rendered)
+            self.assertIn("## Implementation Phases", rendered)
+            self.assertIn("- [ ] Original task.", rendered)
+            self.assertEqual(store.planning_state_counts()["plan"], 4)
+            self.assertFalse(any(
+                mutation["operation"] == "prune_stale_section"
+                for mutation in store.planning_mutations(20)
+            ))
+            store.close()
+
+    def test_sensitive_logging_validator_accepts_redaction_invariant(self):
+        self.assertEqual(
+            Workspace.unsafe_engineering_recommendations(
+                "Log only redacted authorization header values for request diagnostics."
+            ),
+            [],
+        )
+        self.assertIn(
+            "sensitive logging",
+            Workspace.unsafe_engineering_recommendations(
+                "Log authorization header values to simplify incident debugging."
+            ),
+        )
+
     def test_orchestrator_uses_sqlite_for_planning_deltas_and_context(self):
         from backend.storage import ProjectStore
 

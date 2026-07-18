@@ -1025,8 +1025,22 @@ class Workspace:
         found = []
         for label, pattern in patterns:
             for match in re.finditer(pattern, text or "", re.IGNORECASE | re.DOTALL):
-                prefix = text[max(0, match.start() - 35):match.start()].lower()
-                if re.search(r"(?:never|must not|do not|don't|avoid|prohibit)\s*$", prefix):
+                prefix = text[max(0, match.start() - 80):match.start()].lower()
+                matched_text = match.group(0).lower()
+                # Recommendations to redact or exclude sensitive fields are the
+                # applicable safety invariant, not recommendations to log them.
+                # Keep this bounded to the same clause so unrelated prose cannot
+                # suppress a genuinely unsafe recommendation.
+                safe_clause = re.search(
+                    r"(?:never|must not|do not|don't|avoid|prohibit|redact|mask|exclude|omit)"
+                    r"[^.!?\n;]{0,55}$",
+                    prefix,
+                ) or re.search(
+                    r"\b(?:redacted|masked|excluded|omitted)\b[^.!?\n;]{0,45}"
+                    r"\b(?:password|api key|access token|authorization header|session cookie)\b",
+                    matched_text,
+                )
+                if safe_clause:
                     continue
                 found.append(label)
                 break

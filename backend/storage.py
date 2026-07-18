@@ -310,10 +310,8 @@ class ProjectStore:
                 "SELECT COALESCE(MAX(ordinal),-1)+1 n FROM planning_sections WHERE run_id=? AND artifact=?",
                 (run_id, artifact),
             ).fetchone()["n"])
-            incoming_keys = set()
             for heading, body in sections:
                 key = self._heading_key(heading)
-                incoming_keys.add(key)
                 current = self._db.execute(
                     "SELECT ordinal,version FROM planning_sections WHERE run_id=? AND artifact=? AND heading_key=?",
                     (run_id, artifact, key),
@@ -336,28 +334,6 @@ class ProjectStore:
                         "heading": heading, "version": section_version,
                     })),
                 )
-            # When the incoming update contains 3+ sections it looks like a
-            # near-complete document rewrite; prune stale sections that were
-            # not re-emitted to prevent unbounded accumulation.
-            if len(incoming_keys) >= 3:
-                stale = self._db.execute(
-                    "SELECT heading_key FROM planning_sections "
-                    "WHERE run_id=? AND artifact=? AND heading_key NOT IN ({})".format(
-                        ",".join("?" for _ in incoming_keys)
-                    ),
-                    (run_id, artifact, *sorted(incoming_keys)),
-                ).fetchall()
-                for row in stale:
-                    stale_key = str(row["heading_key"])
-                    self._db.execute(
-                        "DELETE FROM planning_sections WHERE run_id=? AND artifact=? AND heading_key=?",
-                        (run_id, artifact, stale_key),
-                    )
-                    self._db.execute(
-                        "INSERT INTO planning_mutations(run_id,artifact,operation,heading_key,actor,created_at,payload_json) "
-                        "VALUES(?,?,?,?,?,?,?)",
-                        (run_id, artifact, "prune_stale_section", stale_key, actor, now, "{}"),
-                    )
         return True
 
     def planning_document(self, artifact: str) -> str:
