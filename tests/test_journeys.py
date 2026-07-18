@@ -2,6 +2,7 @@ import unittest
 import json
 import sqlite3
 import os
+os.environ["DESIGNFLOW_TEST"] = "1"
 import shutil
 import tempfile
 from pathlib import Path
@@ -89,6 +90,29 @@ class StabilizationJourneyTests(unittest.TestCase):
         # Resolve it
         state.store.resolve_recovery_action(action_id, "wait_and_retry")
         self.assertIsNone(state.store.active_recovery_action(state.run_id))
+
+    def test_retry_cannot_become_a_new_product_and_irrelevant_stage_cannot_promote(self):
+        self.assertEqual(self.client.post("/project/open", json={"path": self.project_path}).status_code, 200)
+        canonical = str(Path(self.project_path).resolve())
+        state = backend.server.app_states[canonical]
+        goal = "Build a WhatsApp-like encrypted messaging product."
+        state.workspace.write_brief(goal)
+        state.workspace.write("design", "# Design\n\nCanonical WhatsApp messaging design.\n")
+        state.workspace.write("plan", "# Plan\n\nImplement encrypted messaging.\n")
+        state.workspace.write("decisions", "# Decisions\n\nUse end-to-end encryption.\n")
+
+        retry = self.client.post("/run/start", json={"idea": "retry", "mode": "auto"})
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(state.workspace.product_goal(), goal)
+        self.assertFalse(any(run["idea"] == "retry" for run in state.store.recent_runs()))
+
+        staged = state.workspace.staged_for_run("irrelevant-output")
+        staged.freeze_planning_evidence(goal)
+        staged.write("design", "# Design\n\n```mermaid\nflowchart LR\nRequest --> Refine\n```\n")
+        staged.write("plan", "# Plan\n\nUpdate documents.\n")
+        staged.write("decisions", "# Decisions\n\nUse the refinement loop.\n")
+        self.assertTrue(staged.validate_goal_alignment(goal))
+        self.assertIn("Canonical WhatsApp", state.workspace.read("design"))
 
 if __name__ == '__main__':
     unittest.main()

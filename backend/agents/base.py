@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -202,7 +203,7 @@ class AgentBase(ABC):
         with self._attempt_lock:
             return self._active_attempt_token == token
 
-    def send(self, message: str, system_override: Optional[str] = None, ephemeral_context: Optional[str] = None, mcp_tools: list[dict] = None, tool_handler: Callable = None, attempt_token: str | None = None) -> str:
+    def send(self, message: str, system_override: Optional[str] = None, ephemeral_context: Optional[str] = None, mcp_tools: list[dict] = None, tool_handler: Callable = None, attempt_token: str | None = None, context_only: bool = False) -> str:
         """Sends a message to the model and updates the internal usage metrics."""
         if self._attempt_is_current(attempt_token):
             self.status = AgentStatus.THINKING
@@ -233,7 +234,14 @@ class AgentBase(ABC):
                 print(f"TOOLS: {len(mcp_tools)} provided")
 
         try:
-            reply, usage = self._raw_send(raw_msgs, system, mcp_tools=mcp_tools, tool_handler=tool_handler)
+            send_kwargs = {"mcp_tools": mcp_tools, "tool_handler": tool_handler}
+            parameters = inspect.signature(self._raw_send).parameters.values()
+            if any(
+                parameter.name == "context_only" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                send_kwargs["context_only"] = context_only
+            reply, usage = self._raw_send(raw_msgs, system, **send_kwargs)
             if log_prompts:
                 print(f"\n{'='*20} LLM RESPONSE ({self.name}) {'='*20}")
                 print(f"{reply}\n{'='*55}\n")

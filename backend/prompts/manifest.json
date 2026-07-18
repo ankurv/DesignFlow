@@ -7,7 +7,7 @@
     "intent_router_task": {"file":"intent_router_task.md","version":"1.0.0","placeholders":["request","artifact_state","validation_errors"],"required_markers":["planning_workflow","artifact_edit","chat"]},
     "drafting": {"file":"drafting.md","version":"1.0.0","placeholders":["idea","steering","task","capabilities"],"required_markers":["## DESIGN_UPDATE","## PLAN_UPDATE","## DECISIONS_UPDATE","Requirement Traceability"]},
     "peer_review": {"file":"peer_review.md","version":"1.0.0","placeholders":["role","steering"],"required_markers":["## DESIGN_APPEND","## PLAN_APPEND","## DECISIONS_APPEND"]},
-    "refinement": {"file":"refinement.md","version":"1.1.0","placeholders":["steering","capabilities","quality_feedback"],"required_markers":["## DESIGN_UPDATE","## PLAN_UPDATE","## DECISIONS_UPDATE","## DECISION_CHECKPOINT"]},
+    "refinement": {"file":"refinement.md","version":"1.2.0","placeholders":["steering","capabilities","quality_feedback"],"required_markers":["## DESIGN_UPDATE","## PLAN_UPDATE","## DECISIONS_UPDATE","## DECISION_CHECKPOINT"]},
     "artifact_edit": {"file":"artifact_edit.md","version":"1.0.0","placeholders":["request","output_instruction","context"],"required_markers":["Targeted Artifact Edit"]},
     "chat": {"file":"chat.md","version":"1.0.0","placeholders":["request","context"],"required_markers":["Conversational Turn"]},
     "agents_export": {"file":"agents_export.md","version":"2.0.0","placeholders":["engineering_invariants","project_name","project_plan"],"required_markers":["# Agent Guidelines for this Project","Server-owned rules"]}

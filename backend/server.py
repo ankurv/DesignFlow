@@ -27,7 +27,7 @@ from .agents.providers import AGENT_KINDS, create_agent, discover_models
 from .orchestrator import Event, EventKind, Orchestrator
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
-from .errors import DesignFlowError, classify_provider_error
+from .errors import DesignFlowError, PlanningQualityError, classify_provider_error
 from .debug_observer import DebugObserver
 from .designflow_mcp import designflow_mcp_app
 from .mcp_access import mcp_access_tokens
@@ -305,7 +305,11 @@ async def release_project_binding(session_id: str) -> None:
         state = app_states.get(project_path)
         # Browser presence controls observation, not execution. Keep an active
         # project runtime alive when its last tab disappears.
-        if state and state.status in {"running", "paused", "needs_attention"} and state.run_task and not state.run_task.done():
+        if state and state.status in {"running", "paused", "needs_attention"}:
+            # Browser/MCP leases control observation only. An active workflow
+            # owns its project runtime even if the client disappears or the
+            # task reference is temporarily reconciling around a provider
+            # thread. Explicit stop/reset or terminal completion releases it.
             return
         state = app_states.pop(project_path, None)
     if not state:
@@ -644,6 +648,19 @@ def runtime_diagnostic(state: AppState, project_path: str = "") -> dict:
     }
 
 
+def public_agent_config(config: dict) -> dict:
+    """Return UI-safe agent metadata without disclosing stored credentials."""
+    public = dict(config)
+    has_api_key = bool(public.get("api_key"))
+    public["api_key"] = "****" if has_api_key else ""
+    public["has_api_key"] = has_api_key
+    return public
+
+
+def public_agent_configs(configs: list[dict]) -> list[dict]:
+    return [public_agent_config(config) for config in configs]
+
+
 @app.get("/project")
 def get_project(state: AppState = Depends(get_state)):
     return project_payload(state)
@@ -655,7 +672,7 @@ async def open_project(body: ProjectOpenIn, session: Session = Depends(get_sessi
         state = await bind_project(session, body.path)
     except (OSError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, **project_payload(state), "agents": state.configs}
+    return {"ok": True, **project_payload(state), "agents": public_agent_configs(state.configs)}
 
 
 @app.put("/project/brief")
@@ -750,7 +767,7 @@ def live_agents_all_sessions(agent_id: str):
 @app.get("/agents")
 def list_agents(state: AppState = Depends(get_state)):
     return {
-        "agents": state.configs,
+        "agents": public_agent_configs(state.configs),
         "kinds": list(AGENT_KINDS.keys())
     }
 
@@ -781,7 +798,7 @@ def add_agent(body: AgentConfigIn, state: AppState = Depends(get_state)):
     config["id"] = str(uuid.uuid4())[:8]
     state.configs.append(config)
     state.persist_agents()
-    return {"ok": True, "agent": config}
+    return {"ok": True, "agent": public_agent_config(config)}
 
 
 def _reassign_agent_if_paused(s: AppState, active, agent_id: str):
@@ -844,7 +861,7 @@ def update_agent(agent_id: str, body: AgentConfigIn, state: AppState = Depends(g
                         raise HTTPException(400, f"Agent configuration is invalid: {exc}") from exc
             state.configs[index] = updated
             state.persist_agents()
-            return {"ok": True, "agent": updated}
+            return {"ok": True, "agent": public_agent_config(updated)}
     raise HTTPException(404, "Agent not found")
 
 
@@ -899,7 +916,7 @@ def is_continuation_prompt(prompt: str) -> bool:
     if not normalized:
         return True
     return bool(re.match(
-        r"^(?:please\s+)?(?:continue|resume|proceed|carry on|keep going|pick up where (?:we|you) left off)\b",
+        r"^(?:please\s+)?(?:continue|resume|retry|retry the last (?:run|turn)|proceed|carry on|keep going|pick up where (?:we|you) left off)\b",
         normalized,
     ))
 
@@ -924,6 +941,10 @@ async def start_run(
                 raise HTTPException(400, str(exc)) from exc
     if not state.workspace:
         raise HTTPException(400, "Open a project folder first")
+    continuation_requested = is_continuation_prompt(body.idea)
+    saved_state = state.store.load_run_state() if state.store and continuation_requested else None
+    if continuation_requested and body.idea.strip() and not saved_state:
+        raise HTTPException(409, "There is no interrupted design workflow to resume or retry.")
     if not state.merged_configs:
         raise HTTPException(400, "No agents configured")
     names = [config["name"].strip() for config in state.merged_configs]
@@ -931,10 +952,9 @@ async def start_run(
         raise HTTPException(400, "Every agent needs a unique non-empty name")
 
     brief = state.workspace.brief().strip()
-    continuation_requested = is_continuation_prompt(body.idea)
-    saved_state = state.store.load_run_state() if state.store and continuation_requested else None
+    persisted_goal = state.workspace.product_goal().strip()
     saved_goal = str((saved_state or {}).get("idea", "")).strip()
-    product_goal = saved_goal or brief or body.idea.strip()
+    product_goal = saved_goal or persisted_goal or body.idea.strip()
     resumes_saved_run = bool(
         saved_goal
         and saved_goal == product_goal
@@ -943,7 +963,7 @@ async def start_run(
     if resumes_saved_run and not saved_run_id and state.store:
         persisted_checkpoint = state.store.latest_current_checkpoint()
         saved_run_id = str(persisted_checkpoint.get("run_id", "")) or state.store.latest_run_id()
-    task = body.idea.strip() if (brief or saved_goal) else ""
+    task = body.idea.strip() if (persisted_goal or saved_goal) else ""
     effective_mode = body.mode
     if brief and not body.idea.strip() and body.mode == "auto":
         # The primary Start Run button intentionally has no prompt when a
@@ -951,6 +971,12 @@ async def start_run(
         effective_mode = "debate"
     if not product_goal:
         raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
+    if not brief and product_goal:
+        # Lock product identity on the first run (and migrate older projects
+        # whose only identity lived in the generated design header). Later
+        # prompts are tasks and must never replace this goal.
+        state.workspace.write_brief(product_goal)
+        brief = product_goal
     if body.save_brief and body.idea.strip():
         state.workspace.write_brief(body.idea)
     if state.store and body.idea.strip() and not continuation_requested:
@@ -1032,11 +1058,32 @@ async def start_run(
         try:
             snapshot = await state.orchestrator.run(product_goal, task=task)
             if state.status != "idle":
+                alignment_errors = state.orchestrator.ws.validate_goal_alignment(product_goal)
+                if state.orchestrator.completion_files and alignment_errors:
+                    raise PlanningQualityError("Artifact promotion blocked: " + " | ".join(alignment_errors))
                 state.orchestrator.ws.promote_staged_artifacts()
                 state.status = "done"
                 state.awaiting_input = False
                 if state.store and state.run_id:
                     agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
+                    completed_turns = [
+                        turn for turn in state.store.run_turns(state.run_id)
+                        if turn.get("status") == "completed"
+                    ]
+                    participant_names = list(dict.fromkeys(
+                        str(turn.get("agent", "")) for turn in completed_turns if turn.get("agent")
+                    ))
+                    participant_states = [
+                        agent for agent in agent_states if agent.get("name") in participant_names
+                    ]
+                    debate_proof = {
+                        "participants": participant_names,
+                        "opposing_architects": [
+                            name for name in participant_names
+                            if name.lower().startswith("architect_")
+                            and name != state.orchestrator._coordinator_name
+                        ],
+                    }
                     state.store.finish_run(
                         state.run_id, "done",
                         agent_states,
@@ -1044,9 +1091,10 @@ async def start_run(
                             "status": "verified",
                             "kind": state.orchestrator.completion_kind,
                             "files": state.orchestrator.completion_files,
+                            "debate": debate_proof,
                         },
                     )
-                    state.workspace.finish_logbook_run(state.run_id, "done", agent_states)
+                    state.workspace.finish_logbook_run(state.run_id, "done", participant_states)
                 if state.workspace and snapshot:
                     try:
                         proj_name = state.workspace.project_root.name or "project"
@@ -1062,6 +1110,7 @@ async def start_run(
                     "outcome": {
                         "status": "verified",
                         "files": state.orchestrator.completion_files,
+                        "debate": debate_proof if state.store and state.run_id else {},
                     },
                     "files": state.orchestrator.completion_files,
                 }), state)

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -539,6 +540,7 @@ class CLIAgent(AgentBase):
         self._provider_session_id = ""
         self._cli_usage_snapshot = Usage()
         self._configure_working_directories(config)
+        self._review_cwd = tempfile.mkdtemp(prefix=f"designflow-review-{self._session_id}-")
         self._configure_command(config)
 
     def _configure_working_directories(self, config: AgentConfig):
@@ -591,9 +593,11 @@ class CLIAgent(AgentBase):
             self.config, list(self._argv), self._session_mode, self.manages_context,
             self._workspace_cwd, self._session_cwd,
         )
+        old_review_cwd = getattr(self, "_review_cwd", None)
         try:
             super().reconfigure(config)
             self._configure_working_directories(config)
+            self._review_cwd = tempfile.mkdtemp(prefix=f"designflow-review-{self._session_id}-")
             self._configure_command(config)
         except Exception:
             (
@@ -601,15 +605,24 @@ class CLIAgent(AgentBase):
                 self._workspace_cwd, self._session_cwd,
             ) = previous
             raise
+        # Clean up old review directory after successful reconfigure
+        if old_review_cwd and os.path.isdir(old_review_cwd):
+            shutil.rmtree(old_review_cwd, ignore_errors=True)
+
+    def __del__(self):
+        review_cwd = getattr(self, "_review_cwd", None)
+        if review_cwd and os.path.isdir(review_cwd):
+            shutil.rmtree(review_cwd, ignore_errors=True)
 
     def _raw_send(self, messages: list[dict], system: str, *args, **kwargs) -> tuple[str, Usage]:
         if self._session_mode == "invalid" or not getattr(self, "_argv", None):
             raise RuntimeError(f"Agent '{self.name}' has no CLI command configured. Please add one in Settings.")
+        context_only = bool(kwargs.get("context_only", False))
         if self._session_mode == "codex":
-            return self._send_codex(messages[-1]["content"], system)
+            return self._send_codex(messages[-1]["content"], system, context_only=context_only)
         if self._session_mode == "antigravity":
-            return self._send_antigravity(messages[-1]["content"], system)
-        return self._send_stateless(messages, system)
+            return self._send_antigravity(messages[-1]["content"], system, context_only=context_only)
+        return self._send_stateless(messages, system, context_only=context_only)
 
     def _run(self, argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
         result = subprocess.run(
@@ -637,14 +650,15 @@ class CLIAgent(AgentBase):
             return args + ["exec"], []
         return args[:idx + 1], args[idx + 1:]
 
-    def _send_codex(self, message: str, system: str) -> tuple[str, Usage]:
+    def _send_codex(self, message: str, system: str, context_only: bool = False) -> tuple[str, Usage]:
         prefix, options = self._codex_parts()
-        prompt = self._initial_prompt(message, system) if not self._provider_session_id else message
-        if self._provider_session_id:
+        session_id = "" if context_only else self._provider_session_id
+        prompt = self._initial_prompt(message, system) if not session_id else message
+        if session_id:
             argv = prefix + ["resume"] + options + ["--json", self._provider_session_id, prompt]
         else:
-            argv = prefix + options + ["--json", prompt]
-        result = self._run(argv, cwd=self._workspace_cwd or None)
+            argv = prefix + options + (["--ephemeral"] if context_only else []) + ["--json", prompt]
+        result = self._run(argv, cwd=self._review_cwd if context_only else (self._workspace_cwd or None))
 
         text = ""
         usage = Usage(estimated=True)
@@ -654,7 +668,8 @@ class CLIAgent(AgentBase):
             except json.JSONDecodeError:
                 continue
             if event.get("type") == "thread.started":
-                self._provider_session_id = event.get("thread_id", "")
+                if not context_only:
+                    self._provider_session_id = event.get("thread_id", "")
             if event.get("type") == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "agent_message":
@@ -708,25 +723,27 @@ class CLIAgent(AgentBase):
             args.pop()
         return args
 
-    def _send_antigravity(self, message: str, system: str) -> tuple[str, Usage]:
+    def _send_antigravity(self, message: str, system: str, context_only: bool = False) -> tuple[str, Usage]:
         args = self._antigravity_base_args()
         configured_dirs = {
             args[index + 1] for index, value in enumerate(args[:-1]) if value == "--add-dir"
         }
-        if self._workspace_cwd and self._workspace_cwd not in configured_dirs:
+        allowed_cwd = self._review_cwd if context_only else self._workspace_cwd
+        if allowed_cwd and allowed_cwd not in configured_dirs:
             # Antigravity keeps its own active project and can otherwise inspect
             # a global scratch workspace even when the subprocess cwd is correct.
-            args += ["--add-dir", self._workspace_cwd]
-        prompt = self._initial_prompt(message, system) if not self._provider_session_id else message
+            args += ["--add-dir", allowed_cwd]
+        session_id = "" if context_only else self._provider_session_id
+        prompt = self._initial_prompt(message, system) if not session_id else message
         log_path = Path(self._session_cwd) / "agy.log"
         try:
             log_path.unlink(missing_ok=True)
         except OSError:
             pass
         args += ["--log-file", str(log_path)]
-        if self._provider_session_id:
-            args += ["--conversation", self._provider_session_id]
-        result = self._run(args + ["-p", prompt], cwd=self._workspace_cwd or self._session_cwd)
+        if session_id:
+            args += ["--conversation", session_id]
+        result = self._run(args + ["-p", prompt], cwd=allowed_cwd or self._session_cwd)
         try:
             log_text = log_path.read_text(errors="replace")
         except OSError:
@@ -738,9 +755,9 @@ class CLIAgent(AgentBase):
             combined,
             re.IGNORECASE,
         )
-        if match:
+        if match and not context_only:
             self._provider_session_id = match.group(1)
-        elif not self._provider_session_id:
+        elif not match and not session_id and not context_only:
             raise RuntimeError(
                 "Antigravity completed the turn but did not expose its conversation ID; "
                 "refusing unsafe global --continue"
@@ -757,14 +774,16 @@ class CLIAgent(AgentBase):
         })
         return state
 
-    def _send_stateless(self, messages: list[dict], system: str) -> tuple[str, Usage]:
+    def _send_stateless(self, messages: list[dict], system: str, context_only: bool = False) -> tuple[str, Usage]:
         parts = [f"[SYSTEM]\n{system}\n"] if system else []
         for message in messages:
             label = "USER" if message["role"] == "user" else "ASSISTANT"
             parts.append(f"[{label}]\n{message['content']}")
         parts.append("[ASSISTANT]")
         prompt = "\n\n".join(parts)
-        result = self._run(self._argv + [prompt], cwd=self._workspace_cwd or None)
+        result = self._run(
+            self._argv + [prompt], cwd=self._review_cwd if context_only else (self._workspace_cwd or None),
+        )
         text = result.stdout.strip()
         return text, self._estimated_usage(prompt, text)
 

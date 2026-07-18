@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -168,6 +169,41 @@ class ProjectStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_implementation_reports_status
                     ON implementation_reports(status, created_at);
+                CREATE TABLE IF NOT EXISTS planning_documents (
+                    run_id TEXT NOT NULL,
+                    artifact TEXT NOT NULL,
+                    preamble TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, artifact)
+                );
+                CREATE TABLE IF NOT EXISTS planning_sections (
+                    run_id TEXT NOT NULL,
+                    artifact TEXT NOT NULL,
+                    heading TEXT NOT NULL,
+                    heading_key TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, artifact, heading_key),
+                    FOREIGN KEY(run_id, artifact) REFERENCES planning_documents(run_id, artifact) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_planning_sections_artifact
+                    ON planning_sections(run_id, artifact, ordinal);
+                CREATE TABLE IF NOT EXISTS planning_mutations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    artifact TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    heading_key TEXT NOT NULL DEFAULT '',
+                    actor TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_planning_mutations_run
+                    ON planning_mutations(run_id, id);
                 """
             )
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
@@ -193,6 +229,210 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE decisions ADD COLUMN raw_markdown TEXT NOT NULL DEFAULT ''")
             
             self._backfill_checkpoint_decisions()
+
+    def set_planning_run(self, run_id: str) -> None:
+        self._planning_run_id = str(run_id or "canonical")
+
+    def _active_planning_run(self) -> str:
+        return str(getattr(self, "_planning_run_id", "canonical"))
+
+    @staticmethod
+    def _planning_parts(markdown: str) -> tuple[str, list[tuple[str, str]]]:
+        text = (markdown or "").strip()
+        if text == "(empty)":
+            text = ""
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", text))
+        if not matches:
+            return text, []
+        preamble = text[:matches[0].start()].strip()
+        sections = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            body = text[match.end():end].strip()
+            sections.append((match.group(1).strip(), body))
+        return preamble, sections
+
+    @staticmethod
+    def _heading_key(heading: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")
+
+    def replace_planning_document(self, artifact: str, markdown: str, actor: str = "") -> None:
+        """Replace one normalized planning document transactionally."""
+        preamble, sections = self._planning_parts(markdown)
+        now = datetime.now(timezone.utc).isoformat()
+        run_id = self._active_planning_run()
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT version FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
+            ).fetchone()
+            version = int(row["version"]) + 1 if row else 1
+            self._db.execute(
+                "INSERT INTO planning_documents(run_id,artifact,preamble,version,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(run_id,artifact) DO UPDATE SET preamble=excluded.preamble, "
+                "version=excluded.version, updated_at=excluded.updated_at",
+                (run_id, artifact, preamble, version, now),
+            )
+            self._db.execute("DELETE FROM planning_sections WHERE run_id=? AND artifact=?", (run_id, artifact))
+            for ordinal, (heading, body) in enumerate(sections):
+                self._db.execute(
+                    "INSERT INTO planning_sections(run_id,artifact,heading,heading_key,body,ordinal,version,updated_by,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (run_id, artifact, heading, self._heading_key(heading), body, ordinal, version, actor, now),
+                )
+            self._db.execute(
+                "INSERT INTO planning_mutations(run_id,artifact,operation,actor,created_at,payload_json) "
+                "VALUES(?,?,?,?,?,?)",
+                (run_id, artifact, "replace_document", actor, now, json.dumps({
+                    "version": version, "headings": [heading for heading, _ in sections],
+                })),
+            )
+
+    def merge_planning_document(self, artifact: str, markdown: str, actor: str = "") -> bool:
+        """Upsert only supplied H2 sections; return False for an unstructured delta."""
+        preamble, sections = self._planning_parts(markdown)
+        if not sections:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        run_id = self._active_planning_run()
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT version,preamble FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
+            ).fetchone()
+            version = int(row["version"]) + 1 if row else 1
+            existing_preamble = str(row["preamble"]) if row else ""
+            self._db.execute(
+                "INSERT INTO planning_documents(run_id,artifact,preamble,version,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(run_id,artifact) DO UPDATE SET preamble=excluded.preamble, "
+                "version=excluded.version, updated_at=excluded.updated_at",
+                (run_id, artifact, existing_preamble or preamble, version, now),
+            )
+            next_ordinal = int(self._db.execute(
+                "SELECT COALESCE(MAX(ordinal),-1)+1 n FROM planning_sections WHERE run_id=? AND artifact=?",
+                (run_id, artifact),
+            ).fetchone()["n"])
+            incoming_keys = set()
+            for heading, body in sections:
+                key = self._heading_key(heading)
+                incoming_keys.add(key)
+                current = self._db.execute(
+                    "SELECT ordinal,version FROM planning_sections WHERE run_id=? AND artifact=? AND heading_key=?",
+                    (run_id, artifact, key),
+                ).fetchone()
+                ordinal = int(current["ordinal"]) if current else next_ordinal
+                if not current:
+                    next_ordinal += 1
+                section_version = int(current["version"]) + 1 if current else 1
+                self._db.execute(
+                    "INSERT INTO planning_sections(run_id,artifact,heading,heading_key,body,ordinal,version,updated_by,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,artifact,heading_key) DO UPDATE SET "
+                    "heading=excluded.heading,body=excluded.body,version=excluded.version,"
+                    "updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+                    (run_id, artifact, heading, key, body, ordinal, section_version, actor, now),
+                )
+                self._db.execute(
+                    "INSERT INTO planning_mutations(run_id,artifact,operation,heading_key,actor,created_at,payload_json) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (run_id, artifact, "upsert_section", key, actor, now, json.dumps({
+                        "heading": heading, "version": section_version,
+                    })),
+                )
+            # When the incoming update contains 3+ sections it looks like a
+            # near-complete document rewrite; prune stale sections that were
+            # not re-emitted to prevent unbounded accumulation.
+            if len(incoming_keys) >= 3:
+                stale = self._db.execute(
+                    "SELECT heading_key FROM planning_sections "
+                    "WHERE run_id=? AND artifact=? AND heading_key NOT IN ({})".format(
+                        ",".join("?" for _ in incoming_keys)
+                    ),
+                    (run_id, artifact, *sorted(incoming_keys)),
+                ).fetchall()
+                for row in stale:
+                    stale_key = str(row["heading_key"])
+                    self._db.execute(
+                        "DELETE FROM planning_sections WHERE run_id=? AND artifact=? AND heading_key=?",
+                        (run_id, artifact, stale_key),
+                    )
+                    self._db.execute(
+                        "INSERT INTO planning_mutations(run_id,artifact,operation,heading_key,actor,created_at,payload_json) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (run_id, artifact, "prune_stale_section", stale_key, actor, now, "{}"),
+                    )
+        return True
+
+    def planning_document(self, artifact: str) -> str:
+        run_id = self._active_planning_run()
+        with self._lock:
+            document = self._db.execute(
+                "SELECT preamble FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
+            ).fetchone()
+            if not document:
+                return ""
+            rows = self._db.execute(
+                "SELECT heading,body FROM planning_sections WHERE run_id=? AND artifact=? ORDER BY ordinal,heading_key",
+                (run_id, artifact),
+            ).fetchall()
+        chunks = [str(document["preamble"] or "").strip()]
+        chunks.extend(f"## {row['heading']}\n\n{str(row['body']).strip()}".rstrip() for row in rows)
+        return "\n\n".join(chunk for chunk in chunks if chunk).strip() + "\n"
+
+    def planning_context(self, artifact_keywords: dict[str, list[str]], max_chars: int = 12000) -> str:
+        """Build a bounded packet from normalized sections without reading Markdown files."""
+        blocks = []
+        remaining = max(1000, int(max_chars))
+        run_id = self._active_planning_run()
+        with self._lock:
+            for artifact, keywords in artifact_keywords.items():
+                document = self._db.execute(
+                    "SELECT preamble,version FROM planning_documents WHERE run_id=? AND artifact=?",
+                    (run_id, artifact),
+                ).fetchone()
+                rows = self._db.execute(
+                    "SELECT heading,body,version FROM planning_sections WHERE run_id=? AND artifact=? ORDER BY ordinal",
+                    (run_id, artifact),
+                ).fetchall()
+                lowered = [word.lower() for word in keywords]
+                ranked = sorted(rows, key=lambda row: (
+                    -sum(word in str(row["heading"]).lower() for word in lowered),
+                    str(row["heading"]).lower(),
+                ))
+                selected = [row for row in ranked if any(
+                    word in (str(row["heading"]) + " " + str(row["body"])).lower()
+                    for word in lowered
+                )] or ranked[:1]
+                preamble = str(document["preamble"] or "").strip() if document else ""
+                if preamble and (artifact == "decisions" or not rows):
+                    chunk = f"[{artifact}:document v{document['version']}]\n{preamble}"
+                    blocks.append(chunk[:remaining])
+                    remaining -= min(len(chunk), remaining)
+                for row in selected:
+                    chunk = f"[{artifact}:{row['heading']} v{row['version']}]\n{row['body']}".strip()
+                    if remaining <= 0:
+                        break
+                    blocks.append(chunk[:remaining])
+                    remaining -= min(len(chunk), remaining)
+        return "\n\n".join(blocks) if blocks else "(no matching planning records)"
+
+    def planning_state_counts(self) -> dict[str, int]:
+        run_id = self._active_planning_run()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT d.artifact,MAX(1,COUNT(s.heading_key)) count FROM planning_documents d "
+                "LEFT JOIN planning_sections s ON s.run_id=d.run_id AND s.artifact=d.artifact "
+                "WHERE d.run_id=? GROUP BY d.artifact",
+                (run_id,),
+            ).fetchall()
+        return {str(row["artifact"]): int(row["count"]) for row in rows}
+
+    def planning_mutations(self, limit: int = 100) -> list[dict]:
+        run_id = self._active_planning_run()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT artifact,operation,heading_key,actor,created_at,payload_json "
+                "FROM planning_mutations WHERE run_id=? ORDER BY id DESC LIMIT ?",
+                (run_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [{**dict(row), "payload": json.loads(row["payload_json"] or "{}") } for row in rows]
 
     def _backfill_checkpoint_decisions(self):
         """Give pre-ledger checkpoints durable decisions without parsing Markdown artifacts."""

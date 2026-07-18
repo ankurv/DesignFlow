@@ -272,6 +272,8 @@ class Orchestrator:
         self._personas, self._signals, self._keywords, self._allowed_mcp_servers = self.ws.parse_personas()
         self.store = store
         self.run_id = run_id
+        if self.store and hasattr(self.store, "set_planning_run"):
+            self.store.set_planning_run(run_id)
         self._cb = event_cb
         self.max_debate_rounds = max_debate_rounds
         # Debate depth also bounds requirements discovery, but discovery stays
@@ -363,6 +365,11 @@ class Orchestrator:
     ) -> None:
         """Inject a transactionally recorded checkpoint answer without parsing Markdown state."""
         self.ws.add_context_event("user_decision", message, self.phase.value, "user")
+        if self.store and hasattr(self.store, "replace_planning_document"):
+            # The endpoint has already appended the human decision to the
+            # staged projection. Import that authoritative user mutation before
+            # the next discovery query is assembled.
+            self.store.replace_planning_document("decisions", self.ws.read("decisions"), username)
         await self._steer_queue.put(message)
         self._checkpoint_has_more = has_more
         self.ws.reset_context_tracking()
@@ -502,6 +509,7 @@ class Orchestrator:
             self.ws.init(idea)
         else:
             self.ws.align_generated_goal_header(idea)
+        self._seed_planning_store()
 
         n = len(self.agents)
         if n == 0:
@@ -790,6 +798,51 @@ class Orchestrator:
             )
         return ""
 
+    def _product_rule_discovery_question(self) -> str:
+        """Resolve high-confidence product families without spending a model turn."""
+        evidence = " ".join((self.idea, self.task, self.ws.brief())).lower()
+        decisions = self.ws.read("decisions").lower()
+        is_messaging = any(term in evidence for term in ("messaging", "message app", "chat app", "whatsapp"))
+        if not is_messaging:
+            return ""
+        encryption_question = (
+            "Should every private and group conversation use end-to-end encryption that prevents the service "
+            "operator from reading message content?"
+        )
+        if (any(term in evidence for term in ("secure", "private", "encrypted")) and not any(
+            term in decisions for term in ("end-to-end encryption", "service-readable", "operator-readable")
+        ) and not self._is_repeated_discovery_question(self._question_key(encryption_question))):
+            return (
+                encryption_question + "\n\n"
+                "Why this matters: This fixes the trust boundary for message content and changes key management, "
+                "multi-device synchronization, backup recovery, moderation, search, and operational diagnostics.\n\n"
+                "- [A] End-to-end encryption for every conversation — Users gain a consistent privacy guarantee; "
+                "server-side content recovery, inspection, and search are unavailable.\n"
+                "- [B] User-selectable end-to-end encryption — Users can trade privacy for server-assisted features, "
+                "but the product loses a simple uniform security guarantee.\n"
+                "- [C] Service-readable encrypted storage — Recovery and moderation are simpler, but the operator "
+                "or a server compromise can access message content.\n\n"
+                "Recommendation: A — it best matches a secure private messaging product."
+            )
+        identity_question = "How should people establish their Chatbay account identity on a new device?"
+        if (not any(term in decisions for term in (
+            "phone-number", "phone number", "email sign-in", "identity provider",
+        )) and not self._is_repeated_discovery_question(self._question_key(identity_question))):
+            return (
+                identity_question + "\n\n"
+                "Why this matters: The identity anchor determines onboarding, contact discovery, abuse controls, "
+                "device linking, account recovery, privacy exposure, and session-revocation behavior.\n\n"
+                "- [A] Phone-number verification with optional usernames — Familiar contact discovery and recovery, "
+                "with phone-number privacy and SIM-swap risks that require explicit controls.\n"
+                "- [B] Email verification with unique usernames — Less carrier dependence, but weaker address-book "
+                "discovery and a different recovery and abuse model.\n"
+                "- [C] External identity provider — Faster onboarding for some users, but account access depends on "
+                "a third party and exposes provider-linkage metadata.\n\n"
+                "Recommendation: A — it matches the established WhatsApp-like onboarding model while keeping "
+                "usernames optional."
+            )
+        return ""
+
     @staticmethod
     def _question_key(question: str) -> str:
         words = re.findall(r"[a-z0-9]+", (question or "").lower())
@@ -898,9 +951,19 @@ class Orchestrator:
             return ""
         if self._adaptive_discovery_unavailable:
             return self._deterministic_discovery_question()
-        context = self.ws.scoped_context(["design", "plan", "decisions", "questions", "capabilities", "src_index"])
-        if len(context) > 14000:
-            context = context[:14000].rstrip() + "\n[context truncated]"
+        if self.store and hasattr(self.store, "planning_context"):
+            planning = self.store.planning_context({
+                "design": ["product", "scope", "security", "privacy", "recovery", "unknown"],
+                "plan": ["requirement", "acceptance", "risk"],
+                "decisions": ["confirmed", "decision", "rationale"],
+            }, max_chars=5500)
+            context = (
+                planning + "\n\n" + self.ws.planning_capabilities_context()
+            )[:9000]
+        else:
+            context = self.ws.scoped_context(
+                ["design", "plan", "decisions", "questions", "capabilities", "src_index"]
+            )[:9000]
         prompt = (
             "Act as a requirements discovery analyst, not a designer or debater. Inspect the project evidence and "
             "identify the single highest-impact unresolved question whose answer could materially change the architecture. "
@@ -921,15 +984,29 @@ class Orchestrator:
             "options (2-3 objects with label and consequence), recommended, and blocking. "
             "Use ready_to_draft only when no material architecture uncertainty remains.\n\n"
             f"Product goal: {self.idea}\nCurrent request: {self.task or self.idea}\n"
-            f"Questions already asked: {sorted(self._discovery_question_keys)}\n\nProject evidence:\n{context}"
+            f"Questions already asked: {sorted(self._discovery_question_keys)}\n"
+            "The scoped project-evidence packet is supplied separately and is authoritative."
         )
+        def discovery_cost(candidate: AgentBase) -> tuple[int, float]:
+            """Prefer low-overhead analysts; reserve the synthesis model for synthesis."""
+            command = str(candidate.config.cli_command or "").lower()
+            runtime = str(candidate.config.extra.get("runtime_base_name", "")).lower()
+            if "gemini" in command or "gemini" in runtime:
+                provider_cost = 0
+            elif candidate.config.kind != "cli":
+                provider_cost = 1
+            elif "codex" in command or "codex" in runtime:
+                provider_cost = 3
+            else:
+                provider_cost = 2
+            return provider_cost, -self._synthesis_score(candidate)
+
         analysts = []
         seen_providers = set()
-        for candidate in [coordinator] + sorted(
-            (agent for agent in self.agents if agent is not coordinator),
-            key=self._synthesis_score,
-            reverse=True,
-        ):
+        candidates = [agent for agent in self.agents if agent is not coordinator]
+        if not candidates:
+            candidates = [coordinator]
+        for candidate in sorted(candidates, key=discovery_cost):
             provider_id = candidate.config.base_id or candidate.config.id or candidate.name
             if provider_id in seen_providers or provider_id in self._discovery_failed_providers:
                 continue
@@ -950,7 +1027,7 @@ class Orchestrator:
             analyst.config.extra["timeout"] = min(int(original_timeout or 45), 45)
             try:
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(analyst.send, prompt, "", context),
+                    asyncio.to_thread(analyst.send, prompt, "", context, context_only=True),
                     timeout=45,
                 )
             except (RuntimeError, asyncio.TimeoutError) as exc:
@@ -1066,7 +1143,9 @@ class Orchestrator:
 
     async def _run_discovery_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "discovery", "status": "running", "step": step}))
-        question = await self._adaptive_discovery_question(coordinator, step) if self.require_approval else ""
+        question = self._product_rule_discovery_question() if self.require_approval else ""
+        if self.require_approval and not question:
+            question = await self._adaptive_discovery_question(coordinator, step)
         if self.require_approval and not question and self._discovery_questions_asked == 0:
             question = self._deterministic_discovery_question()
         if question and self.require_approval:
@@ -1220,7 +1299,9 @@ class Orchestrator:
             capabilities=self.ws.planning_capabilities_context(),
         )
         full_ctx = self._agent_context(coordinator)
-        response = await self._send_agent_basic(coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True)
+        response = await self._send_agent_basic(
+            coordinator, prompt, "drafting", step, ephemeral=full_ctx, synthesis=True, context_only=True,
+        )
         self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=True)
         self.phase = OrchestratorPhase.PEER_REVIEW
         self.save_state()
@@ -1253,13 +1334,54 @@ class Orchestrator:
         )
 
         full_ctx = self._agent_context(agent)
-        response = await self._send_agent_basic(agent, prompt, "peer_review", step, ephemeral=full_ctx)
+        response = await self._send_agent_basic(
+            agent, prompt, "peer_review", step, ephemeral=full_ctx, context_only=True,
+        )
+        review_errors = self._peer_review_errors(agent, response)
+        if review_errors:
+            raise PlanningQualityError(
+                f"Peer review by {agent.name} was rejected: " + " | ".join(review_errors)
+            )
         self.ws.append("logbook", response, agent.name, "Peer review critique")
         self.ws.add_context_event("peer_critique", response, "refinement", agent.name)
         self._apply_coordinator_agent_response(agent.name, response)
         self._consulted_specialists.add(agent.name)
         self.peer_review_index += 1
         self.save_state()
+
+    def _peer_review_errors(self, agent: AgentBase, response: str) -> list[str]:
+        """Reject tool narration or agreement masquerading as a completed review."""
+        deltas = [
+            self.ws.parse_section(response, marker).strip()
+            for marker in ("DESIGN_APPEND", "PLAN_APPEND", "DECISIONS_APPEND")
+        ]
+        substantive = "\n".join(delta for delta in deltas if delta)
+        errors = []
+        if not substantive:
+            errors.append(
+                "response contained no bounded DESIGN_APPEND, PLAN_APPEND, or DECISIONS_APPEND delta"
+            )
+            return errors
+        if len(re.findall(r"[A-Za-z0-9]+", substantive)) < 25:
+            errors.append("review delta was too shallow to establish a substantive critique")
+        if agent.name.lower().startswith("architect_"):
+            # The critique may introduce its challenge before the bounded artifact
+            # deltas and then use the append sections only for the resulting edits.
+            # Validate the complete review for debate semantics while continuing to
+            # require a substantive bounded delta for artifact mutation.
+            lowered = response.lower()
+            challenge_markers = (
+                "alternative", "assumption", "challenge", "instead", "risk", "trade-off", "tradeoff",
+            )
+            decision_markers = (
+                "prefer", "recommend", "should", "must", "adopt", "advocate",
+                "favor", "favour", "choose", "win", "superior",
+            )
+            if not any(marker in lowered for marker in challenge_markers):
+                errors.append("opposing architect did not challenge an assumption or present an alternative")
+            if not any(marker in lowered for marker in decision_markers):
+                errors.append("opposing architect did not state which approach should win")
+        return errors
 
     async def _run_refinement_phase(self, coordinator, step):
         self._emit(Event(EventKind.PHASE, data={"phase": "refinement", "status": "running", "step": step}))
@@ -1273,8 +1395,10 @@ class Orchestrator:
             quality_feedback=self._deterministic_feedback or "None",
         )
         full_ctx = self._agent_context(coordinator)
-        response = await self._send_agent_basic(coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True)
-        self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=True)
+        response = await self._send_agent_basic(
+            coordinator, prompt, "refinement", step, ephemeral=full_ctx, synthesis=True, context_only=True,
+        )
+        self._apply_coordinator_agent_response(coordinator.name, response, replace_complete=False)
         self.ws.resolve_context_events({"peer_critique", "user_steering", "user_decision", "quality_failure"})
         self._refinement_attempts += 1
 
@@ -1343,13 +1467,13 @@ class Orchestrator:
             self.post_approval_phase = None
         self.save_state()
 
-    async def _send_agent_basic(self, agent, prompt, phase_name, step, ephemeral="", synthesis=False):
+    async def _send_agent_basic(self, agent, prompt, phase_name, step, ephemeral="", synthesis=False, context_only=False):
         turn_context = {"step": step, "phase": phase_name, "standing_role": agent.config.role}
         turn_id = self._begin_turn(agent, turn_context)
 
         response = await self._send_agent(
             agent, prompt, turn_id, turn_context, ephemeral_context=ephemeral,
-            system_override=SYNTHESIS_SYSTEM if synthesis else None,
+            system_override=SYNTHESIS_SYSTEM if synthesis else None, context_only=context_only,
         )
         self._record_turn_usage(agent, phase_name)
         self.ws.append("logbook", response, agent.name, "Turn completed")
@@ -1598,6 +1722,7 @@ class Orchestrator:
         turn_context: Optional[dict] = None,
         ephemeral_context: Optional[str] = None,
         system_override: Optional[str] = None,
+        context_only: bool = False,
     ) -> str:
         attempt = self._turn_attempts.get(turn_id, 1)
         self._turn_attempts[turn_id] = attempt
@@ -1719,7 +1844,9 @@ class Orchestrator:
                     return future.result()
                     
                 agent_allowed_servers = self._allowed_mcp_servers.get(agent.name.lower(), [])
-                if "*" in agent_allowed_servers:
+                if context_only:
+                    agent_mcp_tools = []
+                elif "*" in agent_allowed_servers:
                     agent_mcp_tools = self.mcp_tools
                 else:
                     agent_mcp_tools = [t for t in self.mcp_tools if t.get("server") in agent_allowed_servers]
@@ -1731,7 +1858,7 @@ class Orchestrator:
                         asyncio.to_thread(
                             agent.send, prompt, effective_system, ephemeral_context,
                             mcp_tools=agent_mcp_tools, tool_handler=call_mcp_tool,
-                            attempt_token=attempt_token,
+                            attempt_token=attempt_token, context_only=context_only,
                         ),
                         timeout=provider_timeout,
                     )
@@ -1942,6 +2069,13 @@ class Orchestrator:
 
     def _coordinator_context(self) -> str:
         agent_name = self._coordinator_name or "coordinator"
+        if self.store and hasattr(self.store, "planning_context"):
+            self._remember_context_delivery(agent_name)
+            return self.store.planning_context({
+                "design": ["product", "scope", "architecture", "security", "failure", "contract", "unknown"],
+                "plan": ["requirement", "phase", "acceptance", "test", "risk"],
+                "decisions": ["confirmed", "decision", "trade-off", "rationale"],
+            }, max_chars=14000)
         roles = ["context", "design", "plan", "decisions", "questions", "src_index"]
         if self._should_force_full_context(agent_name):
             context = self.ws.scoped_context(roles)
@@ -1955,10 +2089,35 @@ class Orchestrator:
             agent.name.lower(),
             (["architecture", "requirements", "reliability"], ["requirements", "phases", "testing"]),
         )
-        max_chars = int(agent.config.extra.get("specialist_context_max_chars", 12000) or 12000)
-        context = self.ws.specialist_context(design_keywords, plan_keywords, max_chars=max_chars)
+        max_chars = int(agent.config.extra.get("specialist_context_max_chars", 8000) or 8000)
+        max_chars = max(3000, min(max_chars, 8000))
+        if self.store and hasattr(self.store, "planning_context"):
+            context = self.store.planning_context({
+                "design": design_keywords,
+                "plan": plan_keywords,
+                "decisions": ["confirmed", "decision", "trade-off", "rationale"],
+            }, max_chars=max_chars)
+        else:
+            context = self.ws.specialist_context(design_keywords, plan_keywords, max_chars=max_chars)
         self._remember_context_delivery(agent.name)
         return context
+
+    def _seed_planning_store(self) -> None:
+        """Import legacy Markdown once; subsequent mutations are database-first."""
+        if not self.store or not hasattr(self.store, "replace_planning_document"):
+            return
+        counts = self.store.planning_state_counts()
+        for artifact in ("design", "plan", "decisions"):
+            if counts.get(artifact, 0) == 0:
+                self.store.replace_planning_document(artifact, self.ws.read(artifact), "migration")
+
+    def _project_planning_document(self, artifact: str) -> None:
+        """Generate the human-facing Markdown projection from normalized state."""
+        if not self.store or not hasattr(self.store, "planning_document"):
+            return
+        rendered = self.store.planning_document(artifact)
+        if rendered:
+            self.ws.write(artifact, rendered)
 
     @staticmethod
     def _quality_gate_passed(quality_gate: str) -> bool:
@@ -2014,8 +2173,18 @@ class Orchestrator:
 
         plan_update = self.ws.parse_section(response, "PLAN_UPDATE")
         if plan_update:
-            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
-            written, reason = writer("plan", plan_update, "Plan")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                if replace_complete:
+                    self.store.replace_planning_document("plan", f"# Plan\n\n{plan_update.strip()}", agent_name)
+                    written, reason = True, "database replacement"
+                else:
+                    written = self.store.merge_planning_document("plan", plan_update, agent_name)
+                    reason = "database section merge" if written else "PLAN_UPDATE contained no H2 sections"
+                if written:
+                    self._project_planning_document("plan")
+            else:
+                writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+                written, reason = writer("plan", plan_update, "Plan")
             if written:
                 written_files.add("PLAN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
@@ -2024,8 +2193,20 @@ class Orchestrator:
 
         decisions_update = self.ws.parse_section(response, "DECISIONS_UPDATE")
         if decisions_update:
-            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
-            written, reason = writer("decisions", decisions_update, "Key Decisions")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                if replace_complete:
+                    self.store.replace_planning_document(
+                        "decisions", f"# Key Decisions\n\n{decisions_update.strip()}", agent_name,
+                    )
+                    written, reason = True, "database replacement"
+                else:
+                    written = self.store.merge_planning_document("decisions", decisions_update, agent_name)
+                    reason = "database section merge" if written else "DECISIONS_UPDATE contained no H2 sections"
+                if written:
+                    self._project_planning_document("decisions")
+            else:
+                writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+                written, reason = writer("decisions", decisions_update, "Key Decisions")
             if written:
                 written_files.add("DECISIONS.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
@@ -2034,8 +2215,20 @@ class Orchestrator:
 
         design_update = self.ws.parse_section(response, "DESIGN_UPDATE")
         if design_update:
-            writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
-            written, reason = writer("design", design_update, "Architecture Design")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                if replace_complete:
+                    self.store.replace_planning_document(
+                        "design", f"# Architecture Design\n\n{design_update.strip()}", agent_name,
+                    )
+                    written, reason = True, "database replacement"
+                else:
+                    written = self.store.merge_planning_document("design", design_update, agent_name)
+                    reason = "database section merge" if written else "DESIGN_UPDATE contained no H2 sections"
+                if written:
+                    self._project_planning_document("design")
+            else:
+                writer = self.ws.replace_complete_artifact if replace_complete else self.ws.merge_artifact_update
+                written, reason = writer("design", design_update, "Architecture Design")
             if written:
                 written_files.add("DESIGN.md")
                 self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
@@ -2044,19 +2237,34 @@ class Orchestrator:
 
         design_bit = self.ws.parse_section(response, "DESIGN_APPEND")
         if design_bit:
-            self.ws.append("design", design_bit, agent_name, "Coordinator-led Turn")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                heading = f"Review Delta — {agent_name} — {self._turn_sequence}"
+                self.store.merge_planning_document("design", f"## {heading}\n\n{design_bit}", agent_name)
+                self._project_planning_document("design")
+            else:
+                self.ws.append("design", design_bit, agent_name, "Coordinator-led Turn")
             written_files.add("DESIGN.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DESIGN.md"}))
 
         plan_bit = self.ws.parse_section(response, "PLAN_APPEND")
         if plan_bit:
-            self.ws.append("plan", plan_bit, agent_name, "Peer Review")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                heading = f"Review Delta — {agent_name} — {self._turn_sequence}"
+                self.store.merge_planning_document("plan", f"## {heading}\n\n{plan_bit}", agent_name)
+                self._project_planning_document("plan")
+            else:
+                self.ws.append("plan", plan_bit, agent_name, "Peer Review")
             written_files.add("PLAN.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "PLAN.md"}))
 
         decisions_bit = self.ws.parse_section(response, "DECISIONS_APPEND")
         if decisions_bit:
-            self.ws.append("decisions", decisions_bit, agent_name, "Peer Review")
+            if self.store and hasattr(self.store, "merge_planning_document"):
+                heading = f"Review Delta — {agent_name} — {self._turn_sequence}"
+                self.store.merge_planning_document("decisions", f"## {heading}\n\n{decisions_bit}", agent_name)
+                self._project_planning_document("decisions")
+            else:
+                self.ws.append("decisions", decisions_bit, agent_name, "Peer Review")
             written_files.add("DECISIONS.md")
             self._emit(Event(EventKind.FILE_WRITE, agent=agent_name, data={"file": "DECISIONS.md"}))
         return written_files

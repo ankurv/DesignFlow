@@ -125,6 +125,59 @@ class Workspace:
         self.ensure()
         self.brief_path.write_text(content.rstrip() + "\n")
 
+    def product_goal(self) -> str:
+        """Return the persisted product identity, never a transient run command."""
+        brief = self.brief().strip()
+        if brief:
+            return brief
+        design = self.read("design")
+        for pattern in (
+            r"^\*\*Product goal:\*\*\s*(.+)$",
+            r"^\*\*Idea:\*\*\s*(.+)$",
+        ):
+            match = re.search(pattern, design, re.MULTILINE | re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def validate_goal_alignment(self, goal: str) -> list[str]:
+        """Reject artifacts that omit the distinctive concepts in the product goal."""
+        evidence_path = (
+            self._artifact_stage_dir.parent / "planning_evidence.json"
+            if self._artifact_stage_dir is not None
+            else self.root / "planning_evidence.json"
+        )
+        if not self.brief().strip() and not evidence_path.exists():
+            # Only enforce identity that has been persisted independently of
+            # generated artifacts; transient commands are not trustworthy goals.
+            return []
+        normalized_goal = (goal or "").lower()
+        stopwords = {
+            "a", "an", "and", "app", "application", "build", "create", "deliver",
+            "design", "for", "like", "of", "platform", "product", "simple", "small",
+            "system", "the", "tiny", "to", "useful", "with",
+        }
+        anchors = {
+            word for word in re.findall(r"[a-z0-9]+", normalized_goal)
+            if len(word) >= 4 and word not in stopwords
+        }
+        if not anchors:
+            return []
+        design_body = re.sub(
+            r"^\*\*(?:Product goal|Idea):\*\*.*$", "", self.read("design"),
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        artifact_text = " ".join((design_body, self.read("plan"), self.read("decisions"))).lower()
+        present = {word for word in anchors if re.search(rf"\b{re.escape(word)}\b", artifact_text)}
+        required = 1 if len(anchors) < 3 else 2
+        if len(present) < required:
+            missing = ", ".join(sorted(anchors - present)[:6])
+            return [
+                "Planning artifacts are not aligned with the persisted product goal; "
+                f"missing product-specific concepts: {missing}."
+            ]
+        return []
+
     def align_generated_goal_header(self, goal: str) -> None:
         """Repair only DesignFlow's generated Idea header; preserve authored design content."""
         design_path = self._file("design")
@@ -1079,8 +1132,30 @@ class Workspace:
         return "\n".join(lines)
 
     def planning_capabilities_context(self) -> str:
+        """Return only capabilities selected for this baseline plus explicit overrides."""
+        try:
+            catalog = json.loads(self.read("capabilities"))
+        except json.JSONDecodeError:
+            catalog = {"capabilities": []}
+        selected_ids = {item["id"] for item in self.selected_capability_contracts()}
+        scoped = []
+        for item in catalog.get("capabilities", []):
+            mode = str(item.get("mode", "auto"))
+            if item.get("id") not in selected_ids and mode == "auto":
+                continue
+            notes = str(item.get("notes", "")).strip()
+            line = f"- {item.get('id', '')} [mode={mode}] {item.get('name', '')}"
+            if notes:
+                line += f" | user notes: {notes}"
+            scoped.append(line)
+        capability_scope = (
+            "Capabilities selected for this planning baseline; omitted auto capabilities are out of scope:\n"
+            + "\n".join(scoped)
+            if scoped else
+            "No capability entries were selected; do not infer unrelated infrastructure."
+        )
         return "\n\n".join((
-            self.capabilities_context(compact=True),
+            capability_scope,
             self.capability_contracts_context(),
             self.engineering_invariants_context(),
         ))

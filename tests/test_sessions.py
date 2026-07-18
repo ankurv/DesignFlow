@@ -534,6 +534,7 @@ class CrossCuttingDesignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.ensure()
+            workspace.write_brief("Build a WhatsApp-like encrypted messaging product.")
             workspace.write("design", "# Design\n\n**Product goal:** Build a WhatsApp-like encrypted messaging product.\n")
             workspace.write("plan", "# Plan\n")
             workspace.write("decisions", "# Decisions\n")
@@ -1381,6 +1382,23 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(log_path.parent.parent, Path(project).resolve() / ".designflow" / "sessions")
         self.assertEqual(agent.provider_session_id(), agent.fake_conversation_id)
 
+    def test_context_only_cli_review_cannot_access_project_workspace(self):
+        project = tempfile.mkdtemp()
+        agent = FakeCLI(
+            AgentConfig(id="agy-review", name="architect_beta", kind="cli", cli_command="agy -p",
+                        working_directory=project),
+            ["## DESIGN_APPEND\nChallenge the synchronous assumption; prefer an outbox alternative."],
+        )
+
+        agent.send("Review the supplied packet", ephemeral_context="Authoritative excerpts", context_only=True)
+
+        command, cwd = agent.commands[0]
+        allowed_dir = command[command.index("--add-dir") + 1]
+        self.assertEqual(Path(cwd), Path(agent._review_cwd))
+        self.assertEqual(Path(allowed_dir), Path(agent._review_cwd))
+        self.assertNotIn(str(Path(project).resolve()), command)
+        self.assertEqual(agent.provider_session_id(), "")
+
     def test_duplicate_cli_agents_have_independent_sessions(self):
         project = tempfile.mkdtemp()
         config_a = AgentConfig(id="architect", name="architect", role="architecture",
@@ -1890,6 +1908,65 @@ Decision 2: Choose retention.
             self.assertEqual(loaded[0]["api_key"], "my-secret-key-abc")
             store.close()
 
+    def test_sqlite_planning_state_is_sectioned_scoped_and_projectable(self):
+        from backend.storage import ProjectStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = ProjectStore(Path(tmpdir))
+            store.replace_planning_document(
+                "design",
+                "# Architecture Design\n\n## Messaging Security\n\nUse E2EE group epochs.\n\n"
+                "## Payments\n\nUse an unrelated billing gateway.",
+                "architect_alpha",
+            )
+            store.merge_planning_document(
+                "design",
+                "## Messaging Security\n\nUse client-authenticated E2EE group epochs with replay protection.",
+                "architect_beta",
+            )
+
+            rendered = store.planning_document("design")
+            self.assertIn("client-authenticated E2EE", rendered)
+            self.assertEqual(rendered.count("## Messaging Security"), 1)
+            self.assertIn("## Payments", rendered)
+
+            packet = store.planning_context({"design": ["security", "epoch"]}, max_chars=500)
+            self.assertIn("Messaging Security", packet)
+            self.assertNotIn("billing gateway", packet)
+            self.assertEqual(store.planning_state_counts()["design"], 2)
+            self.assertEqual(store.planning_mutations(1)[0]["operation"], "upsert_section")
+
+            store.set_planning_run("another-run")
+            self.assertEqual(store.planning_document("design"), "")
+            self.assertEqual(store.planning_state_counts(), {})
+            store.close()
+
+    def test_orchestrator_uses_sqlite_for_planning_deltas_and_context(self):
+        from backend.storage import ProjectStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("secure messaging")
+            store = ProjectStore(workspace.root)
+            beta = StatefulFake(AgentConfig(name="architect_beta", kind="openai"))
+            orchestrator = Orchestrator([beta], workspace, store=store, run_id="run-1")
+            orchestrator._seed_planning_store()
+            orchestrator._turn_sequence = 4
+
+            orchestrator._apply_coordinator_agent_response(
+                "architect_beta",
+                "## DESIGN_APPEND\nRequire member-signed group epoch changes with replay protection, "
+                "bounded retries, explicit rejection, and user-visible recovery.",
+            )
+
+            stored = store.planning_document("design")
+            self.assertIn("Review Delta — architect_beta — 4", stored)
+            self.assertEqual(workspace.read("design"), stored)
+            packet = orchestrator._agent_context(beta)
+            self.assertLessEqual(len(packet), 8000)
+            self.assertNotIn("PROJECT_FILES.md", packet)
+            store.close()
+
     def test_coordinator_pause_for_input(self):
         boss = StatefulFake(
             AgentConfig(name="boss", kind="openai", model="gpt-4o", extra={"is_coordinator": True}),
@@ -2044,6 +2121,48 @@ Decision 2: Choose retention.
             self.assertEqual(selected[0].name, "architect_beta")
             self.assertEqual(len(selected), 3)
 
+    def test_peer_review_rejects_tool_narration_and_requires_architect_verdict(self):
+        beta = StatefulFake(AgentConfig(name="architect_beta", kind="openai"))
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator([beta], Workspace(directory), require_approval=False)
+
+            narration = "I will list the files. I will update DESIGN.md with replace_file_content."
+            self.assertTrue(orchestrator._peer_review_errors(beta, narration))
+
+            agreement = (
+                "## DESIGN_APPEND\nThe existing architecture appears appropriate and contains no major "
+                "disagreements. Continue with the current design and implementation plan without changes. "
+                "The boundaries, protocols, data model, deployment, reliability, and security choices look sound."
+            )
+            self.assertTrue(orchestrator._peer_review_errors(beta, agreement))
+
+            adversarial = (
+                "## DESIGN_APPEND\n### Competing architecture\nThe coordinator assumes synchronous fan-out, "
+                "which risks cascading latency and retry amplification. An alternative transactional outbox "
+                "separates acceptance from delivery and has a clear availability trade-off: delayed delivery "
+                "instead of failed sends. I recommend the outbox approach; it should win because it preserves "
+                "durable acceptance while allowing bounded asynchronous recovery and independent scaling."
+            )
+            self.assertEqual(orchestrator._peer_review_errors(beta, adversarial), [])
+
+            challenge_then_delta = (
+                "I challenge the coordinator's synchronous fan-out assumption. A durable queue is the "
+                "superior alternative and I recommend it because availability should win over immediate "
+                "fan-out.\n\n## DESIGN_APPEND\n### Delivery boundary\nPersist accepted messages before "
+                "asynchronous delivery. Record queue ownership, retry limits, idempotency keys, poison-message "
+                "handling, user-visible delayed state, recovery behavior, and operational evidence."
+            )
+            self.assertEqual(orchestrator._peer_review_errors(beta, challenge_then_delta), [])
+
+            advocate_then_delta = (
+                "The server-authoritative epoch assumption creates an injection risk. I advocate a "
+                "client-authenticated membership alternative and the design must adopt signed membership "
+                "transitions.\n\n## DESIGN_APPEND\n### Membership authenticity\nRequire every epoch transition "
+                "to carry member-verifiable signatures, replay protection, deterministic ordering, bounded "
+                "recovery, explicit rejection behavior, and auditable non-secret evidence."
+            )
+            self.assertEqual(orchestrator._peer_review_errors(beta, advocate_then_delta), [])
+
     def test_strong_model_is_reserved_for_synthesis(self):
         cheap_manager = StatefulFake(AgentConfig(
             name="manager", kind="gemini", model="gemini-2.5-flash",
@@ -2079,18 +2198,24 @@ Decision 2: Choose retention.
                 }
             res = client.post("/agents", json=local_agent)
             self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json()["agent"]["api_key"], "****")
+            self.assertTrue(res.json()["agent"]["has_api_key"])
+            self.assertNotIn("local-secret", res.text)
             local_id = res.json()["agent"]["id"]
 
             local_agent["system_prompt"] = "updated local system"
             res = client.put(f"/agents/{local_id}", json=local_agent)
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json()["agent"]["system_prompt"], "updated local system")
+            self.assertNotIn("local-secret", res.text)
 
             res = client.get("/agents")
             self.assertEqual(res.status_code, 200)
             data = res.json()
             self.assertEqual(len(data["agents"]), 1)
             self.assertEqual(data["agents"][0]["model"], "gpt-4o-mini")
+            self.assertEqual(data["agents"][0]["api_key"], "****")
+            self.assertNotIn("local-secret", res.text)
             self.assertNotIn("global", data)
             self.assertNotIn("merged", data)
 
@@ -2502,6 +2627,27 @@ Decision 2: Choose retention.
 
         asyncio.run(exercise())
 
+    def test_expired_lease_never_owns_active_runtime_lifetime(self):
+        import backend.server
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = backend.server.AppState()
+            state.open_project(directory)
+            state.status = "running"
+            canonical = str(Path(directory).resolve())
+            backend.server.app_states[canonical] = state
+            backend.server.session_projects["detached-observer"] = canonical
+            backend.server.session_last_seen["detached-observer"] = 10.0
+
+            expired = asyncio.run(backend.server.expire_stale_bindings(now=100.0, ttl_seconds=75))
+
+            self.assertEqual(expired, ["detached-observer"])
+            self.assertIs(backend.server.app_states[canonical], state)
+            self.assertFalse(state.store._closed)
+            state.status = "stopped"
+            backend.server.app_states.pop(canonical, None)
+            state.close()
+
     def test_active_tab_heartbeat_prevents_lease_expiry(self):
         import backend.server
 
@@ -2791,7 +2937,9 @@ Decision 2: Choose retention.
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(directory)
             workspace.init("Build a logging service")
-            failed = StatefulFake(AgentConfig(id="provider-a", name="failed", kind="cli"))
+            failed = StatefulFake(AgentConfig(
+                id="provider-a", name="failed", kind="cli", cli_command="gemini",
+            ))
             failed.replies = iter([])
             healthy_response = json.dumps({
                 "status": "ask",
@@ -2806,10 +2954,15 @@ Decision 2: Choose retention.
                 AgentConfig(id="provider-b", name="healthy", kind="openai", model="gpt-4o"),
                 replies=[healthy_response],
             )
+            coordinator = StatefulFake(AgentConfig(
+                id="provider-c", name="coordinator", kind="cli", cli_command="codex exec",
+            ))
             events = []
-            orchestrator = Orchestrator([failed, healthy], workspace, event_cb=events.append, require_approval=True)
+            orchestrator = Orchestrator(
+                [coordinator, failed, healthy], workspace, event_cb=events.append, require_approval=True,
+            )
             orchestrator.idea = "Build a logging service"
-            question = asyncio.run(orchestrator._adaptive_discovery_question(failed, 1))
+            question = asyncio.run(orchestrator._adaptive_discovery_question(coordinator, 1))
             self.assertIn("Where must", question)
             self.assertTrue(any(
                 event.kind == EventKind.PHASE and event.data.get("status") == "provider_failover"
@@ -2817,6 +2970,65 @@ Decision 2: Choose retention.
             ))
             self.assertFalse(orchestrator._adaptive_discovery_unavailable)
             self.assertIn("provider-a", orchestrator._discovery_failed_providers)
+
+    def test_discovery_reserves_high_overhead_codex_cli_for_synthesis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Build secure messaging")
+            response = json.dumps({
+                "status": "ready_to_draft", "dimension": "", "question": "", "reason": "",
+                "options": [], "recommended": "", "blocking": False,
+            })
+            codex = StatefulFake(AgentConfig(
+                id="codex", name="architect_alpha", kind="cli", cli_command="codex exec",
+                extra={"runtime_base_name": "codex-cli"},
+            ))
+            gemini = StatefulFake(AgentConfig(
+                id="gemini", name="architect_beta", kind="cli", cli_command="gemini",
+                extra={"runtime_base_name": "gemini-cli"},
+            ), replies=[response])
+            orchestrator = Orchestrator([codex, gemini], workspace, require_approval=True)
+            orchestrator.idea = "Build secure messaging"
+
+            result = asyncio.run(orchestrator._adaptive_discovery_question(codex, 1))
+
+            self.assertEqual(result, "")
+            self.assertEqual(len(gemini.received), 1)
+            self.assertEqual(len(codex.received), 0)
+
+    def test_secure_messaging_discovery_is_python_owned_before_ai(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.write_brief(
+                "Design a WhatsApp-like consumer messaging product with secure private and group conversations."
+            )
+            workspace.init(workspace.brief())
+            orchestrator = Orchestrator([], workspace, require_approval=True)
+            orchestrator.idea = workspace.brief()
+
+            encryption = orchestrator._product_rule_discovery_question()
+            self.assertIn("end-to-end encryption", encryption)
+            self.assertIn("Recommendation: A", encryption)
+            self.assertEqual(
+                orchestrator._checkpoint_quality_errors(
+                    orchestrator._checkpoint_payload_from_text(encryption)
+                ),
+                [],
+            )
+
+            workspace.record_user_decision(
+                "Should every conversation use end-to-end encryption?",
+                "A — End-to-end encryption for every conversation",
+            )
+            identity = orchestrator._product_rule_discovery_question()
+            self.assertIn("Phone-number verification", identity)
+            self.assertIn("optional usernames", identity)
+            self.assertEqual(
+                orchestrator._checkpoint_quality_errors(
+                    orchestrator._checkpoint_payload_from_text(identity)
+                ),
+                [],
+            )
 
     def test_inline_questions_are_not_announced_as_workspace_artifact_writes(self):
         source = (Path(__file__).parents[1] / "backend" / "orchestrator.py").read_text()
