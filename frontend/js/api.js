@@ -335,9 +335,8 @@ function renderStructuredCheckpoint(checkpoint) {
     const consequence = option.consequence ? `<span class="decision-option-consequence">${escHtml(option.consequence)}</span>` : '';
     return `<label class="decision-option ${option.recommended ? 'is-recommended' : ''}"><input type="radio" name="decisionChoice" value="${escAttr(option.id)}" data-label="${escAttr(option.label)}" data-text="${escAttr(encodeURIComponent(option.summary))}" onchange="selectDecisionRadio()"><span class="decision-option-key">${escHtml(option.label)}</span><span class="decision-option-copy"><strong>${escHtml(option.summary)}</strong>${consequence}</span>${option.recommended ? '<span class="decision-recommended-badge">Recommended</span>' : ''}</label>`;
   }).join('');
-  const rationale = checkpoint.rationale ? `<div class="decision-rationale"><strong>Why this decision matters</strong><span>${escHtml(checkpoint.rationale)}</span></div>` : '';
-  const recommendation = checkpoint.recommendation ? `<div class="decision-recommendation"><strong>Recommendation:</strong> ${escHtml(checkpoint.recommendation)}</div>` : '';
-  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(checkpoint.question)}</div>${rationale}${recommendation}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-key">O</span><span class="decision-option-copy">Other — write my own answer below</span></label></fieldset></div>`;
+  const rationale = checkpoint.rationale ? `<details class="decision-context"><summary>Context</summary><div>${escHtml(checkpoint.rationale)}</div></details>` : '';
+  return `<div class="decision-group"><div class="decision-question-copy"><div class="decision-question">${escHtml(checkpoint.question)}</div>${rationale}</div><fieldset class="decision-inline-options"><legend class="sr-only">Choose one option</legend>${radios}<label class="decision-option decision-other"><input type="radio" name="decisionChoice" value="other" onchange="selectDecisionRadio()"><span class="decision-option-copy">Write a different answer</span></label></fieldset></div>`;
 }
 
 window.openDecisionModal = function() {
@@ -999,13 +998,14 @@ function appendUserPrompt(message, timestamp = '') {
   const avatar = document.createElement('div');
   avatar.className = 'feed-avatar';
   avatar.style.background = 'var(--accent)';
-  avatar.textContent = 'Y';
+  const userName = currentUser?.username || 'User';
+  avatar.textContent = userName.slice(0, 1).toUpperCase();
   const meta = document.createElement('div');
   meta.className = 'feed-meta';
   const header = document.createElement('div');
   header.className = 'feed-header-line';
   const displayTime = timestamp ? new Date(timestamp).toLocaleTimeString() : 'Just now';
-  header.innerHTML = `<span class="feed-agent">You</span><span class="feed-ts">${escHtml(displayTime)}</span>`;
+  header.innerHTML = `<span class="feed-agent">${escHtml(userName)}</span><span class="feed-ts">${escHtml(displayTime)}</span>`;
   const text = document.createElement('div');
   text.className = 'feed-text';
   text.textContent = message;

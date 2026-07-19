@@ -1,6 +1,6 @@
 # DesignFlow Architecture
 
-DesignFlow converts a product goal and repository context into a deterministic planning baseline. Python owns control flow, durable state, persistence, conflict policy, context limits, projection, and validation. Models participate in a bounded sequential review: opening design, grounded peer challenges, coordinator revision, then projection.
+DesignFlow converts a product goal and repository context into a deterministic planning baseline. Python owns control flow, durable state, persistence, conflict policy, context limits, projection, and validation. Models participate in a bounded sequential debate: opening design, semantically selected specialist reviews, coordinator revision, and reassessment until agreement or the configured loop-depth limit.
 
 There is one orchestration implementation: `backend/orchestration.py`. SQLite is the authority for a run. `DESIGN.md`, `PLAN.md`, `DECISIONS.md`, and `QUESTIONS.md` are projections for people and coding agents; parsing those files never reconstructs workflow state.
 
@@ -14,7 +14,7 @@ flowchart LR
     O --> L["LoopManager command and signal policy"]
     L --> E["WorkflowEngine legal transition graph"]
     E <--> DB["SQLite blackboard"]
-    O --> Experts["Coordinator plus sequential peer reviewers"]
+    O --> Experts["Coordinator plus context-selected specialists"]
     O --> Local["Local analysis and context compiler"]
     Local <--> DB
     O --> Renderer["Deterministic projection renderer"]
@@ -208,7 +208,7 @@ flowchart TD
     Gate -->|No| Invalid["FAILED; structured error"]
 ```
 
-The coordinator first returns a strict `ExpertProposal`. Peers then return `DebateReview` records containing only grounded challenges or validated topics; they do not generate competing full proposals. Before revision, the workflow creates a durable human review checkpoint showing the proposed direction and important objections. The user may approve or provide steering; that answer is authoritative revision input. The coordinator then returns a `DebateRevision` with one `accepted`, `defended`, `merged`, or `unresolved` disposition for every challenge and one canonical revised proposal. Only that canonical proposal feeds claims and projections. Every turn is durably stored in `planning_debate_turns`; completed runs remain replay-safe.
+The coordinator first returns a strict `ExpertProposal`. The loop manager semantically ranks available specialist profiles against the goal, task, and retrieved repository context; review relevance—not loop depth—determines whether design, security, cloud, data, UX, or another configured specialist participates. Selected specialists run sequentially and return `DebateReview` records containing only grounded challenges or validated topics; they do not generate independent proposals. When a cycle produces new challenges, the coordinator returns a typed revision and the specialists reassess it. The loop stops early when a cycle produces no new material challenge, or stops at the configured debate depth. It then creates a durable human review checkpoint showing the resulting direction and important objections. The user may approve or provide steering, and the final `DebateRevision` must disposition every durable challenge exactly once. Only that canonical proposal feeds claims and projections. Every turn is durably stored in `planning_debate_turns`; completed runs remain replay-safe.
 
 Each proposal receives a bounded repository evidence packet, preferring root product/specification Markdown and then other indexable project files. Placeholder goals such as “just testing” are rejected before agent initialization or identity persistence. A previously persisted placeholder may be replaced by the next meaningful goal.
 

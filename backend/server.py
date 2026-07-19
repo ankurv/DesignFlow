@@ -987,6 +987,14 @@ async def start_run(
 
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
         personas, _, _, _ = state.workspace.parse_personas()
+        try:
+            persona_catalog = {
+                item.get("id"): item
+                for item in json.loads(state.workspace.read("personas")).get("personas", [])
+                if item.get("id")
+            }
+        except (TypeError, json.JSONDecodeError):
+            persona_catalog = {}
         assigned_models: set[str] = set()
         for i, (role, system_prompt) in enumerate(personas.items()):
             base_config = base_configs[i % len(base_configs)]
@@ -1002,6 +1010,13 @@ async def start_run(
             expert["name"] = role
             expert["role"] = role
             expert["system_prompt"] = system_prompt
+            profile = persona_catalog.get(role, {})
+            expert.setdefault("extra", {}).update({
+                "review_category": profile.get("category", ""),
+                "review_signals": profile.get("signals", []),
+                "design_focus": profile.get("design_focus", []),
+                "plan_focus": profile.get("plan_focus", []),
+            })
             agents.append(create_agent(to_agent_config(expert, state)))
 
         # 2. Also include any custom agents the user explicitly defined
@@ -1136,6 +1151,7 @@ async def start_run(
         workspace=run_workspace,
         event_cb=lambda e: broadcast(e, state),
         max_tokens=body.max_tokens,
+        max_debate_rounds=body.max_debate_rounds,
         store=state.store,
         run_id=state.run_id,
     )

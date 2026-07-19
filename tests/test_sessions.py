@@ -156,7 +156,7 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("setTimeout(() => checkAgentHealth(cfg, uid)", agents_ui)
         self.assertIn("Provider checks may consume quota", agents_ui)
         index = (Path(__file__).parents[1] / "frontend" / "index.html").read_text()
-        self.assertIn("/js/api.js?v=20260719f", index)
+        self.assertIn("/js/api.js?v=20260719h", index)
         self.assertIn("/js/agents.js?v=20260719b", index)
 
     def test_checkpoint_answer_is_transactional_and_confirms_decision(self):
@@ -266,10 +266,10 @@ class SessionTests(unittest.TestCase):
             agent = ProposalAgent(AgentConfig(name="architect", kind="openai", role="architect"))
             first = Orchestration(agents=[agent], workspace=workspace, store=store, run_id="run-complete")
             asyncio.run(run_with_approved_review(first, "Build a planner"))
-            self.assertEqual(agent.calls, 4)
+            self.assertEqual(agent.calls, 3)
             second = Orchestration(agents=[agent], workspace=workspace, store=store, run_id="run-complete")
             asyncio.run(second.run("Build a planner"))
-            self.assertEqual(agent.calls, 4)
+            self.assertEqual(agent.calls, 3)
             self.assertEqual(WorkflowRepository(store).get("run-complete").state, WorkflowState.COMPLETED)
             store.close()
 
@@ -323,6 +323,16 @@ class SessionTests(unittest.TestCase):
         self.assertIn("WAITING_FOR_RECOVERY: 'needs_attention'", source)
         self.assertIn("COMPLETED: 'done'", source)
         self.assertIn("awaitingDecision: state === 'WAITING_FOR_USER'", source)
+
+    def test_review_depth_and_user_identity_are_wired_to_the_ui(self):
+        root = Path(__file__).parents[1]
+        server = (root / "backend" / "server.py").read_text()
+        frontend = (root / "frontend" / "js" / "api.js").read_text()
+        page = (root / "frontend" / "index.html").read_text()
+        self.assertIn("max_debate_rounds=body.max_debate_rounds", server)
+        self.assertIn("currentUser?.username || 'User'", frontend)
+        self.assertNotIn('<span class="feed-agent">You</span>', frontend)
+        self.assertIn("Debate loop depth", page)
 
     def test_runtime_has_no_v1_or_section_state_authority(self):
         root = Path(__file__).parents[1]

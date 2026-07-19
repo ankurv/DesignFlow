@@ -66,7 +66,9 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await orchestrator.accept_structured_checkpoint_answer(f"{option['label']} — {option['summary']}", False, "test")
                 break
         await task
-        self.assertEqual(len(agent.received_kwargs), 4)
+        # Discovery, opening proposal, and peer review. An approved proposal
+        # with no material challenges is not regenerated as a revision.
+        self.assertEqual(len(agent.received_kwargs), 3)
         for received in agent.received_kwargs:
             self.assertIn("mcp_tools", received)
             self.assertIsNone(received["mcp_tools"])

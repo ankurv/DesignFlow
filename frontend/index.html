@@ -14,7 +14,7 @@
     if (window.onMonacoReady) window.onMonacoReady();
   });
 </script>
-  <link rel="stylesheet" href="/css/style.css?v=20260719c">
+  <link rel="stylesheet" href="/css/style.css?v=20260719e">
 </head>
 <body>
 
@@ -80,8 +80,8 @@
 
       <div style="display:flex; align-items:center; justify-content:space-between;">
         <div style="display:flex; flex-direction:column; gap:4px;">
-          <span style="font-weight:600; font-size:14px; color:var(--text);">Debate Level: <span id="debateLevelLabel" style="color:var(--accent2); font-weight:bold; margin-left:6px;">3</span></span>
-          <span style="font-size:12px; color:var(--muted);">Adjust the intensity and round count for agent debates</span>
+          <span style="font-weight:600; font-size:14px; color:var(--text);">Debate loop depth: <span id="debateLevelLabel" style="color:var(--accent2); font-weight:bold; margin-left:6px;">3</span></span>
+          <span style="font-size:12px; color:var(--muted);">Maximum challenge-and-revision cycles; the loop stops early when reviewers agree</span>
         </div>
         <div style="display:flex; align-items:center; width: 200px;">
           <input type="range" id="debateRoundsSlider" min="1" max="10" value="3" oninput="document.getElementById('debateLevelLabel').innerText=this.value" style="width:100%; accent-color:var(--accent); cursor:pointer;">
@@ -178,7 +178,7 @@
             <div id="decisionModal" class="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decisionModalTitle" style="display:none;">
               <div class="decision-modal-panel">
                 <header class="decision-modal-header">
-                  <div><div class="decision-step-label">Action required</div><h2 id="decisionModalTitle">Make a project decision</h2></div>
+                  <h2 id="decisionModalTitle">Decision needed</h2>
                   <button class="decision-modal-close" type="button" onclick="closeDecisionModal()" aria-label="Close decision">×</button>
                 </header>
                 <main class="decision-modal-scroll">
@@ -186,8 +186,10 @@
                   <div id="contextDecisionOptions" class="decision-options" style="display:none;"></div>
                 </main>
                 <footer class="decision-modal-footer">
-                  <label for="decisionCustomInput">Custom answer</label>
-                  <textarea id="decisionCustomInput" class="decision-custom-answer" rows="2" placeholder="Choose an option above, or write your own answer…"></textarea>
+                  <div class="decision-custom-wrap">
+                    <label for="decisionCustomInput">Your answer</label>
+                    <textarea id="decisionCustomInput" class="decision-custom-answer" rows="2" placeholder="Type a different answer…"></textarea>
+                  </div>
                   <div class="decision-modal-footer-actions">
                     <div id="decisionSubmitStatus" class="decision-submit-status" aria-live="polite"></div>
                     <button id="decisionSubmitBtn" class="btn btn-primary" type="button" onclick="submitSelectedDecision()">Continue</button>
@@ -375,7 +377,7 @@
 
 
   <script src="/js/state.js?v=20260712a"></script>
-  <script src="/js/api.js?v=20260719f"></script>
+  <script src="/js/api.js?v=20260719h"></script>
   <script src="/js/workspace.js?v=20260710q"></script>
   <script src="/js/agents.js?v=20260719b"></script>
   <script src="/js/main.js?v=20260712a"></script>

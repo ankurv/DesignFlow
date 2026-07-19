@@ -18,7 +18,7 @@ from backend.workflow import (
 )
 from backend.workflow.materiality import classify_materiality
 from backend.workflow.models import (
-    ContextItem, DebateReview, ExpertProposal, ProposalComponent, ProposalDecision, ProposalRisk,
+    ContextItem, DebateChallenge, DebateReview, ExpertProposal, ProposalComponent, ProposalDecision, ProposalRisk,
     ProposalUnknown,
 )
 from backend.workflow.planning import PlanningService
@@ -99,13 +99,56 @@ class SteeringAwareAgent(JsonProposalAgent):
 
 
 class BareRevisionAgent(JsonProposalAgent):
+    def __init__(self, config):
+        super().__init__(config)
+        self.revision_calls = 0
+
     def _raw_send(self, messages, system, *args, **kwargs):
         if "coordinating architect" in system:
+            self.revision_calls += 1
             return super()._raw_send(messages, PROPOSAL_SYSTEM, *args, **kwargs)
         return super()._raw_send(messages, system, *args, **kwargs)
 
 
+class OneChallengeAgent(JsonProposalAgent):
+    def __init__(self, config):
+        super().__init__(config)
+        self.review_calls = 0
+
+    def _raw_send(self, messages, system, *args, **kwargs):
+        if "reviewing a concrete architecture proposal" in system:
+            self.review_calls += 1
+            if self.review_calls == 1:
+                return ('{"challenges":[{"id":"auth-boundary","target_topic":"Authorization",'
+                        '"claim":"Authorization ownership is unspecified","evidence":"The proposal omits an enforcement boundary",'
+                        '"consequence":"Protected writes may bypass policy","proposed_change":"Name the server authorization boundary",'
+                        '"materiality":"high"}],"validated_topics":[]}'), Usage(input_tokens=20, output_tokens=20)
+            return '{"challenges":[],"validated_topics":["authorization boundary"]}', Usage(input_tokens=20, output_tokens=10)
+        return super()._raw_send(messages, system, *args, **kwargs)
+
+
+class AcceptingCoordinatorAgent(JsonProposalAgent):
+    def _raw_send(self, messages, system, *args, **kwargs):
+        if "coordinating architect" in system:
+            return """{"proposal":{"components":[{"name":"Workflow engine","responsibility":"Enforce legal transitions and authorization","interfaces":["SQLite"]}],"decisions":[{"topic":"authorization","recommendation":"Server owns authorization","rationale":"Trusted enforcement boundary","alternatives":["client checks"]}],"risks":[],"assumptions":[],"unknowns":[]},"dispositions":[{"challenge_id":"auth-boundary","status":"accepted","rationale":"The boundary was missing","resulting_decision":"Server authorization is explicit"}]}""", Usage(input_tokens=40, output_tokens=40)
+        return super()._raw_send(messages, system, *args, **kwargs)
+
+
 class OrchestrationTests(unittest.TestCase):
+    def test_identical_peer_challenge_is_deduplicated_but_id_collision_is_rejected(self):
+        first = DebateChallenge(
+            id="retry-policy", target_topic="Retries", claim="Three retries are insufficient",
+            evidence="Failure analysis", consequence="Notifications may be lost",
+            proposed_change="Validate retry limits", materiality="high",
+        )
+        duplicate = first.model_copy(update={"claim": "  Three   retries are insufficient "})
+        collision = first.model_copy(update={"claim": "Retries consume too much battery"})
+        known = []
+        self.assertTrue(Orchestration._append_unique_challenge(known, first))
+        self.assertFalse(Orchestration._append_unique_challenge(known, duplicate))
+        with self.assertRaisesRegex(ValueError, "collision"):
+            Orchestration._append_unique_challenge(known, collision)
+
     def test_discovery_contract_treats_grounded_personal_goal_as_actionable(self):
         self.assertIn("personal tool", DISCOVERY_SYSTEM)
         self.assertIn("reversible assumption", DISCOVERY_SYSTEM)
@@ -580,11 +623,12 @@ class OrchestrationTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertIn("Keep all data local and remove cloud synchronization", agent.revision_input)
 
-    def test_bare_revision_proposal_is_losslessly_wrapped_when_no_challenges_exist(self):
+    def test_approved_unchallenged_proposal_skips_redundant_revision_call(self):
         workspace = Workspace(self.tmp.name)
         workspace.init("Build a reliable planner")
+        agent = BareRevisionAgent(AgentConfig(name="architect", kind="openai"))
         orchestrator = Orchestration(
-            agents=[BareRevisionAgent(AgentConfig(name="architect", kind="openai"))],
+            agents=[agent],
             workspace=workspace, store=self.store, run_id="run-bare-revision",
         )
         asyncio.run(run_with_approved_review(orchestrator, "Build a reliable planner"))
@@ -592,6 +636,7 @@ class OrchestrationTests(unittest.TestCase):
         revision = self.repository.debate_turns("run-bare-revision")[-1]
         self.assertEqual(revision["turn_kind"], "revision")
         self.assertEqual(revision["payload"]["dispositions"], [])
+        self.assertEqual(agent.revision_calls, 0)
 
     def test_discovery_uncertainty_is_recorded_without_interrupting_user(self):
         workspace = Workspace(self.tmp.name)
@@ -656,6 +701,30 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual([turn["turn_kind"] for turn in turns], ["opening", "challenge", "revision"])
         visible_verdicts = [event for event in events if event.kind.value == "verdict"]
         self.assertEqual(len(visible_verdicts), 1)
+
+    def test_debate_depth_bounds_revision_cycles_not_reviewer_count(self):
+        workspace = Workspace(self.tmp.name)
+        workspace.init("Build a bounded planner")
+        reviewer = OneChallengeAgent(AgentConfig(
+            name="security_auditor", kind="openai", role="security_auditor",
+            extra={"review_signals": ["authorization", "permissions", "security"]},
+        ))
+        orchestrator = Orchestration(
+            agents=[
+                AcceptingCoordinatorAgent(AgentConfig(name="architect_alpha", kind="openai")),
+                reviewer,
+            ],
+            workspace=workspace, store=self.store, run_id="run-depth-three",
+            max_debate_rounds=3,
+        )
+        asyncio.run(run_with_approved_review(orchestrator, "Build a planner with server authorization"))
+        turns = self.repository.debate_turns("run-depth-three")
+        self.assertEqual(
+            [turn["turn_kind"] for turn in turns],
+            ["opening", "challenge", "round_revision", "challenge", "revision"],
+        )
+        self.assertEqual(reviewer.review_calls, 2)
+        self.assertEqual([agent.name for agent in orchestrator.participants], ["architect_alpha", "security_auditor"])
 
     def test_restart_from_diverging_reuses_persisted_proposal(self):
         workspace = Workspace(self.tmp.name)

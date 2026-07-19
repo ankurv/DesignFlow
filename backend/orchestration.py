@@ -100,6 +100,7 @@ class Orchestration:
     def __init__(
         self, *, agents: list[AgentBase], workspace, store, run_id: str,
         event_cb: Callable[[Event], Any] | None = None, max_tokens: int = 100000,
+        max_debate_rounds: int = 3,
     ):
         self.agents = agents
         self.ws = workspace
@@ -107,6 +108,9 @@ class Orchestration:
         self.run_id = run_id
         self._cb = event_cb
         self.max_tokens = max_tokens
+        # Debate depth bounds challenge/revision cycles. It never controls how
+        # many specialists are selected for a cycle.
+        self.max_debate_rounds = max(1, max_debate_rounds)
         self.repository = WorkflowRepository(store)
         self.context_tree = ContextTree(store)
         self.engine = WorkflowEngine(self.repository)
@@ -163,6 +167,44 @@ class Orchestration:
             "allowed_actions": snapshot.allowed_actions,
             "status": "waiting_for_approval" if snapshot.state == WorkflowState.WAITING_FOR_USER else "running",
         }))
+
+    @staticmethod
+    def _append_unique_challenge(known_challenges: list[dict[str, Any]], challenge) -> bool:
+        existing = next((item for item in known_challenges if item["id"] == challenge.id), None)
+        if existing:
+            same_claim = " ".join(existing["claim"].lower().split()) == " ".join(
+                challenge.claim.lower().split()
+            )
+            if same_claim:
+                return False
+            raise ValueError(f"challenge id collision with different claims: {challenge.id}")
+        known_challenges.append(challenge.model_dump())
+        return True
+
+    def _select_reviewers(self, query: str, coordinator: AgentBase) -> list[AgentBase]:
+        """Select specialists semantically; preserve configured order for execution."""
+        candidates = [agent for agent in self.agents if agent is not coordinator]
+        if not candidates:
+            return [coordinator]
+        profiles = []
+        for agent in candidates:
+            extra = agent.config.extra or {}
+            profile = "\n".join(filter(None, [
+                agent.name, agent.config.role, extra.get("review_category", ""),
+                " ".join(extra.get("review_signals", [])),
+                " ".join(extra.get("design_focus", [])),
+                " ".join(extra.get("plan_focus", [])), agent.config.system_prompt,
+            ]))
+            profiles.append((agent.config.id or agent.name, profile))
+        ranked = self.context_tree.analyzer.rank(query, profiles, len(profiles))
+        threshold = 0.10 if not self.context_tree.analyzer.available else 0.22
+        selected_ids = {agent_id for agent_id, score in ranked if score >= threshold}
+        if not selected_ids and ranked:
+            selected_ids.add(ranked[0][0])
+        return [
+            agent for agent in candidates
+            if (agent.config.id or agent.name) in selected_ids
+        ]
 
     async def _proposal(
         self, agent: AgentBase, goal: str, task: str, source_context: str,
@@ -259,10 +301,14 @@ class Orchestration:
                     f"Disposition every challenge ID exactly once: {json.dumps(sorted(challenge_ids))}."
                 )
             try:
-                return await self._typed_debate_call(
+                repaired, raw = await self._typed_debate_call(
                     agent, prompt=repair_prompt, system=REVISION_SYSTEM, phase="diverging",
                     turn_kind="revision_repair", model=DebateRevision, allow_repair=False,
                 )
+                repaired_ids = [item.challenge_id for item in repaired.dispositions]
+                if len(repaired_ids) != len(set(repaired_ids)) or set(repaired_ids) != challenge_ids:
+                    raise ValueError("repaired revision did not disposition every challenge exactly once")
+                return repaired, raw
             except ValueError as repair_error:
                 raise ValueError(
                     "The coordinating architect could not return the required revised-design contract after one retry."
@@ -438,7 +484,7 @@ class Orchestration:
 
     async def _run_divergence(self, idea: str, task: str) -> None:
         operation_id = f"diverge-{self.run_id}"
-        selected = self.agents[:min(3, len(self.agents))]
+        selected = self.agents
         stored_proposals = self.repository.proposals(self.run_id)
         if not stored_proposals:
             if not selected:
@@ -462,7 +508,9 @@ class Orchestration:
                     run_id=self.run_id, operation_id=operation_id, sequence=1, agent=coordinator.name,
                     turn_kind="opening", payload=opening.model_dump(),
                 )
-                reviewers = selected[1:] or [coordinator]
+                reviewers = self._select_reviewers(
+                    f"{idea}\n{task}\n{source_context}", coordinator,
+                )
                 sequence = 2
             else:
                 opening_turn = next((turn for turn in debate_turns if turn["turn_kind"] == "opening"), None)
@@ -474,28 +522,52 @@ class Orchestration:
                         review = DebateReview.model_validate(turn["payload"])
                         reviews.append(review)
                         known_challenges.extend(item.model_dump() for item in review.challenges)
+                    elif turn["turn_kind"] == "round_revision":
+                        opening = DebateRevision.model_validate(turn["payload"]).proposal
                 reviewers = []
-                sequence = 2 + len(reviews)
-            for reviewer in reviewers:
-                review_prompt = (
-                    f"Product goal: {idea}\nCurrent task: {task or idea}\n\nRepository evidence:\n{source_context}\n\n"
-                    f"Opening proposal:\n{opening.model_dump_json(indent=2)}\n\n"
-                    f"Challenges already raised (do not repeat):\n{json.dumps(known_challenges, indent=2)}"
+                sequence = max(int(turn["sequence"]) for turn in debate_turns) + 1
+            current_proposal = opening
+            for round_number in range(1, self.max_debate_rounds + 1):
+                round_challenges: list[dict[str, Any]] = []
+                for reviewer in reviewers:
+                    review_prompt = (
+                        f"Debate cycle: {round_number} of {self.max_debate_rounds}\n"
+                        f"Product goal: {idea}\nCurrent task: {task or idea}\n\nRepository evidence:\n{source_context}\n\n"
+                        f"Current coordinator proposal:\n{current_proposal.model_dump_json(indent=2)}\n\n"
+                        f"Challenges already resolved or raised (do not repeat):\n{json.dumps(known_challenges, indent=2)}"
+                    )
+                    review, _ = await self._typed_debate_call(
+                        reviewer, prompt=review_prompt, system=REVIEW_SYSTEM, phase="diverging",
+                        turn_kind="challenge", model=DebateReview,
+                    )
+                    for challenge in review.challenges:
+                        if self._append_unique_challenge(known_challenges, challenge):
+                            round_challenges.append(challenge.model_dump())
+                    reviews.append(review)
+                    self.repository.save_debate_turn(
+                        run_id=self.run_id, operation_id=operation_id, sequence=sequence,
+                        agent=reviewer.name, turn_kind="challenge",
+                        payload=review.model_dump(),
+                    )
+                    sequence += 1
+                if not round_challenges:
+                    break
+                round_prompt = (
+                    f"Product goal: {idea}\nCurrent task: {task or idea}\n\n"
+                    f"Current proposal:\n{current_proposal.model_dump_json(indent=2)}\n\n"
+                    f"New challenges for cycle {round_number}:\n{json.dumps(round_challenges, indent=2)}\n\n"
+                    "Revise the proposal now so the specialists can reassess it."
                 )
-                review, _ = await self._typed_debate_call(
-                    reviewer, prompt=review_prompt, system=REVIEW_SYSTEM, phase="diverging",
-                    turn_kind="challenge", model=DebateReview,
-                )
-                for challenge in review.challenges:
-                    if any(item["id"] == challenge.id for item in known_challenges):
-                        raise ValueError(f"duplicate challenge id {challenge.id}")
-                    known_challenges.append(challenge.model_dump())
-                reviews.append(review)
+                round_ids = {item["id"] for item in round_challenges}
+                round_revision, _ = await self._revision_call(coordinator, round_prompt, round_ids)
+                current_proposal = round_revision.proposal
                 self.repository.save_debate_turn(
                     run_id=self.run_id, operation_id=operation_id, sequence=sequence,
-                    agent=reviewer.name, turn_kind="challenge", payload=review.model_dump(),
+                    agent=coordinator.name, turn_kind="round_revision",
+                    payload=round_revision.model_dump(),
                 )
                 sequence += 1
+            opening = current_proposal
 
             review_checkpoints = [
                 item for item in self.store.run_checkpoints(self.run_id)
@@ -531,6 +603,7 @@ class Orchestration:
             if not answered_review:
                 raise ValueError("design review checkpoint has not been answered")
             human_steering = str(answered_review.get("custom_answer") or "").strip()
+            selected_option = None
             if not human_steering and answered_review.get("selected_option_id"):
                 selected_option = next(
                     (item for item in answered_review.get("options", [])
@@ -548,9 +621,22 @@ class Orchestration:
                 f"Human review decision (authoritative steering):\n{human_steering}"
             )
             challenge_ids = {item["id"] for item in known_challenges}
-            revision, revision_raw = await self._revision_call(
-                coordinator, revision_prompt, challenge_ids,
+            approved_without_changes = bool(
+                not challenge_ids
+                and not str(answered_review.get("custom_answer") or "").strip()
+                and selected_option
+                and selected_option.get("label") == "A"
             )
+            if approved_without_changes:
+                # No evidence changed the proposal and the human explicitly
+                # accepted it. Re-generating the same design adds cost and a
+                # needless schema-failure boundary.
+                revision = DebateRevision(proposal=opening, dispositions=[])
+                revision_raw = opening.model_dump_json()
+            else:
+                revision, revision_raw = await self._revision_call(
+                    coordinator, revision_prompt, challenge_ids,
+                )
             disposition_ids = [item.challenge_id for item in revision.dispositions]
             if len(disposition_ids) != len(set(disposition_ids)) or set(disposition_ids) != challenge_ids:
                 raise ValueError("coordinator revision must disposition every challenge exactly once")
