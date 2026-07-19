@@ -162,12 +162,37 @@ class DebateChallenge(StrictModel):
     consequence: str = Field(min_length=1)
     proposed_change: str = Field(min_length=1)
     materiality: str
+    authority_basis: str
+    scope_effect: str
+    related_challenge_id: str = ""
+    relation: str
 
     @field_validator("materiality")
     @classmethod
     def valid_materiality(cls, value: str) -> str:
         if value not in {"low", "medium", "high"}:
             raise ValueError("materiality must be low, medium, or high")
+        return value
+
+    @field_validator("authority_basis")
+    @classmethod
+    def valid_authority_basis(cls, value: str) -> str:
+        if value not in {"explicit_requirement", "confirmed_decision", "repository_evidence", "assumption", "expert_judgment"}:
+            raise ValueError("invalid challenge authority basis")
+        return value
+
+    @field_validator("scope_effect")
+    @classmethod
+    def valid_scope_effect(cls, value: str) -> str:
+        if value not in {"preserves", "clarifies", "expands", "changes"}:
+            raise ValueError("invalid challenge scope effect")
+        return value
+
+    @field_validator("relation")
+    @classmethod
+    def valid_relation(cls, value: str) -> str:
+        if value not in {"distinct", "refines", "contradicts"}:
+            raise ValueError("invalid challenge relation")
         return value
 
 

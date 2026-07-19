@@ -1021,7 +1021,8 @@ async def start_run(
 
         # 2. Also include any custom agents the user explicitly defined
         for config in state.merged_configs:
-            if (config["name"] not in personas and not config.get("is_paused")
+            explicitly_specialized = bool(config.get("role") and config.get("system_prompt"))
+            if (explicitly_specialized and config["name"] not in personas and not config.get("is_paused")
                     and config_supports_design(config)):
                 agents.append(create_agent(to_agent_config(config, state)))
     except Exception as exc:
@@ -1681,9 +1682,7 @@ def recent_run_activity(limit: int = 8, state: AppState = Depends(get_state)):
         if answer:
             answer["audience"] = "conversation"
             events.append(answer)
-    if run.get("run_kind") in {"request_intake", "planning_workflow"} and run.get("status") in {
-        "running", "interrupted", "error",
-    }:
+    if run.get("run_kind") in {"request_intake", "planning_workflow"}:
         events.append({
             "event_id": f"prompt-{run_id}", "run_id": run_id,
             "timestamp": run.get("started_at", ""), "kind": "user_prompt",
@@ -1707,6 +1706,14 @@ def recent_run_activity(limit: int = 8, state: AppState = Depends(get_state)):
                     "error": "This request stopped before work began. Review the run details or submit it again.",
                 },
             })
+        elif run.get("run_kind") == "planning_workflow" and run.get("status") in {"done", "completed"}:
+            visible = [
+                event for event in state.store.run_events(run_id, limit=200)
+                if event.get("data", {}).get("visibility") == "user"
+            ]
+            for event in visible:
+                event["audience"] = "conversation"
+                events.append(event)
     resumable_workflow = WorkflowRepository(state.store).latest_resumable()
     resumable = bool(
         run.get("status") == "interrupted"

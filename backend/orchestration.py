@@ -15,7 +15,7 @@ from .workflow import (
     LoopCommandKind, LoopManager, LoopSignal, WorkflowEngine, WorkflowEvent, WorkflowRepository, WorkflowState,
 )
 from .workflow.models import (
-    DebateReview, DebateRevision, DiscoveryAssessment, ExpertProposal, WorkflowOperation,
+    ChallengeDisposition, DebateReview, DebateRevision, DiscoveryAssessment, ExpertProposal, WorkflowOperation,
 )
 from .workflow.planning import PlanningService
 
@@ -35,10 +35,15 @@ Agreement is allowed only after attempting falsification; do not manufacture sty
 REVIEW_SYSTEM = """You are reviewing a concrete architecture proposal, not creating an independent proposal.
 Return JSON only with this exact shape:
 {"challenges":[{"id":"stable-short-id","target_topic":"","claim":"","evidence":"",
-"consequence":"","proposed_change":"","materiality":"low|medium|high"}],"validated_topics":[]}
+"consequence":"","proposed_change":"","materiality":"low|medium|high",
+"authority_basis":"explicit_requirement|confirmed_decision|repository_evidence|assumption|expert_judgment",
+"scope_effect":"preserves|clarifies|expands|changes","related_challenge_id":"","relation":"distinct|refines|contradicts"}],"validated_topics":[]}
 Challenge only a consequential defect, unsupported assumption, missed requirement, or unsafe trade-off.
 Evidence must cite supplied product or repository context. Do not manufacture disagreement and do not repeat
-an earlier challenge. If the proposal is sound, return an empty challenges list and name validated topics.
+an earlier challenge. Explicit requirements and confirmed decisions outrank assumptions and expert preferences.
+Never disguise a feature expansion or changed product outcome as a correction: label its scope_effect honestly.
+When revisiting a topic, identify the earlier challenge and whether this challenge refines or contradicts it.
+If the proposal is sound, return an empty challenges list and name validated topics.
 """
 
 REVISION_SYSTEM = """You are the coordinating architect. Respond to every supplied challenge and produce the
@@ -183,7 +188,18 @@ class Orchestration:
 
     def _select_reviewers(self, query: str, coordinator: AgentBase) -> list[AgentBase]:
         """Select specialists semantically; preserve configured order for execution."""
-        candidates = [agent for agent in self.agents if agent is not coordinator]
+        candidates = []
+        for agent in self.agents:
+            if agent is coordinator:
+                continue
+            extra = agent.config.extra or {}
+            persona_profile = bool(
+                extra.get("review_category") or extra.get("review_signals")
+                or extra.get("design_focus") or extra.get("plan_focus")
+            )
+            explicit_custom_specialist = bool(agent.config.role and agent.config.system_prompt)
+            if persona_profile or explicit_custom_specialist:
+                candidates.append(agent)
         if not candidates:
             return [coordinator]
         profiles = []
@@ -197,14 +213,55 @@ class Orchestration:
             ]))
             profiles.append((agent.config.id or agent.name, profile))
         ranked = self.context_tree.analyzer.rank(query, profiles, len(profiles))
-        threshold = 0.10 if not self.context_tree.analyzer.available else 0.22
+        if self.context_tree.analyzer.available:
+            threshold = 0.22
+        else:
+            top_score = ranked[0][1] if ranked else 0.0
+            threshold = max(0.04, top_score * 0.30)
         selected_ids = {agent_id for agent_id, score in ranked if score >= threshold}
+        # A design debate always needs one opposing architecture review. Other
+        # specialists remain evidence-selected and do not depend on loop depth.
+        opposing = next((
+            agent for agent in candidates
+            if (agent.config.role or agent.name) == "architect_beta"
+        ), None)
+        if opposing:
+            selected_ids.add(opposing.config.id or opposing.name)
         if not selected_ids and ranked:
             selected_ids.add(ranked[0][0])
         return [
             agent for agent in candidates
             if (agent.config.id or agent.name) in selected_ids
         ]
+
+    @staticmethod
+    def _challenge_needs_human(challenge, earlier: list[dict[str, Any]]) -> bool:
+        """Prevent automatic scope expansion and same-topic decision oscillation."""
+        if challenge.scope_effect in {"expands", "changes"} or challenge.relation == "contradicts":
+            return True
+        topic = " ".join(challenge.target_topic.lower().split())
+        return any(" ".join(item["target_topic"].lower().split()) == topic for item in earlier)
+
+    @staticmethod
+    def _deterministic_scope_disposition(challenge: dict[str, Any]):
+        return ChallengeDisposition(
+            challenge_id=challenge["id"], status="defended",
+            rationale="The suggestion changes or expands the product scope and was not authorized by the user.",
+            resulting_decision="Preserve the current user-approved scope unless the user explicitly chooses the change.",
+        )
+
+    @staticmethod
+    def _debate_system(agent: AgentBase, contract: str) -> str:
+        """Compose specialist behavior with the non-negotiable typed contract."""
+        persona = (agent.config.system_prompt or "").strip()
+        if not persona:
+            return contract
+        return (
+            f"{persona}\n\n"
+            "The following orchestration contract is authoritative. Your specialist perspective "
+            "must operate inside it and must not alter its output schema or scope rules.\n\n"
+            f"{contract}"
+        )
 
     async def _proposal(
         self, agent: AgentBase, goal: str, task: str, source_context: str,
@@ -222,7 +279,7 @@ class Orchestration:
         }))
         self._register_participant(agent)
         raw = await asyncio.to_thread(
-            agent.send, prompt, PROPOSAL_SYSTEM, "", context_only=True,
+            agent.send, prompt, self._debate_system(agent, PROPOSAL_SYSTEM), "", context_only=True,
         )
         try:
             proposal = ExpertProposal.model_validate(_json_object(raw))
@@ -244,7 +301,9 @@ class Orchestration:
                 "turn_id": turn_id, "phase": phase, "role": turn_kind, "attempt": attempt,
             }))
             self._register_participant(agent)
-            raw = await asyncio.to_thread(agent.send, current_prompt, system, "", context_only=True)
+            raw = await asyncio.to_thread(
+                agent.send, current_prompt, self._debate_system(agent, system), "", context_only=True,
+            )
             try:
                 payload = _json_object(raw)
                 if model is DebateRevision and "proposal" not in payload:
@@ -502,6 +561,7 @@ class Orchestration:
             coordinator = selected[0]
             reviews: list[DebateReview] = []
             known_challenges: list[dict[str, Any]] = []
+            applied_dispositions: list[ChallengeDisposition] = []
             if not debate_turns:
                 _, opening, _ = await self._proposal(coordinator, idea, task, source_context)
                 self.repository.save_debate_turn(
@@ -523,26 +583,49 @@ class Orchestration:
                         reviews.append(review)
                         known_challenges.extend(item.model_dump() for item in review.challenges)
                     elif turn["turn_kind"] == "round_revision":
-                        opening = DebateRevision.model_validate(turn["payload"]).proposal
+                        durable_revision = DebateRevision.model_validate(turn["payload"])
+                        opening = durable_revision.proposal
+                        applied_dispositions.extend(durable_revision.dispositions)
                 reviewers = []
                 sequence = max(int(turn["sequence"]) for turn in debate_turns) + 1
             current_proposal = opening
+            applied_ids = {item.challenge_id for item in applied_dispositions}
+            blocked_challenges: list[dict[str, Any]] = [
+                item for item in known_challenges if item["id"] not in applied_ids
+            ]
             for round_number in range(1, self.max_debate_rounds + 1):
                 round_challenges: list[dict[str, Any]] = []
                 for reviewer in reviewers:
+                    reviewer_evidence = self.context_tree.retrieve(
+                        query=(f"{task or idea}\nReview the current proposal from the perspective of "
+                               f"{reviewer.config.role or reviewer.name}."),
+                        run_id=self.run_id, max_tokens=1800,
+                    ).text
+                    challenge_digest = [
+                        {"id": item["id"], "target_topic": item["target_topic"], "claim": item["claim"]}
+                        for item in known_challenges
+                    ]
                     review_prompt = (
                         f"Debate cycle: {round_number} of {self.max_debate_rounds}\n"
-                        f"Product goal: {idea}\nCurrent task: {task or idea}\n\nRepository evidence:\n{source_context}\n\n"
+                        f"Product goal: {idea}\nCurrent task: {task or idea}\n\n"
+                        f"Relevant repository evidence:\n{reviewer_evidence}\n\n"
                         f"Current coordinator proposal:\n{current_proposal.model_dump_json(indent=2)}\n\n"
-                        f"Challenges already resolved or raised (do not repeat):\n{json.dumps(known_challenges, indent=2)}"
+                        f"Earlier challenge digest (do not repeat):\n{json.dumps(challenge_digest, indent=2)}"
                     )
                     review, _ = await self._typed_debate_call(
                         reviewer, prompt=review_prompt, system=REVIEW_SYSTEM, phase="diverging",
                         turn_kind="challenge", model=DebateReview,
                     )
                     for challenge in review.challenges:
+                        earlier = list(known_challenges)
                         if self._append_unique_challenge(known_challenges, challenge):
-                            round_challenges.append(challenge.model_dump())
+                            challenge_data = challenge.model_dump()
+                            blocked_ids = {item["id"] for item in blocked_challenges}
+                            if (self._challenge_needs_human(challenge, earlier)
+                                    or challenge.related_challenge_id in blocked_ids):
+                                blocked_challenges.append(challenge_data)
+                            else:
+                                round_challenges.append(challenge_data)
                     reviews.append(review)
                     self.repository.save_debate_turn(
                         run_id=self.run_id, operation_id=operation_id, sequence=sequence,
@@ -561,12 +644,15 @@ class Orchestration:
                 round_ids = {item["id"] for item in round_challenges}
                 round_revision, _ = await self._revision_call(coordinator, round_prompt, round_ids)
                 current_proposal = round_revision.proposal
+                applied_dispositions.extend(round_revision.dispositions)
                 self.repository.save_debate_turn(
                     run_id=self.run_id, operation_id=operation_id, sequence=sequence,
                     agent=coordinator.name, turn_kind="round_revision",
                     payload=round_revision.model_dump(),
                 )
                 sequence += 1
+                if blocked_challenges:
+                    break
             opening = current_proposal
 
             review_checkpoints = [
@@ -580,15 +666,23 @@ class Orchestration:
                 objections = "; ".join(
                     f"{item['target_topic']}: {item['claim']}" for item in known_challenges[:3]
                 ) or "Peer review found no material objection."
+                scope_warning = ""
+                if blocked_challenges:
+                    scope_warning = " Scope-changing suggestions were not applied and require your explicit choice."
                 checkpoint = self.store.enqueue_checkpoint(
                     self.run_id, "design_review",
                     "Review the proposed design direction before it is finalized.",
-                    f"Proposed direction: {direction}. Peer review: {objections}",
-                    [
-                        {"label": "A", "summary": "Approve this direction", "consequence": "The coordinator will finalize it after applying valid challenges.", "recommended": True},
-                        {"label": "B", "summary": "Revise this direction", "consequence": "Write the scope or direction change you want the coordinator to apply."},
-                    ],
-                    recommendation="A — Approve if this matches your intent; otherwise choose B and add steering.",
+                    f"Proposed direction: {direction}. Peer review: {objections}.{scope_warning}",
+                    ([
+                        {"label": "A", "summary": "Keep the stated scope", "consequence": "Preserve the current proposal and reject unapproved scope changes.", "recommended": True},
+                        {"label": "B", "summary": "Authorize the listed scope changes", "consequence": "Allow the coordinator to incorporate the reviewers' scope-changing suggestions."},
+                    ] if blocked_challenges else [
+                        {"label": "A", "summary": "Approve this direction", "consequence": "Use the reviewed proposal without another model rewrite.", "recommended": True},
+                        {"label": "B", "summary": "Revise this direction", "consequence": "Ask the coordinator to revise the direction using your answer."},
+                    ]),
+                    recommendation=("A — Keep the stated scope unless you explicitly want the listed expansion."
+                                    if blocked_challenges else
+                                    "A — Approve if this matches your intent; otherwise choose B and add steering."),
                     dimension="canonical_design_direction", blocking=True,
                 )
                 snapshot = self.loop_manager.advance(self.run_id, LoopSignal.REVIEW_REQUIRED, {
@@ -614,26 +708,36 @@ class Orchestration:
             if not human_steering:
                 raise ValueError("answered design review contains no durable answer")
 
-            revision_prompt = (
-                f"Product goal: {idea}\nCurrent task: {task or idea}\n\nRepository evidence:\n{source_context}\n\n"
-                f"Opening proposal:\n{opening.model_dump_json(indent=2)}\n\n"
-                f"Peer reviews:\n{json.dumps([item.model_dump() for item in reviews], indent=2)}\n\n"
-                f"Human review decision (authoritative steering):\n{human_steering}"
-            )
             challenge_ids = {item["id"] for item in known_challenges}
-            approved_without_changes = bool(
-                not challenge_ids
+            approved_current = bool(
+                selected_option and selected_option.get("label") == "A"
                 and not str(answered_review.get("custom_answer") or "").strip()
-                and selected_option
-                and selected_option.get("label") == "A"
             )
-            if approved_without_changes:
-                # No evidence changed the proposal and the human explicitly
-                # accepted it. Re-generating the same design adds cost and a
-                # needless schema-failure boundary.
-                revision = DebateRevision(proposal=opening, dispositions=[])
+            if approved_current:
+                disposition_by_id = {item.challenge_id: item for item in applied_dispositions}
+                for challenge in blocked_challenges:
+                    disposition_by_id[challenge["id"]] = self._deterministic_scope_disposition(challenge)
+                revision = DebateRevision(
+                    proposal=opening,
+                    dispositions=[disposition_by_id[item_id] for item_id in sorted(challenge_ids)],
+                )
                 revision_raw = opening.model_dump_json()
             else:
+                compact_evidence = self.context_tree.retrieve(
+                    query=f"{task or idea}\nApply authoritative human steering to the reviewed proposal.",
+                    run_id=self.run_id, max_tokens=2200,
+                ).text
+                review_digest = [
+                    {"id": item["id"], "topic": item["target_topic"], "claim": item["claim"],
+                     "proposed_change": item["proposed_change"], "scope_effect": item["scope_effect"]}
+                    for item in known_challenges
+                ]
+                revision_prompt = (
+                    f"Product goal: {idea}\nCurrent task: {task or idea}\n\nRelevant evidence:\n{compact_evidence}\n\n"
+                    f"Current reviewed proposal:\n{opening.model_dump_json(indent=2)}\n\n"
+                    f"Challenge digest:\n{json.dumps(review_digest, indent=2)}\n\n"
+                    f"Human review decision (authoritative steering):\n{human_steering}"
+                )
                 revision, revision_raw = await self._revision_call(
                     coordinator, revision_prompt, challenge_ids,
                 )

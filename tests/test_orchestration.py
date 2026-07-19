@@ -122,7 +122,8 @@ class OneChallengeAgent(JsonProposalAgent):
                 return ('{"challenges":[{"id":"auth-boundary","target_topic":"Authorization",'
                         '"claim":"Authorization ownership is unspecified","evidence":"The proposal omits an enforcement boundary",'
                         '"consequence":"Protected writes may bypass policy","proposed_change":"Name the server authorization boundary",'
-                        '"materiality":"high"}],"validated_topics":[]}'), Usage(input_tokens=20, output_tokens=20)
+                        '"materiality":"high","authority_basis":"explicit_requirement","scope_effect":"clarifies",'
+                        '"related_challenge_id":"","relation":"distinct"}],"validated_topics":[]}'), Usage(input_tokens=20, output_tokens=20)
             return '{"challenges":[],"validated_topics":["authorization boundary"]}', Usage(input_tokens=20, output_tokens=10)
         return super()._raw_send(messages, system, *args, **kwargs)
 
@@ -134,12 +135,25 @@ class AcceptingCoordinatorAgent(JsonProposalAgent):
         return super()._raw_send(messages, system, *args, **kwargs)
 
 
+class ScopeExpansionReviewer(JsonProposalAgent):
+    def _raw_send(self, messages, system, *args, **kwargs):
+        if "reviewing a concrete architecture proposal" in system:
+            return ('{"challenges":[{"id":"configurable-reminders","target_topic":"Notification timing",'
+                    '"claim":"Fixed reminders may not suit every preference","evidence":"The explicit goal says notify 15 minutes before",'
+                    '"consequence":"Some users may want another offset","proposed_change":"Add configurable reminder offsets",'
+                    '"materiality":"medium","authority_basis":"expert_judgment","scope_effect":"expands",'
+                    '"related_challenge_id":"","relation":"distinct"}],"validated_topics":[]}'), Usage(input_tokens=20, output_tokens=20)
+        return super()._raw_send(messages, system, *args, **kwargs)
+
+
 class OrchestrationTests(unittest.TestCase):
     def test_identical_peer_challenge_is_deduplicated_but_id_collision_is_rejected(self):
         first = DebateChallenge(
             id="retry-policy", target_topic="Retries", claim="Three retries are insufficient",
             evidence="Failure analysis", consequence="Notifications may be lost",
             proposed_change="Validate retry limits", materiality="high",
+            authority_basis="repository_evidence", scope_effect="clarifies",
+            related_challenge_id="", relation="distinct",
         )
         duplicate = first.model_copy(update={"claim": "  Three   retries are insufficient "})
         collision = first.model_copy(update={"claim": "Retries consume too much battery"})
@@ -725,6 +739,54 @@ class OrchestrationTests(unittest.TestCase):
         )
         self.assertEqual(reviewer.review_calls, 2)
         self.assertEqual([agent.name for agent in orchestrator.participants], ["architect_alpha", "security_auditor"])
+
+    def test_generic_provider_is_not_eligible_as_logical_reviewer(self):
+        workspace = Workspace(self.tmp.name)
+        workspace.init("Notify me 15 minutes before an event")
+        coordinator = JsonProposalAgent(AgentConfig(name="architect_alpha", kind="openai"))
+        security = JsonProposalAgent(AgentConfig(
+            name="security_auditor", kind="openai", role="security_auditor",
+            system_prompt="Review authorization and privacy boundaries.",
+            extra={"review_category": "security", "review_signals": ["privacy", "authorization"]},
+        ))
+        generic_provider = JsonProposalAgent(AgentConfig(name="bedrock-2", kind="aws-bedrock"))
+        orchestrator = Orchestration(
+            agents=[coordinator, security, generic_provider], workspace=workspace,
+            store=self.store, run_id="run-specialist-selection",
+        )
+        selected = orchestrator._select_reviewers("Review privacy and authorization", coordinator)
+        self.assertEqual([agent.name for agent in selected], ["security_auditor"])
+
+    def test_debate_system_includes_persona_and_authoritative_contract(self):
+        agent = JsonProposalAgent(AgentConfig(
+            name="security_auditor", kind="openai", role="security_auditor",
+            system_prompt="Hunt for authorization and privacy failures.",
+        ))
+        composed = Orchestration._debate_system(agent, "Return the typed review JSON.")
+        self.assertIn("Hunt for authorization and privacy failures.", composed)
+        self.assertIn("orchestration contract is authoritative", composed)
+        self.assertTrue(composed.endswith("Return the typed review JSON."))
+
+    def test_scope_expansion_waits_for_human_and_approval_does_not_rewrite(self):
+        workspace = Workspace(self.tmp.name)
+        workspace.init("Notify me 15 minutes before an event")
+        coordinator = BareRevisionAgent(AgentConfig(name="architect_alpha", kind="openai"))
+        reviewer = ScopeExpansionReviewer(AgentConfig(
+            name="ux_simplifier", kind="openai", role="ux_simplifier",
+            system_prompt="Review user experience without expanding scope.",
+            extra={"review_category": "ux", "review_signals": ["notification", "preference"]},
+        ))
+        orchestrator = Orchestration(
+            agents=[coordinator, reviewer], workspace=workspace, store=self.store,
+            run_id="run-scope-gate", max_debate_rounds=3,
+        )
+        asyncio.run(run_with_approved_review(orchestrator, "Notify me 15 minutes before an event"))
+        turns = self.repository.debate_turns("run-scope-gate")
+        self.assertEqual([turn["turn_kind"] for turn in turns], ["opening", "challenge", "revision"])
+        self.assertEqual(coordinator.revision_calls, 0)
+        self.assertEqual(turns[-1]["payload"]["dispositions"][0]["status"], "defended")
+        checkpoint = self.store.run_checkpoints("run-scope-gate")[0]
+        self.assertEqual(checkpoint["options"][0]["summary"], "Keep the stated scope")
 
     def test_restart_from_diverging_reuses_persisted_proposal(self):
         workspace = Workspace(self.tmp.name)
