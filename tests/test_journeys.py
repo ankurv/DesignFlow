@@ -102,7 +102,10 @@ class StabilizationJourneyTests(unittest.TestCase):
         state.workspace.write("decisions", "# Decisions\n\nUse end-to-end encryption.\n")
 
         retry = self.client.post("/run/start", json={"idea": "retry", "mode": "auto"})
-        self.assertEqual(retry.status_code, 409, retry.text)
+        # Natural-language continuation is now semantically routed by an agent;
+        # this fixture intentionally has no configured agent, so routing cannot run.
+        self.assertEqual(retry.status_code, 400, retry.text)
+        self.assertIn("No agents configured", retry.json()["detail"])
         self.assertEqual(state.workspace.product_goal(), goal)
         self.assertFalse(any(run["idea"] == "retry" for run in state.store.recent_runs()))
 

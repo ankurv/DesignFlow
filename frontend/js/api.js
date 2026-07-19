@@ -661,7 +661,7 @@ function handleEvent(ev) {
   }
 
   // Parse coordinator turn into user-facing summary cards
-  if (ev.kind === 'turn_end' && isCoordinatorEvent(ev)) {
+  if (ev.kind === 'turn_end' && ev.data?.phase !== 'answer' && isCoordinatorEvent(ev)) {
      const text = ev.data.response || '';
      const nextAgent = parseProtocolSection(text, 'NEXT_AGENT');
      const summary = parseProtocolSection(text, 'USER_SUMMARY');
@@ -698,6 +698,17 @@ function handleEvent(ev) {
 
 
 function appendFeed(ev) {
+  // Lifecycle envelopes remain persisted for diagnostics, metrics, and status
+  // reconciliation, but a conversational request must render as one answer.
+  // Errors and user checkpoints are never marked internal.
+  const internalTurn = (ev?.kind === 'turn_start' || ev?.kind === 'turn_end')
+    && (ev?.data?.visibility === 'internal' || ev?.audience === 'diagnostic');
+  if (ev?.data?.visibility === 'internal' && !internalTurn) return;
+  if (ev?.audience === 'diagnostic' && !internalTurn && ev?.kind !== 'done') return;
+  // Phase/start/done envelopes drive status widgets, not the conversation.
+  // In particular, restoring a durable WAITING_FOR_USER workflow must show its
+  // checkpoint panel once instead of replaying raw state transitions as chat.
+  if (ev?.kind === 'phase') return;
   const feed = document.getElementById('feed');
   const div = document.createElement('div');
   div.className = `feed-item ${ev.kind}`;
@@ -713,6 +724,9 @@ function appendFeed(ev) {
   let kindLabel = (ev.kind || 'update').replace(/_/g, ' ');
 
   switch(ev.kind) {
+    case 'user_prompt':
+      appendUserPrompt(ev.data?.message || '', ev.timestamp);
+      return;
     case 'phase':
       if (ev.data.status === 'stopped') {
         document.querySelectorAll('.feed-item.retry').forEach(item => item.classList.add('cancelled'));
@@ -752,6 +766,7 @@ function appendFeed(ev) {
         const pendingSummary = pendingTurn.querySelector('.feed-summary');
         if (pendingSummary) pendingSummary.textContent = elapsed ? `Model responded in ${formatDuration(elapsed)}.` : 'Model responded.';
       }
+      if (internalTurn) return;
       const u = ev.data.usage || {};
       detail = ev.data.response || '';
       summary = conversationalAgentSummary(detail, ev.agent);
@@ -974,7 +989,7 @@ function summarizeConversationText(text) {
   return `${sentenceEnd > 140 ? shortened.slice(0, sentenceEnd + 1) : shortened}…`;
 }
 
-function appendUserPrompt(message) {
+function appendUserPrompt(message, timestamp = '') {
   const feed = document.getElementById('feed');
   if (!feed || !message) return;
   const item = document.createElement('div');
@@ -989,7 +1004,8 @@ function appendUserPrompt(message) {
   meta.className = 'feed-meta';
   const header = document.createElement('div');
   header.className = 'feed-header-line';
-  header.innerHTML = '<span class="feed-agent">You</span><span class="feed-ts">Just now</span>';
+  const displayTime = timestamp ? new Date(timestamp).toLocaleTimeString() : 'Just now';
+  header.innerHTML = `<span class="feed-agent">You</span><span class="feed-ts">${escHtml(displayTime)}</span>`;
   const text = document.createElement('div');
   text.className = 'feed-text';
   text.textContent = message;
@@ -1094,9 +1110,17 @@ async function startRun(prompt, options = {}) {
   document.getElementById('totalCachedTokens').textContent = '0';
   document.getElementById('totalCost').textContent = '$0.000000';
   document.getElementById('eventCount').textContent = '0';
-  document.getElementById('feed').innerHTML = '';
 
-  const res = await fetch('/run/start', {
+  // Put the user's message in the timeline before dispatch. SSE model events
+  // can arrive before /run/start returns, so appending after the response makes
+  // the conversation appear in reverse order.
+  if (idea && !options.hiddenPrompt) appendUserPrompt(idea);
+  updateStatus('running');
+  notify('Routing request…');
+
+  let res;
+  try {
+    res = await fetch('/run/start', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
@@ -1107,15 +1131,20 @@ async function startRun(prompt, options = {}) {
       max_build_iterations: 10,
       mode: mode,
     })
-  });
+    });
+  } catch (error) {
+    updateStatus('error');
+    notify('Could not reach DesignFlow while starting the run.', true);
+    return false;
+  }
   const data = await res.json();
   if (res.ok && data.ok) {
     document.getElementById('runId').textContent = data.run_id;
-    if (idea && !options.hiddenPrompt) appendUserPrompt(idea);
     if (data.resumed) notify('Continuing the previous design run.');
-    updateStatus('running');
+    updateStatus(data.run_kind === 'chat' ? 'done' : 'running');
     return true;
   } else {
+    updateStatus('error');
     notify(data.detail || 'Failed to start', true);
     return false;
   }
@@ -1282,6 +1311,7 @@ async function steer() {
     await startRun(msg);
   } else {
     if (msg) {
+      appendUserPrompt(msg);
       const steerRes = await fetch('/run/steer', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({message: msg})
@@ -1397,8 +1427,10 @@ async function fetchAgentStatus(refreshCockpit = true) {
     applyProjectState(project);
   }
   if (res.status) {
-    awaitingDecisionInput = res.awaiting_input === true;
-    updateStatus(res.status);
+    const durable = workflowUiState(res.workflow);
+    awaitingDecisionInput = durable.awaitingDecision || res.awaiting_input === true;
+    updateStatus(durable.status || res.status);
+    if (awaitingDecisionInput) await showInteractiveQuestions();
   }
   let visibleAgents = res.agents || [];
   agentCapacityStatus = {};
@@ -1433,12 +1465,13 @@ async function fetchAgentStatus(refreshCockpit = true) {
     current.error = failedTurn.public_error || failedTurn.error || 'Agent execution failed';
     agentCapacityStatus[failedBaseId] = current;
   }
-  if (!visibleAgents.length) {
-    const configured = await fetch('/agents').then(r=>r.json());
-    visibleAgents = (configured.agents || []).map(a => ({...a, status:'idle', total_tokens:0,
-      input_tokens:0, cached_input_tokens:0, output_tokens:0, cost_usd:0, pricing_known:false}));
-  }
   const list = document.getElementById('agentList');
+  const rosterSummary = document.getElementById('runRosterSummary');
+  if (rosterSummary) {
+    rosterSummary.textContent = visibleAgents.length
+      ? `Run team · ${visibleAgents.length} agent${visibleAgents.length === 1 ? '' : 's'}`
+      : 'Run team · no agents active';
+  }
   const maxTokens = Math.max(1, ...visibleAgents.map(a => a.total_tokens || 0));
   if (list) list.innerHTML = visibleAgents.map(a => {
     const color = agentColors[a.name] || '#64748b';
@@ -1458,7 +1491,7 @@ async function fetchAgentStatus(refreshCockpit = true) {
       <div class="agent-dot" style="background:${color}"></div>
       <div style="flex:1;min-width:0">
         <div class="aname">${escHtml(a.name)}</div>
-        <div class="akind">${escHtml(a.role || 'Generalist')} · ${escHtml(a.kind)} ${a.model ? '· '+escHtml(a.model) : ''}</div>
+        <div class="akind">${escHtml(a.role || 'Generalist')} → ${escHtml(a.provider_name || a.kind)} · ${escHtml(a.kind)}${a.model ? ' · '+escHtml(a.model) : ' · default model'}</div>
       </div>
       <div style="text-align:right">
         <div class="astatus" style="color:${statusColor}">${a.status}</div>
@@ -1484,6 +1517,24 @@ async function fetchAgentStatus(refreshCockpit = true) {
   if (configPanel?.classList.contains('active') && typeof renderAgentCards === 'function') {
     renderAgentCards();
   }
+}
+
+function workflowUiState(workflow) {
+  const state = String(workflow?.state || '');
+  if (!state) return {status: '', awaitingDecision: false, allowedActions: []};
+  const status = {
+    WAITING_FOR_USER: 'paused',
+    RETRYABLE_FAILURE: 'needs_attention',
+    WAITING_FOR_RECOVERY: 'needs_attention',
+    COMPLETED: 'done',
+    CANCELLED: 'idle',
+    FAILED: 'error',
+  }[state] || 'running';
+  return {
+    status,
+    awaitingDecision: state === 'WAITING_FOR_USER',
+    allowedActions: Array.isArray(workflow.allowed_actions) ? workflow.allowed_actions : [],
+  };
 }
 
 function formatCost(value) {

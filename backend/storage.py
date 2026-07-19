@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import uuid
@@ -28,6 +27,8 @@ class ProjectStore:
         with self._lock, self._db:
             self._db.executescript(
                 """
+                PRAGMA foreign_keys=ON;
+                PRAGMA busy_timeout=5000;
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS agents (
                     id TEXT PRIMARY KEY,
@@ -169,41 +170,190 @@ class ProjectStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_implementation_reports_status
                     ON implementation_reports(status, created_at);
-                CREATE TABLE IF NOT EXISTS planning_documents (
-                    run_id TEXT NOT NULL,
-                    artifact TEXT NOT NULL,
-                    preamble TEXT NOT NULL DEFAULT '',
-                    version INTEGER NOT NULL DEFAULT 1,
+                CREATE TABLE IF NOT EXISTS workflow_instances (
+                    run_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    resume_state TEXT,
+                    state_version INTEGER NOT NULL DEFAULT 1,
+                    active_operation_id TEXT,
+                    created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY (run_id, artifact)
+                    completed_at TEXT,
+                    failure_code TEXT,
+                    failure_detail_json TEXT NOT NULL DEFAULT '{}'
                 );
-                CREATE TABLE IF NOT EXISTS planning_sections (
-                    run_id TEXT NOT NULL,
-                    artifact TEXT NOT NULL,
-                    heading TEXT NOT NULL,
-                    heading_key TEXT NOT NULL,
-                    body TEXT NOT NULL,
-                    ordinal INTEGER NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    updated_by TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (run_id, artifact, heading_key),
-                    FOREIGN KEY(run_id, artifact) REFERENCES planning_documents(run_id, artifact) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_planning_sections_artifact
-                    ON planning_sections(run_id, artifact, ordinal);
-                CREATE TABLE IF NOT EXISTS planning_mutations (
+                CREATE TABLE IF NOT EXISTS workflow_transitions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
-                    artifact TEXT NOT NULL,
-                    operation TEXT NOT NULL,
-                    heading_key TEXT NOT NULL DEFAULT '',
-                    actor TEXT NOT NULL DEFAULT '',
+                    from_state TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
-                    payload_json TEXT NOT NULL DEFAULT '{}'
+                    UNIQUE(run_id, idempotency_key)
                 );
-                CREATE INDEX IF NOT EXISTS idx_planning_mutations_run
-                    ON planning_mutations(run_id, id);
+                CREATE INDEX IF NOT EXISTS idx_workflow_transitions_run
+                    ON workflow_transitions(run_id, id);
+                CREATE TABLE IF NOT EXISTS workflow_invalidations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    transition_event TEXT NOT NULL,
+                    target_state TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    invalidated_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_workflow_invalidations_run
+                    ON workflow_invalidations(run_id, id);
+                CREATE TABLE IF NOT EXISTS workflow_operations (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    input_ref TEXT,
+                    output_ref TEXT,
+                    error_json TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT,
+                    completed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_workflow_operations_run
+                    ON workflow_operations(run_id, status, id);
+                CREATE TABLE IF NOT EXISTS planning_goals (
+                    run_id TEXT PRIMARY KEY,
+                    goal TEXT NOT NULL,
+                    constraints_json TEXT NOT NULL DEFAULT '[]',
+                    non_goals_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS expert_proposals (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    expert_id TEXT NOT NULL,
+                    perspective TEXT NOT NULL,
+                    round INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    proposal_json TEXT NOT NULL,
+                    raw_response TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, operation_id, expert_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_expert_proposals_run_operation
+                    ON expert_proposals(run_id, operation_id, expert_id);
+                CREATE TABLE IF NOT EXISTS planning_debate_turns (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    agent TEXT NOT NULL,
+                    turn_kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, operation_id, sequence)
+                );
+                CREATE INDEX IF NOT EXISTS idx_planning_debate_turns_run
+                    ON planning_debate_turns(run_id, operation_id, sequence);
+                CREATE TABLE IF NOT EXISTS run_participants (
+                    run_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    provider_name TEXT NOT NULL,
+                    provider_kind TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    PRIMARY KEY(run_id, agent_id)
+                );
+                CREATE TABLE IF NOT EXISTS planning_claims (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    claim_type TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    normalized_text TEXT NOT NULL,
+                    confidence REAL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_planning_claims_run_topic
+                    ON planning_claims(run_id, topic, id);
+                CREATE TABLE IF NOT EXISTS planning_conflicts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    materiality TEXT NOT NULL,
+                    options_json TEXT NOT NULL,
+                    resolution TEXT,
+                    resolution_source TEXT,
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_planning_conflicts_run_status
+                    ON planning_conflicts(run_id, status, materiality, id);
+                CREATE TABLE IF NOT EXISTS context_summaries (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    summary_type TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_type, source_id, summary_type, content_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_context_summaries_run_source
+                    ON context_summaries(run_id, source_type, source_id);
+                CREATE TABLE IF NOT EXISTS context_nodes (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    node_type TEXT NOT NULL,
+                    parent_id TEXT,
+                    source_type TEXT NOT NULL,
+                    source_ref TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    authority INTEGER NOT NULL DEFAULT 3,
+                    importance INTEGER NOT NULL DEFAULT 3,
+                    token_count INTEGER NOT NULL,
+                    summary_token_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(parent_id) REFERENCES context_nodes(id) ON DELETE CASCADE,
+                    UNIQUE(run_id, source_type, source_ref, node_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_context_nodes_scope
+                    ON context_nodes(run_id, status, node_type, authority, importance, id);
+                CREATE INDEX IF NOT EXISTS idx_context_nodes_parent
+                    ON context_nodes(parent_id, status, id);
+                CREATE TABLE IF NOT EXISTS context_edges (
+                    from_node_id TEXT NOT NULL,
+                    to_node_id TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(from_node_id, to_node_id, relation),
+                    FOREIGN KEY(from_node_id) REFERENCES context_nodes(id) ON DELETE CASCADE,
+                    FOREIGN KEY(to_node_id) REFERENCES context_nodes(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS semantic_embeddings (
+                    run_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    model_version TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, item_id, model_name, model_version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_run
+                    ON semantic_embeddings(run_id, model_name, model_version, item_id);
                 """
             )
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()}
@@ -227,194 +377,81 @@ class ProjectStore:
                 self._db.execute("ALTER TABLE decisions ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''")
             if "raw_markdown" not in decision_columns:
                 self._db.execute("ALTER TABLE decisions ADD COLUMN raw_markdown TEXT NOT NULL DEFAULT ''")
-            
+
+            self._retire_legacy_discovery_waits()
+            self._repair_multiple_active_workflows()
+            self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_nonterminal_workflow "
+                "ON workflow_instances((1)) "
+                "WHERE state NOT IN ('COMPLETED','CANCELLED','FAILED')"
+            )
             self._backfill_checkpoint_decisions()
 
-    def set_planning_run(self, run_id: str) -> None:
-        self._planning_run_id = str(run_id or "canonical")
-
-    def _active_planning_run(self) -> str:
-        return str(getattr(self, "_planning_run_id", "canonical"))
-
-    @staticmethod
-    def _planning_parts(markdown: str) -> tuple[str, list[tuple[str, str]]]:
-        text = (markdown or "").strip()
-        if text == "(empty)":
-            text = ""
-        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", text))
-        if not matches:
-            return text, []
-        preamble = text[:matches[0].start()].strip()
-        sections = []
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            body = text[match.end():end].strip()
-            sections.append((match.group(1).strip(), body))
-        return preamble, sections
-
-    @staticmethod
-    def _heading_key(heading: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")
-
-    def replace_planning_document(self, artifact: str, markdown: str, actor: str = "") -> None:
-        """Replace one normalized planning document transactionally."""
-        preamble, sections = self._planning_parts(markdown)
+    def _retire_legacy_discovery_waits(self):
+        """Invalidate questions produced before the material-blocker discovery contract."""
+        policy_version = "3"
+        row = self._db.execute(
+            "SELECT value FROM key_value WHERE key='discovery_policy_version'"
+        ).fetchone()
+        if row and str(row["value"]) == policy_version:
+            return
         now = datetime.now(timezone.utc).isoformat()
-        run_id = self._active_planning_run()
-        with self._lock, self._db:
-            row = self._db.execute(
-                "SELECT version FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
-            ).fetchone()
-            version = int(row["version"]) + 1 if row else 1
+        legacy = self._db.execute(
+            "SELECT run_id FROM workflow_instances "
+            "WHERE state='WAITING_FOR_USER' AND resume_state='DISCOVERING'"
+        ).fetchall()
+        for item in legacy:
+            run_id = str(item["run_id"])
             self._db.execute(
-                "INSERT INTO planning_documents(run_id,artifact,preamble,version,updated_at) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(run_id,artifact) DO UPDATE SET preamble=excluded.preamble, "
-                "version=excluded.version, updated_at=excluded.updated_at",
-                (run_id, artifact, preamble, version, now),
+                "UPDATE workflow_instances SET state='CANCELLED',resume_state=NULL,"
+                "active_operation_id=NULL,state_version=state_version+1,updated_at=?,completed_at=? "
+                "WHERE run_id=?",
+                (now, now, run_id),
             )
-            self._db.execute("DELETE FROM planning_sections WHERE run_id=? AND artifact=?", (run_id, artifact))
-            for ordinal, (heading, body) in enumerate(sections):
-                self._db.execute(
-                    "INSERT INTO planning_sections(run_id,artifact,heading,heading_key,body,ordinal,version,updated_by,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (run_id, artifact, heading, self._heading_key(heading), body, ordinal, version, actor, now),
-                )
             self._db.execute(
-                "INSERT INTO planning_mutations(run_id,artifact,operation,actor,created_at,payload_json) "
-                "VALUES(?,?,?,?,?,?)",
-                (run_id, artifact, "replace_document", actor, now, json.dumps({
-                    "version": version, "headings": [heading for heading, _ in sections],
-                })),
+                "UPDATE decision_checkpoints SET status='rejected',answered_at=?,answered_by='DesignFlow' "
+                "WHERE run_id=? AND status IN ('active','pending')",
+                (now, run_id),
             )
+            self._db.execute(
+                "UPDATE workflow_operations SET status='cancelled',completed_at=? "
+                "WHERE run_id=? AND status='running'",
+                (now, run_id),
+            )
+        self._db.execute(
+            "INSERT INTO key_value(key,value) VALUES('discovery_policy_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (policy_version,),
+        )
 
-    def merge_planning_document(self, artifact: str, markdown: str, actor: str = "") -> bool:
-        """Upsert only supplied H2 sections; return False for an unstructured delta."""
-        preamble, sections = self._planning_parts(markdown)
-        if not sections:
-            return False
+    def _repair_multiple_active_workflows(self):
+        """Keep the newest nonterminal workflow and close stale competing state."""
+        rows = self._db.execute(
+            "SELECT run_id FROM workflow_instances "
+            "WHERE state NOT IN ('COMPLETED','CANCELLED','FAILED') "
+            "ORDER BY updated_at DESC, created_at DESC, run_id DESC"
+        ).fetchall()
+        if len(rows) <= 1:
+            return
         now = datetime.now(timezone.utc).isoformat()
-        run_id = self._active_planning_run()
-        with self._lock, self._db:
-            row = self._db.execute(
-                "SELECT version,preamble FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
-            ).fetchone()
-            version = int(row["version"]) + 1 if row else 1
-            existing_preamble = str(row["preamble"]) if row else ""
+        stale_ids = [str(row["run_id"]) for row in rows[1:]]
+        for run_id in stale_ids:
             self._db.execute(
-                "INSERT INTO planning_documents(run_id,artifact,preamble,version,updated_at) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(run_id,artifact) DO UPDATE SET preamble=excluded.preamble, "
-                "version=excluded.version, updated_at=excluded.updated_at",
-                (run_id, artifact, existing_preamble or preamble, version, now),
+                "UPDATE workflow_instances SET state='CANCELLED',resume_state=NULL,"
+                "active_operation_id=NULL,state_version=state_version+1,updated_at=?,completed_at=? "
+                "WHERE run_id=?",
+                (now, now, run_id),
             )
-            next_ordinal = int(self._db.execute(
-                "SELECT COALESCE(MAX(ordinal),-1)+1 n FROM planning_sections WHERE run_id=? AND artifact=?",
-                (run_id, artifact),
-            ).fetchone()["n"])
-            for heading, body in sections:
-                key = self._heading_key(heading)
-                current = self._db.execute(
-                    "SELECT ordinal,version FROM planning_sections WHERE run_id=? AND artifact=? AND heading_key=?",
-                    (run_id, artifact, key),
-                ).fetchone()
-                ordinal = int(current["ordinal"]) if current else next_ordinal
-                if not current:
-                    next_ordinal += 1
-                section_version = int(current["version"]) + 1 if current else 1
-                self._db.execute(
-                    "INSERT INTO planning_sections(run_id,artifact,heading,heading_key,body,ordinal,version,updated_by,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,artifact,heading_key) DO UPDATE SET "
-                    "heading=excluded.heading,body=excluded.body,version=excluded.version,"
-                    "updated_by=excluded.updated_by,updated_at=excluded.updated_at",
-                    (run_id, artifact, heading, key, body, ordinal, section_version, actor, now),
-                )
-                self._db.execute(
-                    "INSERT INTO planning_mutations(run_id,artifact,operation,heading_key,actor,created_at,payload_json) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (run_id, artifact, "upsert_section", key, actor, now, json.dumps({
-                        "heading": heading, "version": section_version,
-                    })),
-                )
-        return True
-
-    def planning_document(self, artifact: str) -> str:
-        run_id = self._active_planning_run()
-        with self._lock:
-            document = self._db.execute(
-                "SELECT preamble FROM planning_documents WHERE run_id=? AND artifact=?", (run_id, artifact)
-            ).fetchone()
-            if not document:
-                return ""
-            rows = self._db.execute(
-                "SELECT heading,body FROM planning_sections WHERE run_id=? AND artifact=? ORDER BY ordinal,heading_key",
-                (run_id, artifact),
-            ).fetchall()
-        chunks = [str(document["preamble"] or "").strip()]
-        chunks.extend(f"## {row['heading']}\n\n{str(row['body']).strip()}".rstrip() for row in rows)
-        return "\n\n".join(chunk for chunk in chunks if chunk).strip() + "\n"
-
-    def planning_context(self, artifact_keywords: dict[str, list[str]], max_chars: int = 12000) -> str:
-        """Build a bounded packet from normalized sections without reading Markdown files."""
-        blocks = []
-        remaining = max(1000, int(max_chars))
-        run_id = self._active_planning_run()
-        with self._lock:
-            for artifact, keywords in artifact_keywords.items():
-                document = self._db.execute(
-                    "SELECT preamble,version FROM planning_documents WHERE run_id=? AND artifact=?",
-                    (run_id, artifact),
-                ).fetchone()
-                rows = self._db.execute(
-                    "SELECT heading,body,version FROM planning_sections WHERE run_id=? AND artifact=? ORDER BY ordinal",
-                    (run_id, artifact),
-                ).fetchall()
-                lowered = [word.lower() for word in keywords]
-                ranked = sorted(rows, key=lambda row: (
-                    -sum(word in str(row["heading"]).lower() for word in lowered),
-                    str(row["heading"]).lower(),
-                ))
-                selected = [row for row in ranked if any(
-                    word in (str(row["heading"]) + " " + str(row["body"])).lower()
-                    for word in lowered
-                )] or ranked[:1]
-                preamble = str(document["preamble"] or "").strip() if document else ""
-                if preamble:
-                    preamble_text = preamble if (artifact == "decisions" or not rows) else (preamble[:600] + ("..." if len(preamble) > 600 else ""))
-                    chunk = f"[{artifact}:document v{document['version']}]\n{preamble_text}"
-                    blocks.append(chunk[:remaining])
-                    remaining -= min(len(chunk), remaining)
-                if rows and remaining > 0:
-                    toc = "\n".join(f"- {row['heading']}" for row in rows)
-                    toc_chunk = f"[{artifact}:Table of Contents]\n{toc}"
-                    blocks.append(toc_chunk[:remaining])
-                    remaining -= min(len(toc_chunk), remaining)
-                for row in selected:
-                    chunk = f"[{artifact}:{row['heading']} v{row['version']}]\n{row['body']}".strip()
-                    if remaining <= 0:
-                        break
-                    blocks.append(chunk[:remaining])
-                    remaining -= min(len(chunk), remaining)
-        return "\n\n".join(blocks) if blocks else "(no matching planning records)"
-
-    def planning_state_counts(self) -> dict[str, int]:
-        run_id = self._active_planning_run()
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT d.artifact,MAX(1,COUNT(s.heading_key)) count FROM planning_documents d "
-                "LEFT JOIN planning_sections s ON s.run_id=d.run_id AND s.artifact=d.artifact "
-                "WHERE d.run_id=? GROUP BY d.artifact",
-                (run_id,),
-            ).fetchall()
-        return {str(row["artifact"]): int(row["count"]) for row in rows}
-
-    def planning_mutations(self, limit: int = 100) -> list[dict]:
-        run_id = self._active_planning_run()
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT artifact,operation,heading_key,actor,created_at,payload_json "
-                "FROM planning_mutations WHERE run_id=? ORDER BY id DESC LIMIT ?",
-                (run_id, max(1, min(int(limit), 500))),
-            ).fetchall()
-        return [{**dict(row), "payload": json.loads(row["payload_json"] or "{}") } for row in rows]
+            self._db.execute(
+                "UPDATE decision_checkpoints SET status='rejected',answered_at=?,answered_by='DesignFlow' "
+                "WHERE run_id=? AND status IN ('active','pending')",
+                (now, run_id),
+            )
+            self._db.execute(
+                "UPDATE workflow_operations SET status='cancelled',completed_at=? "
+                "WHERE run_id=? AND status='running'",
+                (now, run_id),
+            )
 
     def _backfill_checkpoint_decisions(self):
         """Give pre-ledger checkpoints durable decisions without parsing Markdown artifacts."""
@@ -580,21 +617,18 @@ class ProjectStore:
         return self.checkpoint(row["id"]) if row else {}
 
     def latest_current_checkpoint(self) -> dict:
-        """Recover a checkpoint only from the latest resumable run."""
+        """Recover the newest durable checkpoint, independent of later chat runs."""
         with self._lock, self._db:
-            latest = self._db.execute(
-                "SELECT run_id, status FROM runs ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            if not latest or latest["status"] not in {
-                "running", "paused", "needs_attention", "interrupted"
-            }:
-                return {}
             row = self._db.execute(
-                """SELECT id FROM decision_checkpoints
-                   WHERE run_id=? AND status IN ('active', 'pending')
-                   ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, sequence
+                """SELECT checkpoint.id
+                   FROM decision_checkpoints AS checkpoint
+                   JOIN workflow_instances AS workflow ON workflow.run_id=checkpoint.run_id
+                   WHERE checkpoint.status IN ('active', 'pending')
+                     AND workflow.state='WAITING_FOR_USER'
+                   ORDER BY workflow.updated_at DESC,
+                            CASE checkpoint.status WHEN 'active' THEN 0 ELSE 1 END,
+                            checkpoint.sequence
                    LIMIT 1""",
-                (latest["run_id"],),
             ).fetchone()
             if row:
                 checkpoint = self._db.execute(
@@ -1033,24 +1067,6 @@ class ProjectStore:
     def delete_mcp_server(self, server_id: str):
         with self._lock, self._db:
             self._db.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
-
-    def save_run_state(self, state: dict):
-        with self._lock, self._db:
-            self._db.execute(
-                "INSERT OR REPLACE INTO key_value (key, value) VALUES (?, ?)",
-                ("run_state", json.dumps(state))
-            )
-
-    def load_run_state(self) -> dict | None:
-        with self._lock:
-            row = self._db.execute("SELECT value FROM key_value WHERE key = ?", ("run_state",)).fetchone()
-            if row:
-                return json.loads(row["value"])
-            return None
-
-    def clear_run_state(self):
-        with self._lock, self._db:
-            self._db.execute("DELETE FROM key_value WHERE key = ?", ("run_state",))
 
     def load_provider_turn_peaks(self) -> dict[str, int]:
         """Load durable per-provider turn sizes, deriving legacy values from stored events once."""

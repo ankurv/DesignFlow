@@ -359,6 +359,7 @@ class AgentBase(ABC):
             "kind": self.config.kind,
             "role": self.config.role,
             "model": self.config.model,
+            "provider_name": self.config.extra.get("runtime_base_name", self.config.name),
             "status": self.status.value,
             "history_turns": len(self.history),
             "session_id": self._session_id,

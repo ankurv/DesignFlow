@@ -61,19 +61,17 @@ function renderSingleCard(cfg, idx) {
       delete agentHealthStatus[uid];
       delete agentCapacityStatus[uid];
     }
-    const statusInfo = agentHealthStatus[uid] || { status: isPaused ? 'paused' : 'testing', error: '' };
-    if (!agentHealthStatus[uid] && !isPaused) {
-      agentHealthStatus[uid] = { status: 'testing', error: '' };
-      setTimeout(() => checkAgentHealth(cfg, uid), 50);
-    }
+    // Project restoration is read-only. Provider checks may consume quota or
+    // fail externally, so they run only from the explicit refresh/test action.
+    const statusInfo = agentHealthStatus[uid] || { status: isPaused ? 'paused' : 'unknown', error: '' };
     const hoverTitle = statusInfo.status === 'failed' 
       ? friendlyProviderError(statusInfo.error)
-      : (statusInfo.status === 'success' ? 'Agent working correctly' : 'Testing connection...');
+      : (statusInfo.status === 'success' ? 'Agent working correctly' : 'Not checked; use refresh to test');
     const capacity = agentCapacityStatus[uid] || {};
     const isLocal = ['cli', 'ollama'].includes(cfg.kind);
     const runtimeBlocked = capacity.runtime_status === 'error';
     const quotaBlocked = capacity.error_code === 'quota_exhausted' || /quota|credit|billing|usage limit|resource exhausted/i.test(capacity.error || '');
-    const capacityLabel = isPaused ? 'Paused' : isLocal ? 'Local' : quotaBlocked ? 'Quota exhausted' : runtimeBlocked || statusInfo.status === 'failed' ? 'Blocked' : capacity.retry_at ? 'Limited' : statusInfo.status === 'success' ? 'Healthy' : 'Checking';
+    const capacityLabel = isPaused ? 'Paused' : isLocal ? 'Local' : quotaBlocked ? 'Quota exhausted' : runtimeBlocked || statusInfo.status === 'failed' ? 'Blocked' : capacity.retry_at ? 'Limited' : statusInfo.status === 'success' ? 'Healthy' : 'Not checked';
     const capacityClass = isPaused ? 'paused' : quotaBlocked || runtimeBlocked ? 'blocked' : capacityLabel.toLowerCase();
     const costText = capacity.pricing_known === false ? 'Cost unavailable for this model' : `DesignFlow usage: $${Number(capacity.cost_usd || 0).toFixed(4)}`;
     const checkedText = statusInfo.checked_at ? new Date(statusInfo.checked_at).toLocaleTimeString() : 'Not checked yet';
@@ -246,6 +244,10 @@ window.testAgentConnection = async function(uid, event) {
       modal.style.display = 'flex';
     } else {
       const models = data.models || [];
+      editingAgentData.extra = editingAgentData.extra || {};
+      editingAgentData.extra.available_models = models;
+      editingAgentData.extra.model_catalog_kind = editingAgentData.kind === 'aws-bedrock'
+        ? 'bedrock_inference_profiles' : 'provider_models';
       modalTitle.textContent = 'Connection Successful';
       modalTitle.style.color = '#22c55e';
       modalSubtitle.textContent = `Found ${models.length} available models.`;

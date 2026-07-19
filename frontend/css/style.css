@@ -130,6 +130,9 @@
   .agent-chip .aname { font-size: var(--fs-md); font-weight: 600; flex: 1; }
   .agent-chip .akind { font-size: var(--fs-xs); color: var(--muted); background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 10px; }
   .agent-chip .astatus { font-size: var(--fs-xs); font-weight: 500; }
+  .run-roster { border-bottom:1px solid var(--border); padding:8px 16px; background:rgba(255,255,255,.015); }
+  .run-roster summary { cursor:pointer; color:var(--muted); font-size:12px; user-select:none; }
+  .run-roster-list { display:grid; gap:6px; margin-top:8px; }
   .token-count { font-size: var(--fs-xs); color: var(--muted); text-align: right; }
   .usage-detail { font-size: var(--fs-2xs); color: var(--muted); margin-top: 3px; white-space: nowrap; }
   .usage-track { height: 4px; background: rgba(255,255,255,0.05); border-radius: 4px;
@@ -1329,12 +1332,18 @@ body.project-restoring { overflow:hidden; }
   flex: 0 0 auto;
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: auto;
+  min-width: 24px;
+  min-height: 24px;
+  max-width: 170px;
+  padding: 2px 7px;
   border: 1px solid #94a3b8;
   border-radius: 6px;
   font-weight: 700;
   font-size: var(--fs-sm);
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: anywhere;
   color: #ffffff;
   background: #111827;
 }

@@ -1,39 +1,73 @@
-# Core Workflow Recovery Plan
+# Core Workflow Recovery Contract
 
-DesignFlow is not releasable unless a new product idea can complete the planning journey without changing identity, faking participation, promoting irrelevant output, or requiring paid-provider calls in tests.
+This document defines the recovery and replay guarantees of the current single orchestration engine. SQLite state is authoritative; process memory, SSE history, model chat history, and generated Markdown are not recovery inputs.
 
-## Release-blocking invariants
+## Recovery invariants
 
-| Invariant | Enforcement | Required evidence |
-|---|---|---|
-| Product identity is stable | Persist the first product goal in `DESIGNFLOW.md`; later text is a task or continuation command | A refinement, retry, refresh, and restart leave the goal unchanged |
-| Debate is real | Reserve a review slot for an opposing architect and block completion unless its turn completes | Persisted turns and run outcome name Alpha/Beta participants |
-| Decisions are relevant | Structured checkpoint validation plus goal-alignment checks | Every checkpoint names a product consequence and offers 2–3 trade-offs |
-| Artifacts are relevant | Validate product-specific goal anchors outside generated headers | A generic DesignFlow-process diagram is rejected |
-| Promotion is safe | Keep canonical files unchanged until the staged set passes all completion gates | Failed/stopped runs remain staged; successful runs promote atomically with history |
-| UI input is stable | Do not rebuild an unchanged checkpoint or refocus an already-open modal | A custom answer remains focused and unchanged across polling cycles |
-| Reporting is truthful | Derive participants from completed persisted turns, not configured personas | Transcripts and outcomes never list an agent with zero turns |
-| Retry is recovery, not a new idea | Treat `retry` as continuation and reject it when no interrupted workflow exists | No run can acquire the product goal `retry` |
+| Invariant | Enforcement | Test evidence |
+| --- | --- | --- |
+| Goal identity is durable | `planning_goals` is written before provider work | Restart reloads the same goal |
+| State is explicit | `workflow_instances.state`, `resume_state`, and `state_version` | Legal/illegal transition tests |
+| Transitions are replay-safe | Content-derived idempotency key plus unique durable transition | Duplicate event does not advance twice |
+| Writes reject stale actors | Compare current database state with `from_state` in one transaction | Stale transition fails |
+| Provider work is reusable | Accepted typed proposals and summaries persist before analysis | Restart reuses proposals without provider calls |
+| Operations close truthfully | Successful proposal dispatch clears `active_operation_id` and records completion time | Completed run has no running operation |
+| Waiting is durable | Workflow row and active checkpoint are committed before notifying clients | Checkpoint survives store/runtime restart |
+| Answers are unambiguous | One active checkpoint; ID and option validated transactionally | Stale/invalid answer is rejected |
+| Failure is atomic | Invalid outputs cannot mutate accepted planning projections | Original artifacts remain unchanged |
+| Completion is replay-safe | Terminal state blocks new transitions; completed run returns projections | Rerun performs zero provider calls |
+| Terminal outcome is monotonic | Cleanup does not rewrite completed runs or append a second stopped result | Logout/stop after completion preserves done |
+| UI is reconstructable | `/run/status` returns workflow snapshot and allowed actions | Refresh does not depend on SSE replay |
 
-## Deterministic acceptance journey
+## Restart sequence
 
-The release gate must use fake agents and exercise the HTTP/state-machine boundary:
+```mermaid
+sequenceDiagram
+    participant S as Server
+    participant D as SQLite
+    participant O as Orchestration
+    participant U as User
+    S->>D: Find latest nonterminal workflow
+    D-->>S: Snapshot plus active checkpoint
+    S->>O: Bind project runtime to run_id
+    O->>D: Read goal, proposals, conflicts, and summaries
+    alt WAITING_FOR_USER
+        O-->>U: Return durable checkpoint and answer action
+        U->>S: Answer checkpoint ID
+        S->>D: Validate and confirm answer transactionally
+        O->>D: Resolve conflict and commit answer_recorded
+    else reusable provider output exists
+        O->>D: Continue from persisted planning evidence
+    end
+```
 
-1. Open an empty temporary project and submit a distinctive product goal.
-2. Confirm the goal is persisted before the first provider turn.
-3. Complete bounded discovery and answer the structured checkpoint.
-4. Confirm Architect Alpha drafts and Architect Beta performs an adversarial review.
-5. Inject one irrelevant diagram response and prove canonical artifacts remain unchanged.
-6. Retry with aligned artifacts and prove atomic promotion plus artifact history.
-7. Refresh/rebind the project and verify the current checkpoint, transcript, participants, and goal.
-8. Restart the runtime, issue `continue`, and prove exact phase/run restoration.
-9. Issue `retry` without resumable state and require a typed conflict instead of a new run.
-10. Assert no network provider was called and the run stayed within deterministic turn/token bounds.
+## Failure classes
 
-## Exit criteria
+- **Invalid proposal:** discard that proposal. Continue if another valid proposal exists; otherwise transition to `FAILED` with `no_valid_proposals`.
+- **Invalid resolver output:** create a user checkpoint. Never invent or silently coerce a choice.
+- **Projection contract failure:** transition to `FAILED` with structured validation errors. Do not report completion.
+- **Recoverable provider failure:** transition through `RETRYABLE_FAILURE` to `WAITING_FOR_RECOVERY`, retaining the interrupted `resume_state`.
+- **Non-recoverable internal failure:** transition to `FAILED` with a bounded public error and detailed redacted local evidence.
+- **User stop:** commit `CANCELLED` and wake any process-local waiter so the task exits.
 
-- The deterministic journey passes repeatedly.
-- The full session, journey, provider, MCP, and frontend syntax suites pass without hangs.
-- A clean manual smoke run shows the same persisted evidence.
-- No known high-severity core-workflow issue remains open.
+## Required regression journey
 
+The deterministic fake-agent suite must verify:
+
+1. Create a temporary project and persist a goal.
+2. Produce strict proposals from multiple experts and persist them before analysis.
+3. Extract claims and resolve low-, medium-, and high-materiality conflicts according to policy.
+4. Persist a structured checkpoint, close the original store/runtime, and recover it.
+5. Reject stale checkpoint submissions and confirm a valid answer transactionally.
+6. Render valid design, plan, and decision projections from accepted blackboard state.
+7. Restart a completed run and prove no provider is called again.
+8. Inject malformed provider output and prove existing artifacts do not change.
+9. Query `/run/status` and verify the durable workflow shape and allowed actions.
+10. Exercise MCP access boundaries without exposing MCP tools to planning experts.
+
+## Readiness gate
+
+- All repository tests pass with zero skipped orchestration tests.
+- Python compilation, frontend JavaScript syntax, and patch hygiene checks pass.
+- Restart, checkpoint, idempotency, invalid-output, projection, API-state, and MCP-boundary tests remain mandatory.
+- A live smoke run with configured providers is performed before relying on provider-specific retry/failover behavior.

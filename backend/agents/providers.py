@@ -70,13 +70,25 @@ def discover_models(config: AgentConfig) -> list[str]:
             
         region = config.extra.get("aws_region", "us-east-1")
         client = boto3.client("bedrock", region_name=region)
-        resp = client.list_foundation_models()
-        model_list = resp.get("modelSummaries", [])
-        ids = [
-            m["modelId"] for m in model_list 
-            if m.get("modelLifecycle", {}).get("status") == "ACTIVE" 
-            and "anthropic" in m.get("providerName", "").lower()
-        ]
+        # Current Claude generations are commonly invocable only through a
+        # system-defined inference profile. Foundation-model catalog IDs can be
+        # visible yet fail at invocation with on-demand throughput errors.
+        ids = []
+        next_token = None
+        while True:
+            request = {"typeEquals": "SYSTEM_DEFINED", "maxResults": 100}
+            if next_token:
+                request["nextToken"] = next_token
+            response = client.list_inference_profiles(**request)
+            for profile in response.get("inferenceProfileSummaries", []):
+                model_arns = [str(item.get("modelArn", "")) for item in profile.get("models", [])]
+                if any("anthropic" in arn.lower() for arn in model_arns):
+                    profile_id = str(profile.get("inferenceProfileId", "")).strip()
+                    if profile_id:
+                        ids.append(profile_id)
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
     elif kind == "gemini":
         import google.generativeai as genai
         key = config.api_key or os.environ.get("GEMINI_API_KEY", "")

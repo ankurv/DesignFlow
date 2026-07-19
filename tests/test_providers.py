@@ -8,17 +8,15 @@ class TestProviders(unittest.TestCase):
     def test_discover_models_aws_bedrock(self, mock_boto):
         mock_client = MagicMock()
         mock_boto.return_value = mock_client
-        mock_client.list_foundation_models.return_value = {
-            "modelSummaries": [
+        mock_client.list_inference_profiles.return_value = {
+            "inferenceProfileSummaries": [
                 {
-                    "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
-                    "modelLifecycle": {"status": "ACTIVE"},
-                    "providerName": "Anthropic"
+                    "inferenceProfileId": "us.anthropic.claude-3-sonnet-20240229-v1:0",
+                    "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"}],
                 },
                 {
-                    "modelId": "amazon.titan-text-express-v1",
-                    "modelLifecycle": {"status": "ACTIVE"},
-                    "providerName": "Amazon"
+                    "inferenceProfileId": "us.amazon.titan-text-express-v1",
+                    "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"}],
                 }
             ]
         }
@@ -26,9 +24,11 @@ class TestProviders(unittest.TestCase):
         config = AgentConfig(name="test", kind="aws-bedrock", api_key="dummy_token", extra={"aws_region": "us-east-1"})
         models = discover_models(config)
         
-        # Should only return active Anthropic models from Bedrock
-        self.assertEqual(models, ["anthropic.claude-3-sonnet-20240229-v1:0"])
+        self.assertEqual(models, ["us.anthropic.claude-3-sonnet-20240229-v1:0"])
         mock_boto.assert_called_with("bedrock", region_name="us-east-1")
+        mock_client.list_inference_profiles.assert_called_once_with(
+            typeEquals="SYSTEM_DEFINED", maxResults=100,
+        )
 
     @patch("backend.agents.providers.AWSBedrockAgent._configure_client")
     def test_aws_bedrock_agent_creation(self, mock_configure):

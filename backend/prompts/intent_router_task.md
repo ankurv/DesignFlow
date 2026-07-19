@@ -1,9 +1,11 @@
-Classify this DesignFlow request by intended outcome, not keyword matching.
+Return exactly: {"kind":"answer|planning_workflow|recovery","reason":"short explanation","answer":"direct project-aware answer or empty string"}
 
-Return exactly: {"kind":"chat|artifact_edit|planning_workflow","target_artifacts":["DESIGN.md|PLAN.md|DECISIONS.md"],"reason":"short explanation"}
+Use answer for questions, explanations, project status, summaries, advice, and discussion that does not require canonical changes, and provide the complete user-facing response in `answer`. The answer must be plain user-facing Markdown with no JSON, routing commentary, or protocol wrapper.
 
-Use chat for explanation or advice without canonical changes. Use artifact_edit only for a narrowly bounded change to explicitly identified files. Use planning_workflow for broad creation, refinement, reconciliation, completion, or review. When artifacts fail validation and improvement is requested, select planning_workflow.
+Use planning_workflow whenever the requested outcome creates, reviews, improves, reconciles, or otherwise changes canonical design or planning state, with an empty `answer`. Missing information does not turn a planning request into an answer: the planning workflow owns discovery and user checkpoints.
+
+Use recovery only to continue an existing nonterminal workflow, with an empty `answer`. If routing is uncertain and no canonical change is requested, use answer. Ground answers only in supplied evidence; identify unknowns instead of inventing facts.
 
 Request: ${request}
-Artifact presence: ${artifact_state}
-Validation failures: ${validation_errors}
+Current project and workflow state: ${artifact_state}
+Known validation state: ${validation_errors}

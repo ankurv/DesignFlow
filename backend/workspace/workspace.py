@@ -923,8 +923,7 @@ class Workspace:
         if not self.project_root.exists():
             return
         
-        project_name = self.project_root.name or "project"
-        excluded_files = {"AGENTS.md", f"{project_name}.md"}
+        excluded_files = {"AGENTS.md"}
         
         count = 0
         for path in sorted(self.project_root.rglob("*")):

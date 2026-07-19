@@ -24,7 +24,10 @@ from pydantic import BaseModel, Field
 
 from .agents.base import AgentConfig, AgentStatus
 from .agents.providers import AGENT_KINDS, create_agent, discover_models
-from .orchestrator import Event, EventKind, Orchestrator
+from .events import Event, EventKind
+from .orchestration import Orchestration
+from .interaction import InteractionKind, InteractionService
+from .workflow import WorkflowRepository, WorkflowState
 from .storage import ProjectStore
 from .workspace.workspace import Workspace
 from .errors import DesignFlowError, PlanningQualityError, classify_provider_error
@@ -63,7 +66,7 @@ async def lifespan(app: FastAPI):
             if state.store and state.run_id and state.status in {"running", "paused", "needs_attention"}:
                 if state.orchestrator:
                     state.orchestrator.save_state()
-                agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+                agents = [agent.state_dict() for agent in state.orchestrator.participants] if state.orchestrator else []
                 state.store.finish_run(state.run_id, "stopped", agents)
                 if state.workspace:
                     state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
@@ -152,27 +155,10 @@ def healthz():
 @app.get("/version")
 def version():
     return {"version": __version__}
-from enum import Enum
-
-class WorkflowState(str, Enum):
-    IDLE = "idle"
-    DISCOVERING = "discovering"
-    WAITING_FOR_DECISION = "waiting_for_decision"
-    DRAFTING = "drafting"
-    REVIEWING = "reviewing"
-    REFINING = "refining"
-    VALIDATING = "validating"
-    COMPLETED = "completed"
-    PROVIDER_ATTENTION = "provider_attention"
-    PAUSED = "paused"
-    STOPPED = "stopped"
-    INTERRUPTED = "interrupted"
-    FAILED = "failed"
-
 class AppState:
     def __init__(self):
         self.configs: list[dict] = []
-        self.orchestrator: Optional[Orchestrator] = None
+        self.orchestrator: Optional[Orchestration] = None
         self.workspace: Optional[Workspace] = None
         self.store: Optional[ProjectStore] = None
         self.event_log: list[Event] = []
@@ -199,14 +185,12 @@ class AppState:
         self.workspace = workspace
         self.store = ProjectStore(workspace.root)
         self.store.reconcile_interrupted_runs()
-        rejected_checkpoints = self.store.reject_malformed_checkpoints()
-        if rejected_checkpoints:
-            saved_run_id = str((self.store.load_run_state() or {}).get("run_id", ""))
-            current = self.store.current_checkpoint(saved_run_id)
-            if current:
-                workspace.write("questions", "# Decision Checkpoint\n\n" + Orchestrator._checkpoint_projection(current))
-            else:
-                workspace.clear_questions()
+        self.store.reject_malformed_checkpoints()
+        current = self.store.latest_current_checkpoint()
+        if current:
+            workspace.write("questions", "# Decision Checkpoint\n\n" + checkpoint_projection(current))
+        else:
+            workspace.clear_questions()
         self.debug_observer = DebugObserver(workspace.root) if getattr(app.state, "debug_observer_enabled", False) else None
         self.configs = self.store.load_agents()
         self.event_log.clear()
@@ -314,15 +298,16 @@ async def release_project_binding(session_id: str) -> None:
         state = app_states.pop(project_path, None)
     if not state:
         return
-    if state.orchestrator:
+    was_active = state.status in {"running", "paused", "needs_attention"}
+    if state.orchestrator and was_active:
         state.orchestrator.stop()
     if state.run_task and not state.run_task.done():
         state.run_task.cancel()
         await asyncio.gather(state.run_task, return_exceptions=True)
-    if state.store and state.run_id:
+    if state.store and state.run_id and was_active:
         if state.orchestrator:
             state.orchestrator.save_state()
-        agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+        agents = [agent.state_dict() for agent in state.orchestrator.participants] if state.orchestrator else []
         state.store.finish_run(state.run_id, "stopped", agents)
         if state.workspace:
             state.workspace.finish_logbook_run(state.run_id, "stopped", agents)
@@ -497,11 +482,17 @@ def broadcast(event: Event, state):
         state.debug_observer.observe({**data, "run_id": state.run_id})
     if state.store:
         state.store.append_event(state.run_id, data)
-        if event.kind == EventKind.TURN_END and state.orchestrator:
-            state.store.update_run_metrics(
-                state.run_id,
-                [agent.state_dict() for agent in state.orchestrator.agents]
-            )
+        if event.kind == EventKind.TURN_END:
+            if state.workspace:
+                state.workspace.append(
+                    "logbook", event.data.get("response", ""), event.agent,
+                    label=event.data.get("phase", "proposal"),
+                )
+            if state.orchestrator:
+                state.store.update_run_metrics(
+                    state.run_id,
+                    [agent.state_dict() for agent in state.orchestrator.participants]
+                )
     dead = []
     for queue in state.sse_clients:
         try:
@@ -694,6 +685,7 @@ def save_project_settings(body: ProjectSettingsIn, state: AppState = Depends(get
 
 
 class AgentConfigIn(BaseModel):
+    id: str = ""
     name: str
     kind: str
     role: str = ""
@@ -750,8 +742,8 @@ def model_for_virtual_agent(config: dict, role_index: int, provider_count: int) 
     capable_pool = [model for model in pool if is_design_capable_model(model)]
     if capable_pool:
         pool = capable_pool
-    provider_turn = role_index // max(1, provider_count)
-    return pool[provider_turn % len(pool)]
+    del provider_count
+    return pool[role_index % len(pool)]
 
 
 def live_agents_all_sessions(agent_id: str):
@@ -891,10 +883,23 @@ def test_agent_config(body: AgentConfigIn, state: AppState = Depends(get_state))
 @app.post("/agents/models")
 def list_provider_models(body: AgentConfigIn, state: AppState = Depends(get_state)):
     try:
-        config = to_agent_config(body.model_dump(), state)
+        submitted = body.model_dump()
+        persisted = next((item for item in state.configs if item.get("id") == body.id), None) if body.id else None
+        # Public agent payloads deliberately contain a masked credential. Model
+        # refresh must resolve that marker server-side, never send it to a provider.
+        if persisted and submitted.get("api_key") in {"", "****"}:
+            submitted["api_key"] = persisted.get("api_key", "")
+        config = to_agent_config(submitted, state)
         models = discover_models(config)
         if not models:
             raise ValueError("No compatible text-generation models were returned")
+        if body.id and state.store:
+            if persisted is not None:
+                persisted.setdefault("extra", {})["available_models"] = models
+                persisted["extra"]["model_catalog_kind"] = (
+                    "bedrock_inference_profiles" if body.kind == "aws-bedrock" else "provider_models"
+                )
+                state.persist_agents()
         return {"ok": True, "models": models}
     except Exception as exc:
         return {"ok": False, "models": [], **classify_provider_error(exc).to_dict()}
@@ -907,18 +912,7 @@ class StartBody(BaseModel):
     max_debate_rounds: int = 6
     max_tokens: int = 100000
     max_build_iterations: int = 5
-    mode: str = "debate"
-
-
-def is_continuation_prompt(prompt: str) -> bool:
-    """Recognize explicit requests to resume an interrupted planning workflow."""
-    normalized = " ".join((prompt or "").strip().lower().split())
-    if not normalized:
-        return True
-    return bool(re.match(
-        r"^(?:please\s+)?(?:continue|resume|retry|retry the last (?:run|turn)|proceed|carry on|keep going|pick up where (?:we|you) left off)\b",
-        normalized,
-    ))
+    mode: str = "auto"
 
 
 @app.post("/run/start")
@@ -941,49 +935,27 @@ async def start_run(
                 raise HTTPException(400, str(exc)) from exc
     if not state.workspace:
         raise HTTPException(400, "Open a project folder first")
-    continuation_requested = is_continuation_prompt(body.idea)
-    saved_state = state.store.load_run_state() if state.store and continuation_requested else None
-    if continuation_requested and body.idea.strip() and not saved_state:
-        raise HTTPException(409, "There is no interrupted design workflow to resume or retry.")
+    workflow_repository = WorkflowRepository(state.store) if state.store else None
+    resumable_workflow = workflow_repository.latest_resumable() if workflow_repository else None
+    brief = state.workspace.brief().strip()
+    persisted_goal = state.workspace.product_goal().strip()
+    saved_goal = workflow_repository.goal(resumable_workflow.run_id) if resumable_workflow and workflow_repository else ""
+    entered_goal = body.idea.strip()
+    if not entered_goal:
+        raise HTTPException(400, "Enter a question or planning goal before starting a run")
+    product_goal = saved_goal or persisted_goal or entered_goal
+    resumes_saved_run = bool(
+        saved_goal
+        and saved_goal == product_goal
+    )
+    saved_run_id = resumable_workflow.run_id if resumable_workflow else ""
+    task = body.idea.strip() if (persisted_goal or saved_goal) else ""
+    effective_mode = body.mode
     if not state.merged_configs:
         raise HTTPException(400, "No agents configured")
     names = [config["name"].strip() for config in state.merged_configs]
     if any(not name for name in names) or len(names) != len(set(names)):
         raise HTTPException(400, "Every agent needs a unique non-empty name")
-
-    brief = state.workspace.brief().strip()
-    persisted_goal = state.workspace.product_goal().strip()
-    saved_goal = str((saved_state or {}).get("idea", "")).strip()
-    product_goal = saved_goal or persisted_goal or body.idea.strip()
-    resumes_saved_run = bool(
-        saved_goal
-        and saved_goal == product_goal
-    )
-    saved_run_id = str((saved_state or {}).get("run_id", "")).strip()
-    if resumes_saved_run and not saved_run_id and state.store:
-        persisted_checkpoint = state.store.latest_current_checkpoint()
-        saved_run_id = str(persisted_checkpoint.get("run_id", "")) or state.store.latest_run_id()
-    task = body.idea.strip() if (persisted_goal or saved_goal) else ""
-    effective_mode = body.mode
-    if brief and not body.idea.strip() and body.mode == "auto":
-        # The primary Start Run button intentionally has no prompt when a
-        # DESIGNFLOW.md brief exists. Treat it as planning, not direct chat.
-        effective_mode = "debate"
-    if not product_goal:
-        raise HTTPException(400, "Describe what to build or add DESIGNFLOW.md to the project")
-    if not brief and product_goal:
-        # Lock product identity on the first run (and migrate older projects
-        # whose only identity lived in the generated design header). Later
-        # prompts are tasks and must never replace this goal.
-        state.workspace.write_brief(product_goal)
-        brief = product_goal
-    if body.save_brief and body.idea.strip():
-        state.workspace.write_brief(body.idea)
-    if state.store and body.idea.strip() and not continuation_requested:
-        # Keep the existing artifacts as context, but never inherit a previous
-        # workflow phase when the user supplied a substantive new instruction.
-        state.store.clear_run_state()
-
     agents = []
     try:
         base_configs = [
@@ -992,13 +964,38 @@ async def start_run(
         ]
         if not base_configs:
             raise HTTPException(400, "No available agents to spawn the team. Please unpause at least one agent.")
+        missing_catalogs = [
+            config.get("name", config.get("id", "agent")) for config in base_configs
+            if config.get("kind") != "cli" and not model_pool_for_config(config)
+        ]
+        if missing_catalogs:
+            raise HTTPException(
+                400,
+                "Choose a model or discover and save the model catalog for: " + ", ".join(missing_catalogs),
+            )
+        stale_bedrock_catalogs = [
+            config.get("name", config.get("id", "agent")) for config in base_configs
+            if config.get("kind") == "aws-bedrock"
+            and config.get("extra", {}).get("model_catalog_kind") != "bedrock_inference_profiles"
+        ]
+        if stale_bedrock_catalogs:
+            raise HTTPException(
+                400,
+                "Rediscover Bedrock models in Agents; the saved catalog contains non-invocable foundation IDs for: "
+                + ", ".join(stale_bedrock_catalogs),
+            )
 
         # 1. Spawn the Virtual Company, distributing roles across all provided base configs (Round-Robin)
         personas, _, _, _ = state.workspace.parse_personas()
+        assigned_models: set[str] = set()
         for i, (role, system_prompt) in enumerate(personas.items()):
             base_config = base_configs[i % len(base_configs)]
             expert = base_config.copy()
-            expert["model"] = model_for_virtual_agent(base_config, i, len(base_configs))
+            pool = model_pool_for_config(base_config)
+            preferred = model_for_virtual_agent(base_config, i, len(base_configs))
+            expert["model"] = next((model for model in pool if model not in assigned_models), preferred)
+            if expert["model"]:
+                assigned_models.add(expert["model"])
             expert["id"] = f"{base_config.get('id', 'base')}_{role}"
             expert["base_id"] = base_config.get("id", "")
             expert.setdefault("extra", {})["runtime_base_name"] = base_config.get("name", base_config.get("id", "provider"))
@@ -1015,8 +1012,103 @@ async def start_run(
     except Exception as exc:
         raise HTTPException(400, f"Could not initialize agent team: {exc}") from exc
 
+    # Persist the user's request before routing or provider work. This is the
+    # durable intake boundary: reload/restart must never erase an accepted prompt.
+    intake_run_id = saved_run_id if resumes_saved_run and saved_run_id else str(uuid.uuid4())[:8]
     state.event_log.clear()
-    state.run_id = saved_run_id if resumes_saved_run and saved_run_id else str(uuid.uuid4())[:8]
+    state.run_id = intake_run_id
+    state.current_idea = entered_goal
+    state.status = "running"
+    state.awaiting_input = False
+    if not resumes_saved_run:
+        state.store.reconcile_interrupted_runs()
+        state.store.start_run(intake_run_id, entered_goal, run_kind="request_intake")
+
+    workflow_context = resumable_workflow.model_dump(mode="json") if resumable_workflow else {}
+    router_agent = next(
+        (agent for agent in agents if "haiku" in (agent.config.model or "").lower()), agents[0],
+    )
+    interaction = InteractionService(router_agent, state.workspace, state.store, workflow_context)
+    if body.save_brief or body.mode in {"debate", "all"}:
+        interaction_kind = InteractionKind.PLANNING
+        decision = None
+    else:
+        decision = await interaction.route(entered_goal)
+        interaction_kind = decision.kind
+
+    if interaction_kind == InteractionKind.ANSWER:
+        state.orchestrator = None
+        state.status = "running"
+        state.store.update_run_contract(state.run_id, "chat")
+        state.workspace.begin_logbook_run(state.run_id, entered_goal)
+        turn_id = f"answer-{state.run_id}"
+        broadcast(Event(EventKind.TURN_START, agent=router_agent.name, data={
+            "turn_id": turn_id, "phase": "answer", "attempt": 1,
+            "visibility": "internal",
+        }), state)
+        try:
+            response = decision.answer.strip() if decision else ""
+            if not response:
+                response = await interaction.answer(entered_goal)
+            interaction.context_tree.upsert(
+                node_type="handoff", source_type="interaction", source_ref=state.run_id,
+                title="Project conversation handoff",
+                content=json.dumps({"request": entered_goal, "answer": response}, ensure_ascii=False),
+                summary=interaction.context_tree.summarize(
+                    decision.reason if decision else "Read-only project answer", response,
+                ),
+                authority=2, importance=4,
+            )
+            broadcast(Event(EventKind.TURN_END, agent=router_agent.name, data={
+                "turn_id": turn_id, "phase": "answer", "attempt": 1,
+                "response": response, "usage": router_agent.last_usage.to_dict(),
+                "tokens": router_agent.last_usage.total_tokens,
+                "visibility": "user",
+            }), state)
+            state.store.finish_run(state.run_id, "done", [router_agent.state_dict()], outcome={
+                "status": "answered", "kind": "chat",
+            })
+            state.workspace.finish_logbook_run(state.run_id, "done", [router_agent.state_dict()])
+            state.status = "done"
+            broadcast(Event(EventKind.DONE, data={
+                "completion_kind": "answer", "run_kind": "chat", "answer": response,
+                "outcome": {"status": "answered"}, "files": [],
+                "visibility": "internal",
+            }), state)
+            return {"ok": True, "run_id": state.run_id, "run_kind": "chat", "answer": response}
+        except Exception as exc:
+            state.status = "error"
+            state.store.finish_run(state.run_id, "error", [router_agent.state_dict()], outcome={
+                "status": "failed", "kind": "chat",
+            })
+            state.workspace.finish_logbook_run(state.run_id, "error", [router_agent.state_dict()])
+            raise HTTPException(502, Orchestration._public_error(exc)[0]) from exc
+
+    if interaction_kind == InteractionKind.RECOVERY:
+        if not resumable_workflow:
+            raise HTTPException(409, "There is no interrupted design workflow to continue.")
+    elif interaction_kind == InteractionKind.PLANNING and resumable_workflow:
+        if resumable_workflow.state == WorkflowState.WAITING_FOR_USER:
+            raise HTTPException(409, "Answer or cancel the active checkpoint before starting new planning work")
+        raise HTTPException(409, "Continue or cancel the active planning workflow before starting a new one")
+    else:
+        saved_goal = ""
+        saved_run_id = ""
+        resumes_saved_run = False
+
+    if not product_goal:
+        raise HTTPException(400, "Enter a planning goal before starting a planning workflow")
+    if not brief and product_goal:
+        # Product identity is persisted only after semantic routing selects the
+        # planning path. Read-only questions can never become the project brief.
+        state.workspace.write_brief(product_goal)
+        brief = product_goal
+    if body.save_brief and entered_goal:
+        state.workspace.write_brief(entered_goal)
+        product_goal = entered_goal
+
+    state.event_log.clear()
+    state.run_id = intake_run_id
     state.current_idea = product_goal
     state.status = "running"
     state.last_transition = "run_started"
@@ -1029,7 +1121,7 @@ async def start_run(
         if resumes_saved_run and saved_run_id:
             state.store.resume_run(state.run_id)
         else:
-            state.store.start_run(state.run_id, task or product_goal)
+            state.store.update_run_contract(state.run_id, "planning_workflow")
     if resumes_saved_run and saved_run_id:
         state.workspace.resume_logbook_run(state.run_id)
     else:
@@ -1039,17 +1131,11 @@ async def start_run(
 
     run_workspace = state.workspace.staged_for_run(state.run_id)
     run_workspace.freeze_planning_evidence(product_goal)
-    state.orchestrator = Orchestrator(
+    state.orchestrator = Orchestration(
         agents=agents,
         workspace=run_workspace,
         event_cb=lambda e: broadcast(e, state),
-        max_debate_rounds=body.max_debate_rounds,
         max_tokens=body.max_tokens,
-        max_build_iterations=body.max_build_iterations,
-        require_approval=True,
-        mode=effective_mode,
-        restore=True,
-        allow_artifact_changes_on_restore=resumes_saved_run,
         store=state.store,
         run_id=state.run_id,
     )
@@ -1065,7 +1151,7 @@ async def start_run(
                 state.status = "done"
                 state.awaiting_input = False
                 if state.store and state.run_id:
-                    agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
+                    agent_states = [agent.state_dict() for agent in state.orchestrator.participants]
                     completed_turns = [
                         turn for turn in state.store.run_turns(state.run_id)
                         if turn.get("status") == "completed"
@@ -1098,8 +1184,14 @@ async def start_run(
                 if state.workspace and snapshot:
                     try:
                         proj_name = state.workspace.project_root.name or "project"
-                        bundle_path = state.workspace.project_root / f"{proj_name}.md"
-                        bundled = f"# Architecture Design\n\n{snapshot.get('design', '')}\n\n# Implementation Plan\n\n{snapshot.get('plan', '')}"
+                        export_dir = state.workspace.root / "exports"
+                        export_dir.mkdir(parents=True, exist_ok=True)
+                        bundle_path = export_dir / f"{proj_name}.md"
+                        bundled = (
+                            snapshot.get("design", "").rstrip()
+                            + "\n\n"
+                            + snapshot.get("plan", "").lstrip()
+                        )
                         bundle_path.write_text(bundled)
                     except Exception:
                         pass
@@ -1122,14 +1214,14 @@ async def start_run(
                 state.orchestrator.ws.preserve_staged_artifacts("error")
             state.status = "error"
             state.awaiting_input = False
-            logger.exception("Orchestrator run failed")
-            public_error, error_code = Orchestrator._public_error(exc)
+            logger.exception("Workflow run failed")
+            public_error, error_code = Orchestration._public_error(exc)
             diagnostic = str(exc)[:4000] if isinstance(exc, DesignFlowError) else ""
             broadcast(Event(kind=EventKind.ERROR, data={
                 "error": public_error, "error_code": error_code, "details": diagnostic,
             }), state)
             if state.store and state.run_id:
-                agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
+                agent_states = [agent.state_dict() for agent in state.orchestrator.participants]
                 state.store.finish_run(
                     state.run_id, "error",
                     agent_states,
@@ -1140,7 +1232,6 @@ async def start_run(
                     },
                 )
                 state.workspace.finish_logbook_run(state.run_id, "error", agent_states)
-                state.store.clear_run_state()
         finally:
             if state.orchestrator:
                 state.orchestrator.stop()
@@ -1160,14 +1251,6 @@ async def reset_run(state: AppState = Depends(get_state)):
         state.run_task.cancel()
         await asyncio.gather(state.run_task, return_exceptions=True)
 
-    if state.store:
-        state.store.clear_run_state()
-
-    if state.workspace:
-        try:
-            (state.workspace.root / "run_state.json").unlink(missing_ok=True)
-        except OSError:
-            pass
     state.status = "idle"
     state.awaiting_input = False
     state.orchestrator = None
@@ -1265,6 +1348,17 @@ def recover_provider_turn(body: ProviderRecoveryBody, state: AppState = Depends(
 
 @app.post("/run/stop")
 async def stop_run(state: AppState = Depends(get_state)):
+    durable = None
+    if state.store and state.run_id:
+        try:
+            durable = WorkflowRepository(state.store).get(state.run_id)
+        except KeyError:
+            pass
+    if durable and durable.state in {WorkflowState.COMPLETED, WorkflowState.CANCELLED, WorkflowState.FAILED}:
+        state.status = "idle"
+        state.awaiting_input = False
+        return {"ok": True, "already_terminal": True}
+
     if state.run_task and not state.run_task.done():
         state.run_task.cancel()
         await asyncio.gather(state.run_task, return_exceptions=True)
@@ -1283,7 +1377,7 @@ async def stop_run(state: AppState = Depends(get_state)):
             # Keep the last safe workflow position so an empty fresh start can
             # continue the design instead of silently beginning again.
             state.orchestrator.save_state()
-            agent_states = [agent.state_dict() for agent in state.orchestrator.agents]
+            agent_states = [agent.state_dict() for agent in state.orchestrator.participants]
             state.store.finish_run(
                 state.run_id, "stopped",
                 agent_states,
@@ -1424,11 +1518,38 @@ def read_audit_log(
 @app.get("/run/status")
 def run_status(state: AppState = Depends(get_state)):
     reconcile_runtime_status(state)
-    agents = [agent.state_dict() for agent in state.orchestrator.agents] if state.orchestrator else []
+    agents = [agent.state_dict() for agent in state.orchestrator.participants] if state.orchestrator else []
+    workflow = None
+    effective_run_id = state.run_id
+    effective_status = state.status
+    effective_awaiting_input = state.awaiting_input
+    if state.store and not effective_run_id:
+        saved = WorkflowRepository(state.store).latest_resumable()
+        if saved:
+            workflow = saved.model_dump(mode="json")
+            effective_run_id = saved.run_id
+            if saved.state == WorkflowState.WAITING_FOR_USER:
+                effective_status = "paused"
+                effective_awaiting_input = True
+            elif saved.state in {WorkflowState.RETRYABLE_FAILURE, WorkflowState.WAITING_FOR_RECOVERY}:
+                effective_status = "needs_attention"
+    if state.store and effective_run_id and workflow is None:
+        try:
+            workflow = WorkflowRepository(state.store).get(effective_run_id).model_dump(mode="json")
+        except KeyError:
+            pass
+    if state.store and effective_run_id and not agents:
+        with state.store._lock:
+            rows = state.store._db.execute(
+                "SELECT agent_id id,agent_id base_id,role,provider_name,provider_kind kind,model,"
+                "'completed' status FROM run_participants WHERE run_id=? ORDER BY ordinal",
+                (effective_run_id,),
+            ).fetchall()
+        agents = [dict(row) for row in rows]
     return {
-        "status": state.status,
-        "awaiting_input": state.awaiting_input,
-        "run_id": state.run_id,
+        "status": effective_status,
+        "awaiting_input": effective_awaiting_input,
+        "run_id": effective_run_id,
         "idea": state.current_idea,
         "project_path": state.workspace.path if state.workspace else "",
         "agents": agents,
@@ -1438,6 +1559,7 @@ def run_status(state: AppState = Depends(get_state)):
         },
         "failed_turn": state.orchestrator.failed_turn if state.orchestrator else None,
         "phase_usage": state.orchestrator.phase_usage if state.orchestrator else {},
+        "workflow": workflow,
     }
 
 
@@ -1448,13 +1570,15 @@ def run_progress(state: AppState = Depends(get_state)):
     if not state.workspace:
         raise HTTPException(400, "Open a project folder first")
 
-    saved = state.store.load_run_state() if state.store else None
+    saved = WorkflowRepository(state.store).latest_resumable() if state.store else None
     orchestrator = state.orchestrator
     phase = (
         orchestrator.phase.value if orchestrator
-        else str((saved or {}).get("phase", "not_started"))
+        else (saved.state.value.lower() if saved else "not_started")
     )
-    idea = state.current_idea or str((saved or {}).get("idea", "")) or state.workspace.brief().strip()
+    idea = state.current_idea or (
+        WorkflowRepository(state.store).goal(saved.run_id) if saved and state.store else ""
+    ) or state.workspace.brief().strip()
     snapshot = state.workspace.snapshot()
     completed_artifacts = [
         name.upper() for name in ("design", "plan", "decisions")
@@ -1464,12 +1588,16 @@ def run_progress(state: AppState = Depends(get_state)):
     has_pending_question = questions not in {"", "(empty)"}
     resumable = bool(saved and state.status in {"idle", "done", "error"})
     next_actions = {
-        "discovery": "clarify the product goal and constraints",
-        "drafting": "draft the architecture and implementation plan",
-        "peer_review": "finish specialist review of the draft",
-        "refinement": "incorporate review feedback into the artifacts",
-        "approval": "receive your answer to the current checkpoint",
-        "complete": "review or extend the completed planning baseline",
+        "created": "start requirements discovery",
+        "discovering": "clarify the product goal and constraints",
+        "waiting_for_user": "receive your answer to the current checkpoint",
+        "diverging": "collect independent typed expert proposals",
+        "analyzing": "cluster agreements and identify conflicts locally",
+        "resolving": "resolve material architecture conflicts",
+        "synthesizing": "render the planning artifacts from accepted state",
+        "validating": "validate the deterministic projections",
+        "completed": "review or extend the completed planning baseline",
+        "waiting_for_recovery": "select a recovery action for the failed operation",
         "not_started": "start the first design run",
     }
     effective_status = "stopped (ready to continue)" if resumable else state.status
@@ -1509,14 +1637,67 @@ def run_transcript(run_id: str, limit: int = 200, offset: int = 0, state: AppSta
 
 @app.get("/run/recent-activity")
 def recent_run_activity(limit: int = 8, state: AppState = Depends(get_state)):
-    """Bootstrap a compact feed tail after login/refresh; this is not event replay."""
+    """Restore conversation, never a tail of workflow telemetry."""
     if not state.store:
         return {"run_id": "", "events": []}
     run_id = state.run_id or state.store.latest_run_id()
-    events = state.store.recent_run_activity(run_id, limit=limit) if run_id else []
-    run = next((item for item in state.store.recent_runs(limit=20) if item["run_id"] == run_id), {})
-    saved_state = state.store.load_run_state() or {}
-    resumable = bool(run.get("status") == "interrupted" and saved_state.get("run_id") == run_id)
+    recent = state.store.recent_runs(limit=max(20, limit * 2))
+    run = next((item for item in recent if item["run_id"] == run_id), {})
+    events = []
+    # The live workspace represents the current run, not a cross-run transcript.
+    # Older Q&A remains available in Run History and must not greet a user on
+    # login as though it were current status.
+    chat_runs = [run] if run.get("run_kind") == "chat" else []
+    for chat_run in chat_runs:
+        events.append({
+            "event_id": f"prompt-{chat_run['run_id']}",
+            "run_id": chat_run["run_id"],
+            "timestamp": chat_run.get("started_at", ""),
+            "kind": "user_prompt",
+            "agent": "human",
+            "audience": "conversation",
+            "data": {"message": chat_run.get("idea", "")},
+        })
+        answer = next((
+            event for event in reversed(state.store.run_events(chat_run["run_id"], limit=200))
+            if event.get("kind") == "turn_end" and event.get("data", {}).get("phase") == "answer"
+        ), None)
+        if answer:
+            answer["audience"] = "conversation"
+            events.append(answer)
+    if run.get("run_kind") in {"request_intake", "planning_workflow"} and run.get("status") in {
+        "running", "interrupted", "error",
+    }:
+        events.append({
+            "event_id": f"prompt-{run_id}", "run_id": run_id,
+            "timestamp": run.get("started_at", ""), "kind": "user_prompt",
+            "agent": "human", "audience": "conversation",
+            "data": {"message": run.get("idea", "")},
+        })
+        if run.get("run_kind") == "request_intake" and run.get("status") == "running":
+            events.append({
+                "event_id": f"routing-{run_id}", "run_id": run_id,
+                "timestamp": run.get("started_at", ""), "kind": "turn_start",
+                "agent": "DesignFlow", "audience": "conversation",
+                "data": {"turn_id": f"routing-{run_id}", "phase": "routing", "role": "request routing"},
+            })
+        elif run.get("status") == "error":
+            events.append({
+                "event_id": f"intake-error-{run_id}", "run_id": run_id,
+                "timestamp": run.get("completed_at", ""), "kind": "error",
+                "agent": "DesignFlow", "audience": "conversation",
+                "data": {
+                    "error_code": "request_intake_failed",
+                    "error": "This request stopped before work began. Review the run details or submit it again.",
+                },
+            })
+    resumable_workflow = WorkflowRepository(state.store).latest_resumable()
+    resumable = bool(
+        run.get("status") == "interrupted"
+        and resumable_workflow
+        and resumable_workflow.run_id == run_id
+        and resumable_workflow.state != WorkflowState.WAITING_FOR_USER
+    )
     if resumable:
         paused_names = {str(config.get("name", "")) for config in state.configs if config.get("is_paused")}
         for event in reversed(events):

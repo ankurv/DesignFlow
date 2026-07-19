@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -70,55 +69,13 @@ class RunContract:
         )
 
 
-def _artifact_targets(normalized: str) -> tuple[str, ...]:
-    targets = []
-    if re.search(r"\b(?:design\.md|design document|existing design|(?:system |architecture |visual )?diagrams?)\b", normalized):
-        targets.append("DESIGN.md")
-    if re.search(r"\b(?:plan\.md|implementation plan|project plan)\b", normalized):
-        targets.append("PLAN.md")
-    if re.search(r"\b(?:decisions\.md|decision ledger|key decisions)\b", normalized):
-        targets.append("DECISIONS.md")
-    return tuple(targets)
-
-
 def classify_run_contract(text: str, mode: str = "auto", local_intent: str = "") -> RunContract:
+    """Apply structured UI overrides; defer natural language to semantic routing."""
     request = (text or "").strip()
-    normalized = " ".join(request.lower().split())
     if local_intent:
         return RunContract(RunKind.STATUS_QUERY, request, local_intent=local_intent)
-
-    bounded_direct_edit = bool(re.search(
-        r"\b(?:one agent|single agent|bounded (?:document )?edit|do not (?:start a )?debate|without (?:a )?debate|update directly)\b",
-        normalized,
-    ))
-    substantive_design_refinement = bool(re.search(
-        r"\b(?:refine|revise|improve|challenge)\b.*\b(?:design|architecture|diagram)s?\b",
-        normalized,
-    )) and not bounded_direct_edit and not normalized.endswith("?")
-    explicit_team_request = bool(re.search(
-        r"\b(?:debate|multi-agent|team review|challenge the design)\b", normalized,
-    )) and not bounded_direct_edit
-    explicit_team = mode in {"debate", "all"} or substantive_design_refinement or explicit_team_request
-    targets = _artifact_targets(normalized)
-    edit_verb = bool(re.search(
-        r"\b(?:add|append|include|insert|update|edit|fix|refresh|refine|revise|improve|generate|create)\b",
-        normalized,
-    ))
-    if not explicit_team and targets and edit_verb:
-        return RunContract(
-            RunKind.ARTIFACT_EDIT,
-            request,
-            target_artifacts=targets,
-            requires_diagram_delta=bool(re.search(r"\b(?:mermaid|diagram|visual)\b", normalized)),
-        )
-    if explicit_team:
+    if mode in {"debate", "all"}:
         return RunContract(RunKind.PLANNING_WORKFLOW, request)
     if mode == "direct":
-        return RunContract(RunKind.CHAT, request)
-
-    # Questions have no mutation contract. All other natural-language requests
-    # remain deliberately unresolved until the state-aware router sees current
-    # artifacts and validation state; vocabulary matching is not an intent model.
-    if normalized.endswith("?"):
         return RunContract(RunKind.CHAT, request)
     return RunContract(RunKind.INTENT_ROUTING, request)
