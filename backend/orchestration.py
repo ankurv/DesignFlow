@@ -26,7 +26,8 @@ Be concrete, proportionate, and explicit about trade-offs. Use exactly this shap
 {"components":[{"name":"","responsibility":"","interfaces":[]}],
  "decisions":[{"topic":"","recommendation":"","rationale":"","alternatives":[]}],
  "risks":[{"risk":"","mitigation":""}],"assumptions":[],
- "unknowns":[{"question":"","validation":""}]}
+ "unknowns":[{"question":"","validation":""}],
+ "diagram":"mermaid code representing the high-level architecture (use graph TD). Do not include markdown codeblocks, just the raw mermaid syntax."}
 When prior debate turns are supplied, directly evaluate them. Preserve sound decisions, challenge
 weak consequential assumptions, and propose a materially better alternative where warranted.
 Agreement is allowed only after attempting falsification; do not manufacture stylistic disagreement.
@@ -48,7 +49,7 @@ If the proposal is sound, return an empty challenges list and name validated top
 
 REVISION_SYSTEM = """You are the coordinating architect. Respond to every supplied challenge and produce the
 single revised canonical design. Return JSON only with this exact shape:
-{"proposal":{"components":[],"decisions":[],"risks":[],"assumptions":[],"unknowns":[]},
+{"proposal":{"components":[],"decisions":[],"risks":[],"assumptions":[],"unknowns":[],"diagram":"updated raw mermaid code"},
 "dispositions":[{"challenge_id":"","status":"accepted|defended|merged|unresolved","rationale":"",
 "resulting_decision":""}]}
 There must be exactly one disposition per challenge ID. Accept or merge valid criticism, defend a decision with
@@ -449,20 +450,24 @@ class Orchestration:
                 self._state_event(snapshot)
                 return
 
-            # Discovery uncertainty is context for later validation, not authority
-            # to interrupt the user. Only a conflict grounded in accepted proposals
-            # may create a product-decision checkpoint.
-            for index, question in enumerate(assessment.blocking_questions):
-                unknown = f"Unresolved discovery unknown: {question}"
-                self.context_tree.upsert(
-                    run_id=self.run_id, node_type="unknown", source_type="workflow",
-                    source_ref=f"discovery-unknown-{index}", title="Discovery unknown for later validation",
-                    content=unknown, summary=unknown, authority=2, importance=3,
+            if assessment.blocking_questions:
+                question = assessment.blocking_questions[0]
+                checkpoint = self.store.enqueue_checkpoint(
+                    self.run_id, "discovering",
+                    "Please clarify this product unknown before architecture planning begins.",
+                    question,
+                    []
                 )
+                snapshot = self.loop_manager.advance(self.run_id, LoopSignal.USER_INPUT_REQUIRED, {
+                    "reason": "discovery_blocked", "checkpoint_id": checkpoint["id"]
+                })
+                self._state_event(snapshot)
+                return
+                
             snapshot = self.loop_manager.advance(self.run_id, LoopSignal.DISCOVERY_ADEQUATE, {
                 "source": "nonblocking_discovery_unknowns",
                 "evidence_summary": assessment.evidence_summary,
-                "unknown_count": len(assessment.blocking_questions),
+                "unknown_count": 0,
             })
             self._state_event(snapshot)
             return
@@ -577,25 +582,55 @@ class Orchestration:
                 if not opening_turn:
                     raise ValueError("durable debate is missing its opening turn")
                 opening = ExpertProposal.model_validate(opening_turn["payload"])
+                reviewers = self._select_reviewers(f"{idea}\n{task}\n{source_context}", coordinator)
+                sequence = max(int(turn["sequence"]) for turn in debate_turns) + 1
+
+            current_proposal = opening
+            
+            known_challenges.clear()
+            blocked_challenges: list[dict[str, Any]] = []
+            applied_dispositions.clear()
+            round_reviewers_done = set()
+            pending_round_challenges = []
+            
+            completed_rounds = 0
+            if debate_turns:
+                last_revision_seq = max([t["sequence"] for t in debate_turns if t["turn_kind"] == "round_revision"] + [0])
                 for turn in debate_turns:
                     if turn["turn_kind"] == "challenge":
                         review = DebateReview.model_validate(turn["payload"])
                         reviews.append(review)
-                        known_challenges.extend(item.model_dump() for item in review.challenges)
+                        is_current_round = (turn["sequence"] > last_revision_seq)
+                        if is_current_round:
+                            round_reviewers_done.add(turn["agent"])
+                        
+                        for challenge in review.challenges:
+                            earlier = list(known_challenges)
+                            if self._append_unique_challenge(known_challenges, challenge):
+                                challenge_data = challenge.model_dump()
+                                blocked_ids = {item["id"] for item in blocked_challenges}
+                                if (self._challenge_needs_human(challenge, earlier)
+                                        or challenge.related_challenge_id in blocked_ids):
+                                    blocked_challenges.append(challenge_data)
+                                elif is_current_round:
+                                    pending_round_challenges.append(challenge_data)
                     elif turn["turn_kind"] == "round_revision":
                         durable_revision = DebateRevision.model_validate(turn["payload"])
-                        opening = durable_revision.proposal
+                        current_proposal = durable_revision.proposal
                         applied_dispositions.extend(durable_revision.dispositions)
-                reviewers = []
-                sequence = max(int(turn["sequence"]) for turn in debate_turns) + 1
-            current_proposal = opening
-            applied_ids = {item.challenge_id for item in applied_dispositions}
-            blocked_challenges: list[dict[str, Any]] = [
-                item for item in known_challenges if item["id"] not in applied_ids
-            ]
-            for round_number in range(1, self.max_debate_rounds + 1):
-                round_challenges: list[dict[str, Any]] = []
+                        applied_ids = {item.challenge_id for item in durable_revision.dispositions}
+                        blocked_challenges = [c for c in blocked_challenges if c["id"] not in applied_ids]
+                        completed_rounds += 1
+                        
+            start_round = completed_rounds + 1
+            
+            for round_number in range(start_round, self.max_debate_rounds + 1):
+                round_challenges: list[dict[str, Any]] = list(pending_round_challenges)
+                pending_round_challenges.clear()
+                
                 for reviewer in reviewers:
+                    if reviewer.name in round_reviewers_done:
+                        continue
                     reviewer_evidence = self.context_tree.retrieve(
                         query=(f"{task or idea}\nReview the current proposal from the perspective of "
                                f"{reviewer.config.role or reviewer.name}."),
@@ -669,10 +704,13 @@ class Orchestration:
                 scope_warning = ""
                 if blocked_challenges:
                     scope_warning = " Scope-changing suggestions were not applied and require your explicit choice."
+                
+                diagram_section = f"\n\n```mermaid\n{opening.diagram}\n```" if opening.diagram else ""
+                
                 checkpoint = self.store.enqueue_checkpoint(
                     self.run_id, "design_review",
                     "Review the proposed design direction before it is finalized.",
-                    f"Proposed direction: {direction}. Peer review: {objections}.{scope_warning}",
+                    f"Proposed direction: {direction}. Peer review: {objections}.{scope_warning}{diagram_section}",
                     ([
                         {"label": "A", "summary": "Keep the stated scope", "consequence": "Preserve the current proposal and reject unapproved scope changes.", "recommended": True},
                         {"label": "B", "summary": "Authorize the listed scope changes", "consequence": "Allow the coordinator to incorporate the reviewers' scope-changing suggestions."},

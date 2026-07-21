@@ -812,6 +812,11 @@ function appendFeed(ev) {
       updateStatus('done');
       break;
     case 'error':
+      document.querySelectorAll('.feed-item.turn_start:not(.completed)').forEach(item => {
+        item.classList.add('completed', 'cancelled');
+        const pendingSummary = item.querySelector('.feed-summary');
+        if (pendingSummary) pendingSummary.textContent = 'Agent turn stopped due to error.';
+      });
       summary = ev.data.error_code
         ? String(ev.data.error || ev.data.message || 'Agent request failed.')
         : friendlyProviderError(ev.data.error || ev.data.message);
@@ -840,6 +845,14 @@ function appendFeed(ev) {
           <div class="provider-recovery-actions">
             <button class="btn btn-secondary btn-sm" type="button" onclick="openRunTranscript('${escAttr(String(ev.run_id))}')">View full interaction log</button>
           </div>` : '';
+      } else {
+        recoveryActionsHtml = `
+          <div class="provider-recovery-actions" data-turn-id="${escAttr(String(ev.data.turn_id || ''))}">
+            <button class="btn btn-primary btn-sm" type="button" onclick="retryGenericError(this)">Retry</button>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="recoverProvider('auto_failover', this)">Auto-failover</button>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="dismissError(this)">Ignore</button>
+            <span class="provider-recovery-status" aria-live="polite"></span>
+          </div>`;
       }
       kindLabel = 'error';
       break;
@@ -906,6 +919,31 @@ async function resumeInterruptedRun(sourceButton) {
   }
   if (pane) pane.classList.add('resolved');
   if (status) status.textContent = 'Saved turn restored and retry started.';
+}
+
+async function retryGenericError(sourceButton) {
+  const pane = sourceButton?.closest('.provider-recovery-actions');
+  if (sourceButton) sourceButton.disabled = true;
+  const status = pane?.querySelector('.provider-recovery-status');
+  if (status) status.textContent = 'Retrying last action…';
+  
+  updateStatus('running');
+  const resumed = await startRun('continue', {hiddenPrompt: true});
+  
+  if (!resumed) {
+    if (sourceButton) sourceButton.disabled = false;
+    if (status) status.textContent = 'Could not retry. Check backend logs.';
+    updateStatus('error');
+    return;
+  }
+  if (pane) pane.classList.add('resolved');
+  if (status) status.textContent = 'Retry started.';
+}
+
+function dismissError(sourceButton) {
+  const pane = sourceButton?.closest('.provider-recovery-actions');
+  if (pane) pane.classList.add('resolved');
+  updateStatus('stopped');
 }
 
 async function openRunTranscript(runId) {

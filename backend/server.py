@@ -1033,6 +1033,22 @@ async def start_run(
     intake_run_id = saved_run_id if resumes_saved_run and saved_run_id else str(uuid.uuid4())[:8]
     state.event_log.clear()
     state.run_id = intake_run_id
+    # Log which agents are part of this run for auditability
+    audit_log.record(
+        request_id=str(uuid.uuid4()),
+        session_id=session.session_id if session else "",
+        username=session.username if session else "",
+        role=session.role if session else "",
+        project_path=state.workspace.path if state.workspace else "",
+        action="run.start",
+        target="/run/start",
+        result="success",
+        source_ip="",
+        metadata={
+            "agents": [agent.config.id for agent in agents],
+            "models": [agent.config.model for agent in agents if agent.config.model]
+        }
+    )
     state.current_idea = entered_goal
     state.status = "running"
     state.awaiting_input = False

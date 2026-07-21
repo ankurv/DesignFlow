@@ -249,7 +249,20 @@ class AgentBase(ABC):
         except Exception as exc:
             if self._attempt_is_current(attempt_token):
                 self.status = AgentStatus.ERROR
-            raise RuntimeError(f"[{self.name}] send failed: {exc}") from exc
+            
+            err_msg = str(exc).strip()
+            if "{" in err_msg and "}" in err_msg:
+                # Truncate raw JSON dictionaries dumped by Litellm/Provider errors for readability
+                err_msg = err_msg.split("{", 1)[0].strip()
+                if err_msg.endswith("-"):
+                    err_msg = err_msg[:-1].strip()
+                err_msg += " (Provider API Error)"
+                
+            actual_model = self.config.model or DEFAULT_MODELS.get(self.config.kind, "unknown model")
+            provider_display = self.config.extra.get("runtime_base_name") or self.config.extra.get("detected_provider") or self.config.kind or "unknown provider"
+            friendly_msg = f"Agent '{self.config.name}' failed to reach model '{actual_model}' via provider '{provider_display}': {err_msg}"
+            
+            raise RuntimeError(friendly_msg) from exc
 
         # A timeout cannot kill a worker thread. Discard its late result unless
         # this is still the authoritative attempt for the logical specialist.

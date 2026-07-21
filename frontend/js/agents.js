@@ -194,17 +194,22 @@ function detectProviderFromKey(key) {
 
 window.detectAndVerifyProvider = async function(uid) {
   const detected = detectProviderFromKey(editingAgentData.api_key);
-  if (!detected) {
-    notify('Provider could not be detected. Choose it under Advanced settings.', true);
-    renderAgentEditor();
-    return;
-  }
-  editingAgentData.kind = detected.kind;
-  editingAgentData.base_url = detected.baseUrl;
+  
   editingAgentData.extra = editingAgentData.extra || {};
-  editingAgentData.extra.detected_provider = detected.label;
+  
+  if (detected) {
+    editingAgentData.kind = detected.kind;
+    editingAgentData.base_url = detected.baseUrl;
+    editingAgentData.extra.detected_provider = detected.label;
+  }
+  
   delete editingAgentData.extra.connection_verified;
   delete editingAgentData.extra.connection_error;
+  
+  if (!detected && !editingAgentData.kind) {
+    notify('Provider could not be detected from key. Please select one manually.', true);
+  }
+  
   renderAgentEditor();
 };
 

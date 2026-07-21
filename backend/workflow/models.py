@@ -145,6 +145,7 @@ class ExpertProposal(StrictModel):
     risks: list[ProposalRisk] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     unknowns: list[ProposalUnknown] = Field(default_factory=list)
+    diagram: str = ""
 
     @field_validator("assumptions")
     @classmethod
@@ -155,12 +156,12 @@ class ExpertProposal(StrictModel):
 
 
 class DebateChallenge(StrictModel):
-    id: str = Field(min_length=1)
-    target_topic: str = Field(min_length=1)
-    claim: str = Field(min_length=1)
-    evidence: str = Field(min_length=1)
-    consequence: str = Field(min_length=1)
-    proposed_change: str = Field(min_length=1)
+    id: str = ""
+    target_topic: str = ""
+    claim: str = ""
+    evidence: str = ""
+    consequence: str = ""
+    proposed_change: str = ""
     materiality: str
     authority_basis: str
     scope_effect: str
