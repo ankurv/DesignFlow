@@ -434,7 +434,7 @@
       "id": "api_designer",
       "category": "api",
       "name": "API Designer",
-      "prompt": "You are the API DESIGNER. Focus purely on the communication layer. Ensure REST/GraphQL endpoints are intuitive, stateless, properly versioned, and standardized.",
+      "prompt": "You are the API DESIGNER. Focus on component packaging (microservice vs library vs in-process module), inter-component protocols (Protobuf/gRPC vs REST/JSON vs Async Queue), and precise API contracts/method signatures.",
       "signals": [
         "api",
         "rest",

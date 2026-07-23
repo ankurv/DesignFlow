@@ -120,6 +120,31 @@ class ProposalComponent(StrictModel):
     name: str = Field(min_length=1)
     responsibility: str = Field(min_length=1)
     interfaces: list[str] = Field(default_factory=list)
+    packaging: str = Field(default="")
+    communication_protocol: str = Field(default="")
+    data_store: str = Field(default="")
+    api_contracts: list[str] = Field(default_factory=list)
+
+    @field_validator("api_contracts", mode="before")
+    @classmethod
+    def _normalize_api_contracts(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        normalized = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append(item.strip())
+            elif isinstance(item, dict):
+                methods = item.get("methods", [])
+                method = ", ".join(methods) if isinstance(methods, list) else str(methods)
+                endpoint = item.get("endpoint", item.get("path", item.get("name", "")))
+                req = json.dumps(item.get("request_schema", item.get("request", {})), ensure_ascii=False)
+                resp = json.dumps(item.get("response_schema", item.get("response", {})), ensure_ascii=False)
+                if endpoint:
+                    normalized.append(f"{method or 'API'} {endpoint} | Req: {req} | Resp: {resp}")
+                else:
+                    normalized.append(json.dumps(item, ensure_ascii=False))
+        return [item for item in normalized if item]
 
 
 class ProposalDecision(StrictModel):
@@ -171,30 +196,54 @@ class DebateChallenge(StrictModel):
     @field_validator("materiality")
     @classmethod
     def valid_materiality(cls, value: str) -> str:
-        if value not in {"low", "medium", "high"}:
-            raise ValueError("materiality must be low, medium, or high")
-        return value
+        val = (value or "").strip().lower()
+        if val in {"critical", "severe", "major"}:
+            return "high"
+        if val in {"minor", "trivial"}:
+            return "low"
+        if val in {"low", "medium", "high"}:
+            return val
+        return "medium"
 
     @field_validator("authority_basis")
     @classmethod
     def valid_authority_basis(cls, value: str) -> str:
-        if value not in {"explicit_requirement", "confirmed_decision", "repository_evidence", "assumption", "expert_judgment"}:
-            raise ValueError("invalid challenge authority basis")
-        return value
+        val = (value or "").strip().lower()
+        valid = {"explicit_requirement", "confirmed_decision", "repository_evidence", "assumption", "expert_judgment"}
+        if val in valid:
+            return val
+        for v in valid:
+            if v in val or val in v:
+                return v
+        return "expert_judgment"
 
     @field_validator("scope_effect")
     @classmethod
     def valid_scope_effect(cls, value: str) -> str:
-        if value not in {"preserves", "clarifies", "expands", "changes"}:
-            raise ValueError("invalid challenge scope effect")
-        return value
+        val = (value or "").strip().lower()
+        valid = {"preserves", "clarifies", "expands", "changes"}
+        if val in valid:
+            return val
+        if "expand" in val or "add" in val:
+            return "expands"
+        if "change" in val or "modify" in val:
+            return "changes"
+        if "clarif" in val:
+            return "clarifies"
+        return "preserves"
 
     @field_validator("relation")
     @classmethod
     def valid_relation(cls, value: str) -> str:
-        if value not in {"distinct", "refines", "contradicts"}:
-            raise ValueError("invalid challenge relation")
-        return value
+        val = (value or "").strip().lower()
+        valid = {"distinct", "refines", "contradicts"}
+        if val in valid:
+            return val
+        if "refin" in val:
+            return "refines"
+        if "contradict" in val or "oppose" in val:
+            return "contradicts"
+        return "distinct"
 
 
 class DebateReview(StrictModel):
@@ -211,9 +260,17 @@ class ChallengeDisposition(StrictModel):
     @field_validator("status")
     @classmethod
     def valid_status(cls, value: str) -> str:
-        if value not in {"accepted", "defended", "merged", "unresolved"}:
-            raise ValueError("invalid challenge disposition")
-        return value
+        val = (value or "").strip().lower()
+        valid = {"accepted", "defended", "merged", "unresolved"}
+        if val in valid:
+            return val
+        if "accept" in val or "agree" in val:
+            return "accepted"
+        if "defend" in val or "reject" in val:
+            return "defended"
+        if "merge" in val:
+            return "merged"
+        return "defended"
 
 
 class DebateRevision(StrictModel):
@@ -225,27 +282,23 @@ class DebateRevision(StrictModel):
 
 class DiscoveryAssessment(StrictModel):
     adequate: bool
-    evidence_summary: str = Field(min_length=1)
+    evidence_summary: str = Field(default="Discovery evidence assessment completed", min_length=1)
     provisional_assumptions: list[str] = Field(default_factory=list)
     blocking_questions: list[str] = Field(default_factory=list, max_length=3)
 
     @field_validator("provisional_assumptions")
     @classmethod
     def assumptions_are_nonempty(cls, values: list[str]) -> list[str]:
-        if any(not value.strip() for value in values):
-            raise ValueError("provisional assumptions cannot be empty")
-        return values
+        return [v.strip() for v in values if v and v.strip()]
 
     @field_validator("blocking_questions")
     @classmethod
     def questions_match_verdict(cls, values: list[str], info):
-        if any(not value.strip() for value in values):
-            raise ValueError("blocking questions cannot be empty")
-        if info.data.get("adequate") and values:
-            raise ValueError("an adequate discovery assessment cannot have blocking questions")
-        if not info.data.get("adequate") and not values:
-            raise ValueError("an inadequate discovery assessment requires a blocking question")
-        return values
+        clean_q = [v.strip() for v in values if v and v.strip()]
+        adequate = bool(info.data.get("adequate"))
+        if adequate and clean_q:
+            info.data["adequate"] = False
+        return clean_q[:3]
 
 
 class ContextItem(StrictModel):

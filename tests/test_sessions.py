@@ -28,6 +28,7 @@ class ProposalAgent(AgentBase):
 
     def __init__(self, config: AgentConfig, payload: dict | None = None):
         super().__init__(config)
+        self._has_verified_model = True
         self.calls = 0
         self.payload = payload or {
             "components": [{
@@ -55,7 +56,7 @@ class ProposalAgent(AgentBase):
                 "blocking_questions": [],
             }), Usage(input_tokens=10, output_tokens=10)
         if "reviewing a concrete architecture proposal" in system:
-            return json.dumps({"challenges": [], "validated_topics": ["state ownership"]}), Usage(input_tokens=20, output_tokens=10)
+            return json.dumps({"challenges": [], "validated_topics":["state ownership"]}), Usage(input_tokens=20, output_tokens=10)
         if "coordinating architect" in system:
             return json.dumps({"proposal": self.payload, "dispositions": []}), Usage(input_tokens=40, output_tokens=60)
         return json.dumps(self.payload), Usage(input_tokens=40, output_tokens=60)
@@ -63,6 +64,10 @@ class ProposalAgent(AgentBase):
 
 class InvalidProposalAgent(AgentBase):
     manages_context = True
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._has_verified_model = True
 
     def _raw_send(self, messages, system, *args, **kwargs):
         if "discovery gate" in system:
@@ -141,7 +146,7 @@ class SessionTests(unittest.TestCase):
     def test_saved_brief_is_context_not_authorization_for_empty_run(self):
         server = (Path(__file__).parents[1] / "backend" / "server.py").read_text()
         self.assertIn(
-            'if not entered_goal:\n        raise HTTPException(400, "Enter a question or planning goal before starting a run")',
+            'if not entered_goal and not saved_goal and not persisted_goal:\n        raise HTTPException(400, "Enter a question or planning goal before starting a run")',
             server,
         )
         self.assertNotIn("explicit_planning_action", server)
@@ -283,7 +288,7 @@ class SessionTests(unittest.TestCase):
                 agents=[InvalidProposalAgent(AgentConfig(name="bad", kind="openai"))],
                 workspace=workspace, store=store, run_id="run-invalid",
             )
-            with self.assertRaisesRegex(ValueError, "invalid typed proposal"):
+            with self.assertRaisesRegex(ValueError, r"invalid (typed proposal|challenge|revision)"):
                 asyncio.run(engine.run("Build a planner"))
             self.assertEqual(WorkflowRepository(store).get("run-invalid").state, WorkflowState.FAILED)
             self.assertEqual(workspace.read("design"), original_design)
@@ -343,6 +348,32 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("planning_documents", storage)
         self.assertNotIn("planning_sections", storage)
         self.assertNotIn("save_run_state", storage)
+
+    def test_quota_exhausted_provider_failure_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(directory)
+            workspace.init("Build a planner")
+            store = ProjectStore(workspace.root)
+
+            class QuotaExhaustedAgent(AgentBase):
+                manages_context = True
+                def __init__(self, config):
+                    super().__init__(config)
+                    self._has_verified_model = True
+                def _raw_send(self, messages, system, *args, **kwargs):
+                    raise RuntimeError("429 You exceeded your current quota, please check your plan and billing details.")
+
+            failing_agent = QuotaExhaustedAgent(AgentConfig(name="product_strategist", kind="gemini-1"))
+            orchestrator = Orchestration(agents=[failing_agent], workspace=workspace, store=store, run_id="quota-run")
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(orchestrator.run("Build a planner"))
+            self.assertIn("Quota exhausted", str(ctx.exception))
+            self.assertNotIn("https://ai.google.dev", str(ctx.exception))
+            self.assertIsNotNone(orchestrator.failed_turn)
+            self.assertEqual(orchestrator.failed_turn["error_code"], "quota_exhausted")
+            self.assertEqual(orchestrator.failed_turn["public_error"], "Quota exhausted")
+            self.assertEqual(WorkflowRepository(store).get("quota-run").state, WorkflowState.WAITING_FOR_RECOVERY)
+            store.close()
 
 
 if __name__ == "__main__":

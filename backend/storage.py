@@ -803,6 +803,13 @@ class ProjectStore:
         """Mark process-abandoned active rows without discarding resumable state."""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._db:
+            # Clean orphaned active checkpoints for terminal workflow instances
+            self._db.execute(
+                """UPDATE decision_checkpoints SET status='cancelled'
+                    WHERE status='active' AND run_id IN (
+                        SELECT run_id FROM workflow_instances WHERE state IN ('CANCELLED', 'FAILED', 'COMPLETED')
+                    )"""
+            )
             rows = self._db.execute(
                 "SELECT run_id FROM runs WHERE status IN ('running', 'paused', 'needs_attention')"
             ).fetchall()
@@ -819,6 +826,16 @@ class ProjectStore:
                     error=CASE WHEN error='' THEN 'Server process interrupted this turn' ELSE error END
                     WHERE run_id IN ({placeholders}) AND status IN ('running', 'waiting')""",
                 (now, *run_ids),
+            )
+            self._db.execute(
+                f"""UPDATE decision_checkpoints SET status='cancelled'
+                    WHERE run_id IN ({placeholders}) AND status='active'""",
+                run_ids,
+            )
+            self._db.execute(
+                f"""UPDATE workflow_instances SET state='CANCELLED', completed_at=?, updated_at=?
+                    WHERE run_id IN ({placeholders}) AND state NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')""",
+                (now, now, *run_ids),
             )
         return run_ids
 
@@ -843,6 +860,11 @@ class ProjectStore:
                    WHERE run_id=? AND status IN ('running', 'waiting')""",
                 (terminal_turn_status, now, f"Run {status}", run_id),
             )
+            if status in {"error", "failed", "stopped", "cancelled"}:
+                self._db.execute(
+                    "UPDATE decision_checkpoints SET status='cancelled' WHERE run_id=? AND status='active'",
+                    (run_id,),
+                )
             self._db.execute(
                 """UPDATE runs
                    SET status=?, completed_at=?, total_tokens=?, cached_input_tokens=?,

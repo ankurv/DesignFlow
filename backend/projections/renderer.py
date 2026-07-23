@@ -44,11 +44,50 @@ def _architecture_diagram(proposals: list[ExpertProposal]) -> list[str]:
     return lines
 
 
+def _clean_str(val: Any) -> str:
+    if isinstance(val, dict):
+        if "responsibility" in val:
+            return str(val["responsibility"])
+        if "proposal" in val and isinstance(val["proposal"], dict):
+            comps = val["proposal"].get("components", [])
+            if comps and isinstance(comps[0], dict):
+                return str(comps[0].get("responsibility", str(val)))
+        return str(val)
+    s = str(val).strip()
+    if s.startswith("{") and "responsibility" in s:
+        try:
+            d = json.loads(s)
+            return _clean_str(d)
+        except Exception:
+            pass
+    return s
+
+
 def render_design(goal: str, proposals: list[ExpertProposal], conflicts: list[PlanningConflict]) -> str:
     components = _unique([
-        f"- **{component.name}**: {component.responsibility}"
+        f"- **{_clean_str(component.name)}**: {_clean_str(component.responsibility)}"
         for proposal in proposals for component in proposal.components
     ]) or ["- The detailed component model will be established from validated proposals."]
+    
+    comp_details = []
+    for proposal in proposals:
+        for comp in proposal.components:
+            name = _clean_str(comp.name)
+            resp = _clean_str(comp.responsibility)
+            details = [f"### {name}", f"- **Responsibility**: {resp}"]
+            if comp.packaging:
+                details.append(f"- **Packaging**: `{comp.packaging}`")
+            if comp.communication_protocol:
+                details.append(f"- **Protocol**: `{comp.communication_protocol}`")
+            if comp.data_store:
+                details.append(f"- **Data Store**: `{comp.data_store}`")
+            if comp.api_contracts:
+                details.append("- **API Contracts**:")
+                for contract in comp.api_contracts:
+                    details.append(f"  - `{contract}`")
+            comp_details.append("\n".join(details))
+    comp_specs_section = "\n\n".join(_unique(comp_details))
+
     risks = _unique([
         f"- **{risk.risk}**: {risk.mitigation}" for proposal in proposals for risk in proposal.risks
     ]) or ["- No material implementation risk has been accepted yet."]
@@ -60,10 +99,15 @@ def render_design(goal: str, proposals: list[ExpertProposal], conflicts: list[Pl
         f"- **{conflict.topic}** ({conflict.materiality}): " + " vs. ".join(conflict.options)
         for conflict in conflicts if conflict.status == "open"
     ] or ["- No unresolved material conflicts remain."]
-    return "\n".join((
+    
+    parts = [
         "# Architecture Design", "", "## Product Goal", "", goal, "",
         "## Architecture", "", *components, "",
         "```mermaid", *_architecture_diagram(proposals), "```", "",
+    ]
+    if comp_specs_section:
+        parts.extend(["## Component Specifications & API Contracts", "", comp_specs_section, ""])
+    parts.extend([
         "## Capability Behavioral Contracts", "",
         "Selected capabilities are represented by typed proposals and validated before projection.", "",
         "## Product Operations & Evolution", "",
@@ -71,7 +115,8 @@ def render_design(goal: str, proposals: list[ExpertProposal], conflicts: list[Pl
         "for each accepted component before production use. Logs must redact sensitive fields.", "",
         "## Risks", "", *risks, "", "## Open Conflicts", "", *conflict_lines, "",
         "## Known Unknowns & Validation Plan", "", *unknowns, "",
-    )).rstrip() + "\n"
+    ])
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def render_plan(goal: str, proposals: list[ExpertProposal], conflicts: list[PlanningConflict]) -> str:

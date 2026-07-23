@@ -15,8 +15,8 @@ class TestProviders(unittest.TestCase):
                     "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"}],
                 },
                 {
-                    "inferenceProfileId": "us.amazon.titan-text-express-v1",
-                    "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"}],
+                    "inferenceProfileId": "us.unknown.unsupported-model-v1",
+                    "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/unsupported.model-v1"}],
                 }
             ]
         }

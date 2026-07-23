@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import logging
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -11,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class AgentStatus(str, Enum):
@@ -203,8 +206,57 @@ class AgentBase(ABC):
         with self._attempt_lock:
             return self._active_attempt_token == token
 
+    def _verify_model(self, model_id: str) -> bool:
+        """Ping the model to ensure it is authorized and functioning."""
+        old_model = self.config.model
+        self.config.model = model_id
+        try:
+            self._raw_send([{"role": "user", "content": "ping"}], "Respond exactly with 'pong'.")
+            self.config.model = old_model
+            return True
+        except Exception as exc:
+            print(f"[{self.name}] JIT Verification failed for {model_id}: {exc}")
+            self.config.model = old_model
+            return False
+
+    def _ensure_working_model(self) -> bool:
+        """Test current model; if it fails, iterate the catalog until one works."""
+        from .providers import discover_models
+        
+        actual_model = self.config.model or DEFAULT_MODELS.get(self.config.kind, "")
+        if actual_model and self._verify_model(actual_model):
+            self.config.model = actual_model
+            return True
+            
+        print(f"[{self.name}] Configured model '{actual_model}' failed verification. Searching catalog...")
+        catalog = self.config.extra.get("available_models")
+        if not catalog:
+            catalog = discover_models(self.config)
+            
+        catalog = list(catalog)
+        if catalog:
+            import hashlib
+            # Deterministic shift based on the agent's unique ID to prevent clustering on the same fallback model
+            shift = int(hashlib.md5(self.config.id.encode()).hexdigest(), 16) % len(catalog)
+            catalog = catalog[shift:] + catalog[:shift]
+            
+        for candidate in catalog:
+            if candidate == actual_model:
+                continue
+            if self._verify_model(candidate):
+                print(f"[{self.name}] Auto-recovered to working model: {candidate}")
+                self.config.model = candidate
+                return True
+                
+        return False
+
     def send(self, message: str, system_override: Optional[str] = None, ephemeral_context: Optional[str] = None, mcp_tools: list[dict] = None, tool_handler: Callable = None, attempt_token: str | None = None, context_only: bool = False) -> str:
         """Sends a message to the model and updates the internal usage metrics."""
+        if not getattr(self, "_has_verified_model", False):
+            if not self._ensure_working_model():
+                logger.warning(f"[{self.name}] Catalog verification returned no candidate, preserving default model: {self.config.model}")
+            self._has_verified_model = True
+
         if self._attempt_is_current(attempt_token):
             self.status = AgentStatus.THINKING
         user_message = Message(role="user", content=message)
@@ -251,7 +303,14 @@ class AgentBase(ABC):
                 self.status = AgentStatus.ERROR
             
             err_msg = str(exc).strip()
-            if "{" in err_msg and "}" in err_msg:
+            err_msg_lower = err_msg.lower()
+            if any(k in err_msg_lower for k in ("quota exceeded", "quota_exceeded", "429", "exceeded your current quota", "resource_exhausted", "rate_limit_exceeded", "insufficient_quota")):
+                err_msg = "Quota exhausted"
+            elif any(k in err_msg_lower for k in ("timeout", "timed out", "deadline_exceeded")):
+                err_msg = "Provider timeout"
+            elif any(k in err_msg_lower for k in ("rate limit", "too many requests")):
+                err_msg = "Rate limited"
+            elif "{" in err_msg and "}" in err_msg:
                 # Truncate raw JSON dictionaries dumped by Litellm/Provider errors for readability
                 err_msg = err_msg.split("{", 1)[0].strip()
                 if err_msg.endswith("-"):

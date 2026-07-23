@@ -251,6 +251,12 @@ async function submitStructuredCheckpoint(optionId, customAnswer) {
   } catch (error) {
     controls.forEach(control => { control.disabled = false; });
     if (status) status.textContent = error.message;
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('already') || msg.includes('cancelled') || msg.includes('not active') || msg.includes('not found')) {
+      window.activeStructuredCheckpointId = '';
+      closeDecisionModal();
+      renderInteractiveQuestionPanel('', null);
+    }
   }
 }
 
@@ -359,20 +365,21 @@ window.closeDecisionModal = function() {
 function renderInteractiveQuestionPanel(content, checkpoint = null) {
   const pendingPane = document.getElementById('contextPendingActions');
   const bodyEl = document.getElementById('contextQuestionsBody');
-  const hasQuestion = awaitingDecisionInput && (!!checkpoint || !!(content && content.trim() && content.trim() !== '(empty)'));
   if (!pendingPane || !bodyEl) return false;
 
-  if (!hasQuestion) {
-    pendingPane.style.display = 'none';
+  if (!checkpoint) {
+    window.activeStructuredCheckpointId = '';
+    awaitingDecisionInput = false;
     delete bodyEl.dataset.checkpointId;
     delete bodyEl.dataset.renderKey;
+    pendingPane.style.display = 'none';
+    closeDecisionModal();
     return false;
   }
 
+  awaitingDecisionInput = true;
   pendingPane.style.display = 'flex';
-  const renderKey = checkpoint
-    ? `checkpoint:${JSON.stringify(checkpoint)}`
-    : `legacy:${content}`;
+  const renderKey = `checkpoint:${checkpoint.id}:${checkpoint.sequence}`;
   if (bodyEl.dataset.renderKey === renderKey && bodyEl.firstElementChild) {
     openDecisionModal();
     return true;
@@ -720,6 +727,7 @@ function appendFeed(ev) {
   let detail = '';
   let metricsHtml = '';
   let recoveryActionsHtml = '';
+  let remedyHtml = '';
   let kindLabel = (ev.kind || 'update').replace(/_/g, ' ');
 
   switch(ev.kind) {
@@ -854,6 +862,9 @@ function appendFeed(ev) {
             <span class="provider-recovery-status" aria-live="polite"></span>
           </div>`;
       }
+      if (ev.data.remedy) {
+        remedyHtml = `<div class="feed-remedy" style="margin-top: 8px; padding: 8px; background: rgba(255,165,0,0.1); border-left: 3px solid orange; font-size: 0.9em; border-radius: 2px;"><strong>Remedy:</strong> ${escHtml(ev.data.remedy)}</div>`;
+      }
       kindLabel = 'error';
       break;
     default:
@@ -888,6 +899,7 @@ function appendFeed(ev) {
           ${detail ? `<button class="btn btn-secondary btn-sm" style="padding: 2px 7px; font-weight: bold; line-height: 1;" onclick="const d = this.parentElement.nextElementSibling; if(d.style.display === 'none'){d.style.display='block';this.innerText='-';}else{d.style.display='none';this.innerText='+';}">${ev.data.verdict === 'PAUSE_FOR_INPUT' ? '-' : '+'}</button>` : ''}
         </div>
         ${detail ? `<div class="feed-detail markdown-body" style="display: ${ev.data.verdict === 'PAUSE_FOR_INPUT' ? 'block' : 'none'}; margin-top: 8px;">${parseMarkdown(detail)}</div>` : ''}
+        ${remedyHtml}
         ${recoveryActionsHtml}
       </div>
     </div>

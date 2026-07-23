@@ -567,7 +567,11 @@ def reconcile_runtime_status(state: AppState) -> str:
     """Repair stale active flags left after restart, cancellation, or task failure."""
     active = state.status in {"running", "paused", "needs_attention"}
     has_live_task = bool(state.run_task and not state.run_task.done())
-    if active and (not state.orchestrator or not has_live_task or not state.run_id):
+    is_recovering = (
+        state.status == "needs_attention"
+        or bool(state.orchestrator and state.orchestrator.failed_turn)
+    )
+    if active and not is_recovering and (not state.orchestrator or not has_live_task or not state.run_id):
         state.status = "idle"
         state.awaiting_input = False
         state.run_task = None
@@ -939,16 +943,16 @@ async def start_run(
     resumable_workflow = workflow_repository.latest_resumable() if workflow_repository else None
     brief = state.workspace.brief().strip()
     persisted_goal = state.workspace.product_goal().strip()
-    saved_goal = workflow_repository.goal(resumable_workflow.run_id) if resumable_workflow and workflow_repository else ""
+    saved_goal = workflow_repository.goal(resumable_workflow.run_id) if (resumable_workflow and workflow_repository) else ""
     entered_goal = body.idea.strip()
-    if not entered_goal:
+    if not entered_goal and not saved_goal and not persisted_goal:
         raise HTTPException(400, "Enter a question or planning goal before starting a run")
-    product_goal = saved_goal or persisted_goal or entered_goal
+    product_goal = entered_goal or saved_goal or persisted_goal
     resumes_saved_run = bool(
         saved_goal
-        and saved_goal == product_goal
+        and saved_goal.strip() == product_goal.strip()
     )
-    saved_run_id = resumable_workflow.run_id if resumable_workflow else ""
+    saved_run_id = resumable_workflow.run_id if (resumable_workflow and resumes_saved_run) else ""
     task = body.idea.strip() if (persisted_goal or saved_goal) else ""
     effective_mode = body.mode
     if not state.merged_configs:
@@ -1118,11 +1122,29 @@ async def start_run(
 
     if interaction_kind == InteractionKind.RECOVERY:
         if not resumable_workflow:
+            if state.store and intake_run_id:
+                state.store.finish_run(intake_run_id, "error", [], outcome={"status": "failed", "error": "There is no interrupted design workflow to continue."})
             raise HTTPException(409, "There is no interrupted design workflow to continue.")
     elif interaction_kind == InteractionKind.PLANNING and resumable_workflow:
-        if resumable_workflow.state == WorkflowState.WAITING_FOR_USER:
+        if entered_goal and entered_goal.strip() != saved_goal.strip():
+            try:
+                WorkflowEngine(workflow_repository).transition(resumable_workflow.run_id, WorkflowEvent.CANCEL, {"source": "new_prompt_intake"})
+            except Exception:
+                pass
+            if state.store:
+                state.store.finish_run(resumable_workflow.run_id, "cancelled", [], outcome={"status": "superseded"})
+                state.store.reconcile_interrupted_runs()
+            resumes_saved_run = False
+            saved_goal = ""
+            saved_run_id = ""
+        elif resumable_workflow.state == WorkflowState.WAITING_FOR_USER:
+            if state.store and intake_run_id:
+                state.store.finish_run(intake_run_id, "error", [], outcome={"status": "failed", "error_code": "active_checkpoint_block", "error": "Answer or cancel the active checkpoint before starting new planning work", "remedy": "Please answer or cancel the active checkpoint before starting a new request."})
             raise HTTPException(409, "Answer or cancel the active checkpoint before starting new planning work")
-        raise HTTPException(409, "Continue or cancel the active planning workflow before starting a new one")
+        else:
+            if state.store and intake_run_id:
+                state.store.finish_run(intake_run_id, "error", [], outcome={"status": "failed", "error_code": "active_workflow_conflict", "error": "Continue or cancel the active planning workflow before starting a new one", "remedy": "Please continue or cancel the active workflow before starting a new request."})
+            raise HTTPException(409, "Continue or cancel the active planning workflow before starting a new one")
     else:
         saved_goal = ""
         saved_run_id = ""
@@ -1226,6 +1248,13 @@ async def start_run(
                             + snapshot.get("plan", "").lstrip()
                         )
                         bundle_path.write_text(bundled)
+                        # Copy canonical artifacts directly to project root for user visibility
+                        if snapshot.get("design"):
+                            (state.workspace.project_root / "DESIGN.md").write_text(snapshot["design"], encoding="utf-8")
+                        if snapshot.get("plan"):
+                            (state.workspace.project_root / "PLAN.md").write_text(snapshot["plan"], encoding="utf-8")
+                        if snapshot.get("decisions"):
+                            (state.workspace.project_root / "DECISIONS.md").write_text(snapshot["decisions"], encoding="utf-8")
                     except Exception:
                         pass
                 broadcast(Event(kind=EventKind.DONE, data={
@@ -1243,6 +1272,22 @@ async def start_run(
             if state.orchestrator and hasattr(state.orchestrator, "ws"):
                 state.orchestrator.ws.preserve_staged_artifacts("stopped")
         except Exception as exc:
+            current_wf_state = None
+            if state.store and state.run_id:
+                try:
+                    current_wf_state = WorkflowRepository(state.store).get(state.run_id).state
+                except Exception:
+                    pass
+            if (current_wf_state in {WorkflowState.WAITING_FOR_RECOVERY, WorkflowState.RETRYABLE_FAILURE}
+                    or (state.orchestrator and state.orchestrator.failed_turn)):
+                state.status = "needs_attention"
+                state.awaiting_input = False
+                public_error, error_code = Orchestration._public_error(exc)
+                broadcast(Event(kind=EventKind.ERROR, data={
+                    "error": public_error, "error_code": error_code, "failed_turn": state.orchestrator.failed_turn,
+                }), state)
+                return
+
             if state.orchestrator and hasattr(state.orchestrator, "ws"):
                 state.orchestrator.ws.preserve_staged_artifacts("error")
             state.status = "error"
@@ -1266,9 +1311,17 @@ async def start_run(
                 )
                 state.workspace.finish_logbook_run(state.run_id, "error", agent_states)
         finally:
-            if state.orchestrator:
-                state.orchestrator.stop()
-            close_detached_terminal_runtime(state)
+            current_wf_state = None
+            if state.store and state.run_id:
+                try:
+                    current_wf_state = WorkflowRepository(state.store).get(state.run_id).state
+                except Exception:
+                    pass
+            if (current_wf_state not in {WorkflowState.WAITING_FOR_RECOVERY, WorkflowState.RETRYABLE_FAILURE}
+                    and not (state.orchestrator and state.orchestrator.failed_turn)):
+                if state.orchestrator:
+                    state.orchestrator.stop()
+                close_detached_terminal_runtime(state)
 
     state.run_task = asyncio.create_task(run_and_update())
     idea_source = "saved_run" if resumes_saved_run else ("prompt" if body.idea.strip() else "DESIGNFLOW.md")
@@ -1283,6 +1336,17 @@ async def reset_run(state: AppState = Depends(get_state)):
     if state.run_task and not state.run_task.done():
         state.run_task.cancel()
         await asyncio.gather(state.run_task, return_exceptions=True)
+
+    if state.store:
+        repo = WorkflowRepository(state.store)
+        resumable = repo.latest_resumable()
+        if resumable:
+            try:
+                WorkflowEngine(repo).transition(resumable.run_id, WorkflowEvent.CANCEL, {"source": "user_reset"})
+            except Exception:
+                pass
+            state.store.finish_run(resumable.run_id, "cancelled", [], outcome={"status": "reset"})
+        state.store.reconcile_interrupted_runs()
 
     state.status = "idle"
     state.awaiting_input = False
@@ -1333,11 +1397,18 @@ def resume_run(body: Optional[ResumeBody] = None, state: AppState = Depends(get_
 def retry_failed_turn(state: AppState = Depends(get_state)):
     if not state.orchestrator or not state.orchestrator.failed_turn:
         raise HTTPException(400, "There is no failed turn to retry")
+    failed = state.orchestrator.failed_turn or {}
     state.orchestrator.retry_failed_turn()
     state.status = "running"
     state.last_transition = "failed_turn_retry_requested"
     state.awaiting_input = False
-    failed = state.orchestrator.failed_turn or {}
+    if state.run_task is None or state.run_task.done():
+        async def resume_worker():
+            try:
+                await state.orchestrator.run(state.current_idea)
+            except Exception as exc:
+                logger.exception("Resumed worker task encountered an error")
+        state.run_task = asyncio.create_task(resume_worker())
     return {"ok": True, "status": state.status, "turn": {
         "turn_id": failed.get("turn_id"),
         "attempt": failed.get("attempt"),
@@ -1356,26 +1427,32 @@ def recover_provider_turn(body: ProviderRecoveryBody, state: AppState = Depends(
     if body.action not in {"auto_failover", "wait_and_retry"}:
         raise HTTPException(400, "Recovery action must be auto_failover or wait_and_retry")
     failed = state.orchestrator.failed_turn
+    active = None
     if body.action == "auto_failover":
         active = next(
-            (agent for agent in state.orchestrator.agents if agent.config.id == failed.get("agent_id")),
+            (agent for agent in state.orchestrator.agents if agent.config.id == failed.get("agent_id") or agent.name == failed.get("agent")),
             None,
         )
         if active is None:
             raise HTTPException(409, "The failed logical agent is no longer active")
         failed_provider_id = failed.get("provider_id") or active.config.base_id or active.config.id
         current_provider_id = active.config.base_id or active.config.id
-        # Pausing a provider already rebinds its live specialists. Do not move
-        # the same specialist again when Auto-failover is clicked afterwards.
         if current_provider_id == failed_provider_id:
             active = _reassign_agent_if_paused(state, active, failed_provider_id)
     state.orchestrator.recover_failed_turn(body.action)
     state.status = "running"
     state.last_transition = f"provider_recovery_{body.action}"
     state.awaiting_input = False
+    if state.run_task is None or state.run_task.done():
+        async def resume_worker():
+            try:
+                await state.orchestrator.run(state.current_idea)
+            except Exception as exc:
+                logger.exception("Resumed worker task encountered an error")
+        state.run_task = asyncio.create_task(resume_worker())
     return {
         "ok": True, "status": state.status, "action": body.action,
-        "provider_id": active.config.base_id or active.config.id if body.action == "auto_failover" else "",
+        "provider_id": active.config.base_id or active.config.id if (active and body.action == "auto_failover") else "",
     }
 
 
@@ -1713,13 +1790,27 @@ def recent_run_activity(limit: int = 8, state: AppState = Depends(get_state)):
                 "data": {"turn_id": f"routing-{run_id}", "phase": "routing", "role": "request routing"},
             })
         elif run.get("status") == "error":
+            outcome = {}
+            if isinstance(run.get("outcome_json"), str) and run.get("outcome_json"):
+                try:
+                    outcome = json.loads(run.get("outcome_json"))
+                except Exception:
+                    pass
+            elif isinstance(run.get("outcome_json"), dict):
+                outcome = run.get("outcome_json")
+
+            specific_error = outcome.get("error") or outcome.get("failure_reason")
+            if not specific_error or specific_error in {"workflow_v2_error", "request_intake_failed"}:
+                specific_error = "This request stopped before work began. Review the run details or submit it again."
+
             events.append({
                 "event_id": f"intake-error-{run_id}", "run_id": run_id,
                 "timestamp": run.get("completed_at", ""), "kind": "error",
                 "agent": "DesignFlow", "audience": "conversation",
                 "data": {
-                    "error_code": "request_intake_failed",
-                    "error": "This request stopped before work began. Review the run details or submit it again.",
+                    "error_code": outcome.get("error_code") or "request_intake_failed",
+                    "error": specific_error,
+                    "remedy": outcome.get("remedy"),
                 },
             })
         elif run.get("run_kind") == "planning_workflow" and run.get("status") in {"done", "completed"}:

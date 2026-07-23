@@ -15,6 +15,7 @@ class ToolBoundaryFake(AgentBase):
 
     def __init__(self, config):
         super().__init__(config)
+        self._has_verified_model = True
         self.received_kwargs = []
 
     def _raw_send(self, messages, system, *args, **kwargs):

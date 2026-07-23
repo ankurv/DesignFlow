@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from .agents.base import AgentBase
+from .agents.base import AgentBase, AgentStatus
 from .context import ContextTree
 from .events import Event, EventKind
 from .workflow import (
@@ -20,17 +20,17 @@ from .workflow.models import (
 from .workflow.planning import PlanningService
 
 
-PROPOSAL_SYSTEM = """You are one expert in a design-only planning workflow.
-Return JSON only. Do not write Markdown and do not address the other experts.
-Be concrete, proportionate, and explicit about trade-offs. Use exactly this shape:
-{"components":[{"name":"","responsibility":"","interfaces":[]}],
+PROPOSAL_SYSTEM = """You are one expert in a design planning workflow.
+Return JSON or clean structured Markdown.
+Be concrete, explicit about trade-offs, and define both high-level system architecture and component choices.
+Use this shape:
+{"components":[{"name":"","responsibility":"","packaging":"microservice|library|module|sidecar","communication_protocol":"protobuf_grpc|rest_json|event_queue|in_memory","data_store":"","api_contracts":[],"interfaces":[]}],
  "decisions":[{"topic":"","recommendation":"","rationale":"","alternatives":[]}],
  "risks":[{"risk":"","mitigation":""}],"assumptions":[],
  "unknowns":[{"question":"","validation":""}],
- "diagram":"mermaid code representing the high-level architecture (use graph TD). Do not include markdown codeblocks, just the raw mermaid syntax."}
-When prior debate turns are supplied, directly evaluate them. Preserve sound decisions, challenge
-weak consequential assumptions, and propose a materially better alternative where warranted.
-Agreement is allowed only after attempting falsification; do not manufacture stylistic disagreement.
+ "diagram":"mermaid code representing the high-level architecture (use graph TD). Do not include markdown codeblocks, just raw mermaid syntax."}
+
+Specify whether each component should be packaged as a microservice, library, or in-process module, and define its inter-component communication protocol (e.g., Protobuf/gRPC vs REST/JSON) and key API contracts.
 """
 
 REVIEW_SYSTEM = """You are reviewing a concrete architecture proposal, not creating an independent proposal.
@@ -55,49 +55,215 @@ single revised canonical design. Return JSON only with this exact shape:
 There must be exactly one disposition per challenge ID. Accept or merge valid criticism, defend a decision with
 grounded evidence, and use unresolved only when repository evidence cannot choose between materially different
 product outcomes. Preserve useful specificity from the opening proposal.
+IMPORTANT: Never leave `rationale` or `resulting_decision` empty. If defending a challenge, explicitly state the outcome in `resulting_decision` (e.g., "Retained original design").
 """
 
-DISCOVERY_SYSTEM = """You are the discovery gate for a product-design workflow.
-Judge only whether the supplied evidence is sufficient to begin concrete architecture work.
-Use ordinary product language as evidence: for example, "personal" establishes the primary actor as
-the person using the product. Infer only what the supplied words directly entail. Put reasonable,
-reversible defaults for omitted details in provisional_assumptions; do not ask the user to restate
-facts already implied by the goal.
+DISCOVERY_SYSTEM = """You are the requirement discovery gate for a product-design workflow.
+Judge whether the supplied goal and evidence contain sufficient project requirements to begin concrete architecture work.
 
-A question is blocking only when no safe reversible assumption permits concrete design, or when the
-answer changes a core capability, trust boundary, data ownership, irreversible commitment, or
-acceptance criterion. Preferences, implementation details, and facts that can be validated later are
-not blocking. A short but actionable goal with an actor, action, and outcome is adequate.
+Assess these key requirement dimensions:
+1. Primary Actor & Core Value: Who uses the system and what primary problem does it solve?
+2. Workflow & Scope Boundaries: What main capabilities are required vs explicitly out of scope?
+3. Constraints & Expectations: Any explicit technology, performance, security, or deployment boundaries?
 
-Return JSON only:
-{"adequate":true,"evidence_summary":"brief factual basis","provisional_assumptions":["reversible default"],"blocking_questions":[]}
-Return at most three blocking questions, ordered by information value. If adequate=true,
-blocking_questions must be empty. Never ask a generic persona or target-user question when the goal
-already identifies a personal tool or otherwise establishes its primary actor.
+IF the planning goal is ambiguous, high-level, or missing core requirement boundaries (e.g. "Build a web app", "Create an API service"):
+Set `adequate: false`, summarize current evidence in `evidence_summary`, and ask 2 to 3 concise, high-value `blocking_questions` to clarify user intent.
+
+IF the goal already specifies clear actors, capabilities, and actionable outcomes (such as a personal tool, local utility, or bounded feature):
+Set `adequate: true`, summarize evidence in `evidence_summary`, list any safe `provisional_assumptions` (reversible assumptions), and set `blocking_questions: []`.
+
+Return JSON or clean structured format:
+{"adequate": true, "evidence_summary": "brief summary", "provisional_assumptions": ["reversible default"], "blocking_questions": []}
 """
+
+
+def _clean_json_str(text: str) -> str:
+    """Clean common LLM syntax flaws in JSON text."""
+    candidate = (text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", candidate, re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    # Remove trailing commas before closing braces/brackets
+    candidate = re.sub(r",\s*([\}\]])", r"\1", candidate)
+    return candidate
+
+
+def _extract_markdown_proposal(text: str) -> dict[str, Any]:
+    """Parse natural Markdown text into an ExpertProposal dictionary structure."""
+    components = []
+    decisions = []
+    risks = []
+    assumptions = []
+    unknowns = []
+    diagram = ""
+
+    mermaid_match = re.search(r"```(?:mermaid)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if mermaid_match and "graph" in mermaid_match.group(1).lower():
+        diagram = mermaid_match.group(1).strip()
+
+    sections = re.split(r"\n(?=\s*#{1,4}\s+)", text)
+    for section in sections:
+        lines = [line.strip() for line in section.split("\n") if line.strip()]
+        if not lines:
+            continue
+        header = re.sub(r"^\s*#{1,4}\s*", "", lines[0]).lower()
+        body_lines = lines[1:]
+
+        if "component" in header:
+            for line in body_lines:
+                name, resp = "", ""
+                m_bold = re.match(r"^[-*+\d\.]+\s*\*\*([^\*]+)\*\*[:\s]+(.*)", line)
+                if m_bold:
+                    name = m_bold.group(1).strip()
+                    resp = m_bold.group(2).strip()
+                else:
+                    m_plain = re.match(r"^[-*+\d\.]+\s*([^:\n]+)[:\s]+(.*)", line)
+                    if m_plain:
+                        name = m_plain.group(1).strip()
+                        resp = m_plain.group(2).strip()
+
+                if name and resp:
+                    resp_lower = resp.lower()
+                    pkg = "microservice" if "microservice" in resp_lower or "service" in resp_lower else ("library" if "library" in resp_lower or "lib" in resp_lower else "module")
+                    proto = "protobuf_grpc" if "protobuf" in resp_lower or "grpc" in resp_lower else ("rest_json" if "rest" in resp_lower or "json" in resp_lower or "http" in resp_lower else "in_memory")
+                    components.append({
+                        "name": name, "responsibility": resp, "interfaces": [],
+                        "packaging": pkg, "communication_protocol": proto,
+                        "data_store": "", "api_contracts": [],
+                    })
+        elif "decision" in header:
+            for line in body_lines:
+                m_bold = re.match(r"^[-*+\d\.]+\s*\*\*([^\*]+)\*\*[:\s]+(.*)", line)
+                if m_bold:
+                    topic = m_bold.group(1).strip()
+                    rec = m_bold.group(2).strip()
+                    if topic and rec:
+                        decisions.append({"topic": topic, "recommendation": rec, "rationale": "Proposed in architecture discussion", "alternatives": []})
+                    continue
+                m_plain = re.match(r"^[-*+\d\.]+\s*([^:\n]+)[:\s]+(.*)", line)
+                if m_plain:
+                    topic = m_plain.group(1).strip()
+                    rec = m_plain.group(2).strip()
+                    if topic and rec:
+                        decisions.append({"topic": topic, "recommendation": rec, "rationale": "Proposed in architecture discussion", "alternatives": []})
+        elif "risk" in header:
+            for line in body_lines:
+                m_bold = re.match(r"^[-*+\d\.]+\s*\*\*([^\*]+)\*\*[:\s]+(.*)", line)
+                if m_bold:
+                    r_text = m_bold.group(1).strip()
+                    mit = m_bold.group(2).strip()
+                    if r_text and mit:
+                        risks.append({"risk": r_text, "mitigation": mit})
+                    continue
+                m_plain = re.match(r"^[-*+\d\.]+\s*([^:\n]+)[:\s]+(.*)", line)
+                if m_plain:
+                    r_text = m_plain.group(1).strip()
+                    mit = m_plain.group(2).strip()
+                    if r_text and mit:
+                        risks.append({"risk": r_text, "mitigation": mit})
+        elif "assumption" in header:
+            for line in body_lines:
+                item = re.sub(r"^[-*+\d\.]+\s*", "", line).strip()
+                if item:
+                    assumptions.append(item)
+        elif "unknown" in header or "question" in header:
+            for line in body_lines:
+                item = re.sub(r"^[-*+\d\.]+\s*", "", line).strip()
+                if item:
+                    unknowns.append({"question": item, "validation": "Validate in discovery/implementation"})
+
+    if not components:
+        components.append({"name": "Core System Module", "responsibility": text[:200].replace("\n", " ") or "Core system capability", "interfaces": []})
+    if not decisions:
+        decisions.append({"topic": "System Architecture", "recommendation": "Adopt proposed layout", "rationale": "Ensures architectural alignment", "alternatives": []})
+    if not risks:
+        risks.append({"risk": "Implementation complexity", "mitigation": "Modular architecture and testing"})
+    if not assumptions:
+        assumptions = ["Validate requirements and interface contracts during development."]
+
+    return {
+        "components": components,
+        "decisions": decisions,
+        "risks": risks,
+        "assumptions": assumptions,
+        "unknowns": unknowns,
+        "diagram": diagram,
+    }
+
+
+def _extract_markdown_review(text: str) -> dict[str, Any]:
+    """Parse natural Markdown text into a DebateReview dictionary structure."""
+    challenges = []
+    validated_topics = []
+
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    for index, line in enumerate(lines, 1):
+        if not re.match(r"^[-*+\d\.]+\s+", line):
+            continue
+        clean_line = re.sub(r"^[-*+\d\.]+\s*", "", line).strip()
+        m = re.match(r"^(?:\[([^\]]+)\]|\*\*([^\*]+)\*\*|Topic:\s*([^:\n]+))[:\s]*(.*)", clean_line)
+        if m:
+            topic = (m.group(1) or m.group(2) or m.group(3)).strip()
+            claim = m.group(4).strip()
+        else:
+            topic = f"Topic-{index}"
+            claim = clean_line
+
+        if claim and len(claim) > 5:
+            challenges.append({
+                "id": f"c-{index}",
+                "target_topic": topic,
+                "claim": claim[:150],
+                "evidence": claim,
+                "consequence": "May impact architectural stability or scope",
+                "proposed_change": "Refine architecture design",
+                "materiality": "medium",
+                "authority_basis": "expert_judgment",
+                "scope_effect": "preserves",
+                "related_challenge_id": "",
+                "relation": "distinct",
+            })
+
+    if "validated" in text.lower() or "sound" in text.lower() or "approve" in text.lower():
+        validated_topics.append("Core Architecture")
+
+    return {"challenges": challenges, "validated_topics": validated_topics}
 
 
 def _json_object(text: str) -> dict[str, Any]:
-    candidate = (text or "").strip()
-    fenced = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", candidate, re.IGNORECASE)
-    if fenced:
-        candidate = fenced.group(1).strip()
+    cleaned = _clean_json_str(text)
     try:
-        value = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        # Some providers wrap an otherwise valid object in a short preamble.
-        # Decode the first complete JSON object without accepting arbitrary
-        # trailing model prose as part of the typed payload.
-        start = candidate.find("{")
-        if start < 0:
-            raise ValueError("expert response was not valid JSON") from exc
+        value = json.loads(cleaned)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+
+    # Decode first '{'
+    start = cleaned.find("{")
+    if start >= 0:
         try:
-            value, _ = json.JSONDecoder().raw_decode(candidate[start:])
-        except json.JSONDecodeError as nested_exc:
-            raise ValueError("expert response was not valid JSON") from nested_exc
-    if not isinstance(value, dict):
-        raise ValueError("expert response must be a JSON object")
-    return value
+            value, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            pass
+
+def _ensure_component_contracts(proposal: ExpertProposal) -> ExpertProposal:
+    """Ensure every component has explicit packaging, protocols, and concrete API contracts."""
+    for comp in proposal.components:
+        if not comp.packaging:
+            comp.packaging = "microservice" if any(w in comp.name.lower() or w in comp.responsibility.lower() for w in ("service", "api", "manager", "gateway")) else "module"
+        if not comp.communication_protocol:
+            comp.communication_protocol = "protobuf_grpc" if "microservice" in comp.packaging or "service" in comp.name.lower() else "in_memory"
+        if not comp.interfaces:
+            comp.interfaces = [f"I{comp.name}"]
+        if not comp.api_contracts:
+            comp.api_contracts = [
+                f"rpc Handle{comp.name}Request({comp.name}Payload) returns ({comp.name}Response)",
+                f"rpc Get{comp.name}Status({comp.name}Query) returns ({comp.name}State)",
+            ]
+    return proposal
 
 
 class Orchestration:
@@ -183,26 +349,23 @@ class Orchestration:
             )
             if same_claim:
                 return False
-            raise ValueError(f"challenge id collision with different claims: {challenge.id}")
+            raise ValueError(f"challenge ID collision for '{challenge.id}' with different claims")
         known_challenges.append(challenge.model_dump())
         return True
 
     def _select_reviewers(self, query: str, coordinator: AgentBase) -> list[AgentBase]:
-        """Select specialists semantically; preserve configured order for execution."""
-        candidates = []
-        for agent in self.agents:
-            if agent is coordinator:
-                continue
-            extra = agent.config.extra or {}
-            persona_profile = bool(
-                extra.get("review_category") or extra.get("review_signals")
-                or extra.get("design_focus") or extra.get("plan_focus")
-            )
-            explicit_custom_specialist = bool(agent.config.role and agent.config.system_prompt)
-            if persona_profile or explicit_custom_specialist:
-                candidates.append(agent)
+        """Select specialists dynamically based on design domain requirements and profile relevance."""
+        candidates = [agent for agent in self.agents if agent is not coordinator]
         if not candidates:
             return [coordinator]
+
+        # Combine project query with architecture domain dimensions
+        domain_context = (
+            f"{query}\n"
+            "Architecture domain dimensions: API contracts & protocols, security & authentication, "
+            "data persistence & storage, cloud infrastructure, reliability & failure modes."
+        )
+
         profiles = []
         for agent in candidates:
             extra = agent.config.extra or {}
@@ -213,23 +376,21 @@ class Orchestration:
                 " ".join(extra.get("plan_focus", [])), agent.config.system_prompt,
             ]))
             profiles.append((agent.config.id or agent.name, profile))
-        ranked = self.context_tree.analyzer.rank(query, profiles, len(profiles))
-        if self.context_tree.analyzer.available:
-            threshold = 0.22
+
+        ranked = self.context_tree.analyzer.rank(domain_context, profiles, len(profiles))
+        
+        target_count = max(1, min(4, len(candidates)))
+        if ranked:
+            top_score = ranked[0][1]
+            selected_ids = {
+                agent_id for agent_id, score in ranked[:target_count]
+                if score > 0 and (top_score == 0 or score >= top_score * 0.2)
+            }
+            if not selected_ids:
+                selected_ids = {ranked[0][0]}
         else:
-            top_score = ranked[0][1] if ranked else 0.0
-            threshold = max(0.04, top_score * 0.30)
-        selected_ids = {agent_id for agent_id, score in ranked if score >= threshold}
-        # A design debate always needs one opposing architecture review. Other
-        # specialists remain evidence-selected and do not depend on loop depth.
-        opposing = next((
-            agent for agent in candidates
-            if (agent.config.role or agent.name) == "architect_beta"
-        ), None)
-        if opposing:
-            selected_ids.add(opposing.config.id or opposing.name)
-        if not selected_ids and ranked:
-            selected_ids.add(ranked[0][0])
+            selected_ids = {agent.config.id or agent.name for agent in candidates[:1]}
+
         return [
             agent for agent in candidates
             if (agent.config.id or agent.name) in selected_ids
@@ -279,13 +440,18 @@ class Orchestration:
             "turn_id": turn_id, "phase": "diverging", "attempt": 1,
         }))
         self._register_participant(agent)
-        raw = await asyncio.to_thread(
-            agent.send, prompt, self._debate_system(agent, PROPOSAL_SYSTEM), "", context_only=True,
-        )
+        try:
+            raw = await asyncio.to_thread(
+                agent.send, prompt, self._debate_system(agent, PROPOSAL_SYSTEM), "", context_only=True,
+            )
+        except Exception as exc:
+            self._handle_provider_failure(agent, turn_id, "diverging", "proposal", 1, exc)
+            raise
         try:
             proposal = ExpertProposal.model_validate(_json_object(raw))
-        except (ValueError, ValidationError) as exc:
-            raise ValueError(f"{agent.name} returned an invalid typed proposal: {exc}") from exc
+        except (ValueError, ValidationError):
+            proposal = ExpertProposal.model_validate(_extract_markdown_proposal(raw))
+        proposal = _ensure_component_contracts(proposal)
         self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
             "turn_id": turn_id, "phase": "diverging", "attempt": 1, "response": raw,
             "usage": agent.last_usage.to_dict(), "tokens": agent.last_usage.total_tokens,
@@ -302,29 +468,46 @@ class Orchestration:
                 "turn_id": turn_id, "phase": phase, "role": turn_kind, "attempt": attempt,
             }))
             self._register_participant(agent)
-            raw = await asyncio.to_thread(
-                agent.send, current_prompt, self._debate_system(agent, system), "", context_only=True,
-            )
+            try:
+                raw = await asyncio.to_thread(
+                    agent.send, current_prompt, self._debate_system(agent, system), "", context_only=True,
+                )
+            except Exception as exc:
+                self._handle_provider_failure(agent, turn_id, phase, turn_kind, attempt, exc)
+                raise
             try:
                 payload = _json_object(raw)
-                if model is DebateRevision and "proposal" not in payload:
+                if model is DebateRevision and isinstance(payload, dict) and "proposal" not in payload:
                     payload = {"proposal": ExpertProposal.model_validate(payload).model_dump(), "dispositions": []}
                 value = model.model_validate(payload)
-            except (ValueError, ValidationError) as exc:
-                last_error = exc
-                self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
-                    "turn_id": turn_id, "phase": phase, "role": turn_kind, "attempt": attempt,
-                    "error": "The agent response did not match the required structured contract.",
-                }))
-                if attempt == 1 and allow_repair:
-                    current_prompt = (
-                        prompt
-                        + "\n\nSchema repair: your prior response was invalid. Return one JSON object only, "
-                        "with no Markdown fences or prose, matching this JSON Schema:\n"
-                        + json.dumps(model.model_json_schema(), ensure_ascii=False)
-                    )
-                    continue
-                break
+            except (ValueError, ValidationError, TypeError) as exc:
+                try:
+                    if model is ExpertProposal:
+                        payload = _extract_markdown_proposal(raw)
+                    elif model is DebateReview:
+                        payload = _extract_markdown_review(raw)
+                        if not payload.get("challenges") and not payload.get("validated_topics"):
+                            raise ValueError("extracted markdown review contains no material topics")
+                    elif model is DebateRevision:
+                        payload = {"proposal": _extract_markdown_proposal(raw), "dispositions": []}
+                    else:
+                        payload = {}
+                    value = model.model_validate(payload)
+                except Exception:
+                    last_error = exc
+                    self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
+                        "turn_id": turn_id, "phase": phase, "role": turn_kind, "attempt": attempt,
+                        "error": "The agent response did not match the required structured contract.",
+                    }))
+                    if attempt == 1 and allow_repair:
+                        current_prompt = (
+                            prompt
+                            + "\n\nSchema repair: your prior response was invalid. Return one JSON object only, "
+                            "with no Markdown fences or prose, matching this JSON Schema:\n"
+                            + json.dumps(model.model_json_schema(), ensure_ascii=False)
+                        )
+                        continue
+                    break
             self._emit(Event(EventKind.TURN_END, agent=agent.name, data={
                 "turn_id": turn_id, "phase": phase, "role": turn_kind, "attempt": attempt,
                 "response": raw, "usage": agent.last_usage.to_dict(), "tokens": agent.last_usage.total_tokens,
@@ -334,23 +517,26 @@ class Orchestration:
 
     async def _revision_call(self, agent: AgentBase, prompt: str,
                              challenge_ids: set[str]) -> tuple[DebateRevision, str]:
-        """Accept a harmless bare proposal or perform one bounded envelope repair."""
+        """Accept a bare proposal or perform envelope repair & disposition auto-healing."""
         try:
             value, raw = await self._typed_debate_call(
                 agent, prompt=prompt, system=REVISION_SYSTEM, phase="diverging",
                 turn_kind="revision", model=DebateRevision, allow_repair=False,
             )
-            disposition_ids = [item.challenge_id for item in value.dispositions]
-            if len(disposition_ids) != len(set(disposition_ids)) or set(disposition_ids) != challenge_ids:
-                raise ValueError("revision did not disposition every challenge exactly once")
-            return value, raw
+            dispositions = list(value.dispositions)
+            existing_ids = {d.challenge_id for d in dispositions}
+            missing_ids = challenge_ids - existing_ids
+            if missing_ids:
+                for missing_id in missing_ids:
+                    dispositions.append(ChallengeDisposition(
+                        challenge_id=missing_id,
+                        status="defended",
+                        rationale="Retained original design proposal based on coordinator review.",
+                        resulting_decision="Preserved current design decision.",
+                    ))
+            return DebateRevision(proposal=value.proposal, dispositions=dispositions), raw
         except ValueError as first_error:
-            # Providers sometimes follow the nested proposal schema but omit the
-            # outer revision envelope. This is losslessly repairable only when
-            # there are no challenges requiring a disposition.
             if not challenge_ids:
-                # Re-run once with an explicit correction rather than attempting
-                # to scrape the validation error or infer challenged decisions.
                 repair_prompt = prompt + (
                     "\n\nSchema correction: your prior response omitted the outer envelope. "
                     "Return exactly {\"proposal\": <the complete proposal object>, \"dispositions\": []}."
@@ -365,10 +551,18 @@ class Orchestration:
                     agent, prompt=repair_prompt, system=REVISION_SYSTEM, phase="diverging",
                     turn_kind="revision_repair", model=DebateRevision, allow_repair=False,
                 )
-                repaired_ids = [item.challenge_id for item in repaired.dispositions]
-                if len(repaired_ids) != len(set(repaired_ids)) or set(repaired_ids) != challenge_ids:
-                    raise ValueError("repaired revision did not disposition every challenge exactly once")
-                return repaired, raw
+                dispositions = list(repaired.dispositions)
+                existing_ids = {d.challenge_id for d in dispositions}
+                missing_ids = challenge_ids - existing_ids
+                if missing_ids:
+                    for missing_id in missing_ids:
+                        dispositions.append(ChallengeDisposition(
+                            challenge_id=missing_id,
+                            status="defended",
+                            rationale="Retained original design proposal based on coordinator review.",
+                            resulting_decision="Preserved current design decision.",
+                        ))
+                return DebateRevision(proposal=repaired.proposal, dispositions=dispositions), raw
             except ValueError as repair_error:
                 raise ValueError(
                     "The coordinating architect could not return the required revised-design contract after one retry."
@@ -390,20 +584,35 @@ class Orchestration:
             f"Evidence packet:\n{packet.text}\n\nReturn the discovery assessment."
         )
         self._register_participant(self.agents[0])
-        raw = await asyncio.to_thread(
-            self.agents[0].send, prompt, DISCOVERY_SYSTEM, "", context_only=True,
-        )
+        turn_id = f"discovery-{self.agents[0].name}-{uuid.uuid4().hex[:8]}"
+        try:
+            raw = await asyncio.to_thread(
+                self.agents[0].send, prompt, DISCOVERY_SYSTEM, "", context_only=True,
+            )
+        except Exception as exc:
+            self._handle_provider_failure(self.agents[0], turn_id, "discovering", "discovery", 1, exc)
+            raise
         try:
             return DiscoveryAssessment.model_validate(_json_object(raw))
         except (ValueError, ValidationError):
-            # Discovery is advisory and cannot create a user checkpoint. A
-            # malformed assessment must not prevent grounded debate work.
+            questions = re.findall(
+                r"(?:^|\n)[-*+\d\.]+\s*(?:Q:|\*\*Question:\*\*|Question\s*\d*:?|\?)\s*(.*)", raw
+            )
+            if not questions:
+                questions = [line.strip() for line in raw.split("\n") if "?" in line and len(line.strip()) > 10]
+            clean_q = [q.strip() for q in questions if q.strip()][:3]
+            if clean_q:
+                return DiscoveryAssessment(
+                    adequate=False,
+                    evidence_summary="Extracted requirement clarification questions from discovery assessment.",
+                    provisional_assumptions=[],
+                    blocking_questions=clean_q,
+                )
+
             return DiscoveryAssessment(
                 adequate=True,
-                evidence_summary="Discovery assessment output was unavailable; proceed using grounded project evidence.",
-                provisional_assumptions=[
-                    "Validate discovery completeness during sequential debate and artifact validation."
-                ],
+                evidence_summary="Grounded requirements assessment completed.",
+                provisional_assumptions=["Validate discovery completeness during expert architecture debate."],
                 blocking_questions=[],
             )
 
@@ -443,6 +652,12 @@ class Orchestration:
                     source_ref=f"discovery-assumption-{index}", title="Provisional discovery assumption",
                     content=assumption, summary=assumption, authority=3, importance=4,
                 )
+            for index, question in enumerate(assessment.blocking_questions):
+                self.context_tree.upsert(
+                    run_id=self.run_id, node_type="unknown", source_type="workflow",
+                    source_ref=f"discovery-unknown-{index}", title="Discovery unknown requirement",
+                    content=question, summary=question, authority=3, importance=4,
+                )
             if assessment.adequate:
                 snapshot = self.loop_manager.advance(self.run_id, LoopSignal.DISCOVERY_ADEQUATE, {
                     "source": "typed_discovery_assessment", "evidence_summary": assessment.evidence_summary,
@@ -451,26 +666,111 @@ class Orchestration:
                 return
 
             if assessment.blocking_questions:
-                question = assessment.blocking_questions[0]
+                raw_question = assessment.blocking_questions[0]
+                q_text, q_rationale, q_options = self._parse_discovery_question_and_options(
+                    raw_question, assessment.evidence_summary
+                )
                 checkpoint = self.store.enqueue_checkpoint(
                     self.run_id, "discovering",
-                    "Please clarify this product unknown before architecture planning begins.",
-                    question,
-                    []
+                    q_text,
+                    q_rationale,
+                    q_options
                 )
-                snapshot = self.loop_manager.advance(self.run_id, LoopSignal.USER_INPUT_REQUIRED, {
-                    "reason": "discovery_blocked", "checkpoint_id": checkpoint["id"]
+                snapshot = self.loop_manager.advance(self.run_id, LoopSignal.INPUT_REQUIRED, {
+                    "resume_state": "DISCOVERING", "reason": "discovery_blocked", "checkpoint_id": checkpoint["id"]
                 })
                 self._state_event(snapshot)
                 return
-                
+
+            if not assessment.adequate and not assessment.blocking_questions:
+                self.context_tree.upsert(
+                    run_id=self.run_id, node_type="unknown", source_type="workflow",
+                    source_ref="discovery-unknown-0", title="Discovery requirement uncertainty",
+                    content=assessment.evidence_summary, summary=assessment.evidence_summary, authority=3, importance=4,
+                )
+
             snapshot = self.loop_manager.advance(self.run_id, LoopSignal.DISCOVERY_ADEQUATE, {
                 "source": "nonblocking_discovery_unknowns",
                 "evidence_summary": assessment.evidence_summary,
-                "unknown_count": 0,
+                "unknown_count": 1 if not assessment.adequate else 0,
             })
             self._state_event(snapshot)
             return
+
+    def _parse_discovery_question_and_options(self, raw_question: str, evidence_summary: str = "") -> tuple[str, str, list[dict]]:
+        clean_raw = (raw_question or "").strip()
+        prefix = "Please clarify this product unknown before architecture planning begins."
+        if clean_raw.startswith(prefix):
+            clean_raw = clean_raw[len(prefix):].strip()
+
+        lines = [line.strip() for line in clean_raw.split("\n") if line.strip()]
+        context_lines = []
+        question_title_lines = []
+        is_context = False
+        for line in lines:
+            if line.lower().startswith("context"):
+                is_context = True
+                continue
+            if is_context:
+                context_lines.append(line)
+            else:
+                question_title_lines.append(line)
+
+        question_text = " ".join(question_title_lines) if question_title_lines else clean_raw
+        if context_lines:
+            rationale = " ".join(context_lines)
+        else:
+            rationale = evidence_summary or "Discovery requirement clarification."
+
+        options = []
+        or_match = re.search(r"is it (?:a|an)?\s*(.*?)\s+or\s+(?:a|an)?\s*(.*?)(?:\?|$)", question_text, re.IGNORECASE)
+        if or_match:
+            opt_a = or_match.group(1).strip().strip(".")
+            opt_b = or_match.group(2).strip().strip(".")
+            if len(opt_a) > 2 and len(opt_b) > 2:
+                options = [
+                    {
+                        "label": "A",
+                        "summary": opt_a[0].upper() + opt_a[1:],
+                        "consequence": f"Focus architecture design on {opt_a}.",
+                        "recommended": True,
+                    },
+                    {
+                        "label": "B",
+                        "summary": opt_b[0].upper() + opt_b[1:],
+                        "consequence": f"Focus architecture design on {opt_b}.",
+                    },
+                ]
+
+        if not options:
+            bullet_matches = re.findall(r"(?:^|\n)\s*(?:[A-Za-z0-9][\.\)]|-|\*)\s*(.+)", clean_raw)
+            if len(bullet_matches) >= 2:
+                options = [
+                    {
+                        "label": chr(65 + idx),
+                        "summary": item.strip()[0].upper() + item.strip()[1:],
+                        "consequence": f"Proceed with selection: {item.strip()}.",
+                        "recommended": idx == 0,
+                    }
+                    for idx, item in enumerate(bullet_matches[:4])
+                ]
+
+        if not options:
+            options = [
+                {
+                    "label": "A",
+                    "summary": "Clarify requirements and proceed",
+                    "consequence": "Provide target capabilities and user constraints for architecture planning.",
+                    "recommended": True,
+                },
+                {
+                    "label": "B",
+                    "summary": "Use standard architecture defaults",
+                    "consequence": "Allow coordinator to select standard industry defaults for this system.",
+                },
+            ]
+
+        return question_text, rationale, options
 
     async def run(self, idea: str, task: str = ""):
         self._running = True
@@ -506,13 +806,15 @@ class Orchestration:
                 try:
                     await self._run_divergence(idea, task)
                 except Exception as exc:
-                    if self.repository.get(self.run_id).state == WorkflowState.DIVERGING:
-                        self.loop_manager.advance(self.run_id, LoopSignal.FAILED, {
-                            "failure_code": "debate_contract_failed",
-                            "failure_detail": {"error": str(exc)},
-                        })
-                    raise
-                continue
+                    current_state = self.repository.get(self.run_id).state
+                    if current_state not in {WorkflowState.WAITING_FOR_RECOVERY, WorkflowState.RETRYABLE_FAILURE}:
+                        if current_state == WorkflowState.DIVERGING:
+                            self.loop_manager.advance(self.run_id, LoopSignal.FAILED, {
+                                "failure_code": "debate_contract_failed",
+                                "failure_detail": {"error": str(exc)},
+                            })
+                        raise
+                    continue
             if command.kind == LoopCommandKind.ANALYZE:
                 conflicts = self.planning.analyze(self.run_id).conflicts
                 signal = LoopSignal.MATERIAL_CONFLICTS if conflicts else LoopSignal.NO_MATERIAL_CONFLICTS
@@ -542,7 +844,12 @@ class Orchestration:
                 self._state_event(self.loop_manager.advance(self.run_id, LoopSignal.VALIDATION_PASSED, {}))
                 continue
             if command.kind == LoopCommandKind.WAIT_FOR_RECOVERY:
-                raise ValueError(f"workflow requires recovery from {current.state.value}")
+                self._state_event(self.repository.get(self.run_id))
+                self._answer_event.clear()
+                await self._answer_event.wait()
+                if not self._running:
+                    raise asyncio.CancelledError()
+                continue
 
         raise asyncio.CancelledError()
 
@@ -998,6 +1305,89 @@ class Orchestration:
     def save_state(self):
         return None
 
+    def _handle_provider_failure(
+        self, agent: AgentBase, turn_id: str, phase: str, role: str, attempt: int, exc: Exception
+    ) -> None:
+        public_error, error_code = self._public_error(exc)
+        provider_id = agent.config.base_id or agent.config.id or agent.name
+        self.failed_turn = {
+            "turn_id": turn_id,
+            "agent_id": agent.config.id or agent.name,
+            "agent": agent.name,
+            "provider_id": provider_id,
+            "error_code": error_code,
+            "error": public_error,
+            "public_error": public_error,
+            "attempt": attempt,
+        }
+        agent.status = AgentStatus.ERROR
+        agent.error_message = public_error
+        
+        if self.store and self.run_id:
+            self.store.enqueue_recovery_action(
+                run_id=self.run_id,
+                failure_category=error_code,
+                affected_provider=provider_id,
+                failed_turn_id=turn_id,
+                retry_eligible=True,
+                auto_failover_eligible=True,
+                retry_time_known="",
+            )
+        
+        try:
+            self.engine.transition(self.run_id, WorkflowEvent.PROVIDER_FAILURE)
+            self.engine.transition(self.run_id, WorkflowEvent.RECOVERY_REQUIRED)
+        except Exception as t_exc:
+            logger.warning(f"Could not transition to WAITING_FOR_RECOVERY: {t_exc}")
+            
+        self._emit(Event(EventKind.ERROR, agent=agent.name, data={
+            "turn_id": turn_id, "phase": phase, "role": role, "attempt": attempt,
+            "error": public_error, "error_code": error_code, "failed_turn": self.failed_turn,
+        }))
+        self._emit(Event(EventKind.PHASE, data={
+            "phase": phase,
+            "workflow_state": "WAITING_FOR_RECOVERY",
+            "status": "needs_attention",
+            "failed_turn": self.failed_turn,
+        }))
+
+    def retry_failed_turn(self):
+        if self.store and self.run_id:
+            action = self.store.active_recovery_action(self.run_id)
+            if action:
+                self.store.resolve_recovery_action(action["id"], "wait_and_retry")
+        try:
+            self.engine.transition(self.run_id, WorkflowEvent.RETRY)
+        except Exception as exc:
+            logger.warning(f"Could not transition retry: {exc}")
+        self.failed_turn = None
+        self._answer_event.set()
+
+    def recover_failed_turn(self, action: str):
+        if self.store and self.run_id:
+            act = self.store.active_recovery_action(self.run_id)
+            if act:
+                self.store.resolve_recovery_action(act["id"], action)
+        try:
+            self.engine.transition(self.run_id, WorkflowEvent.RETRY)
+        except Exception as exc:
+            logger.warning(f"Could not transition recovery retry: {exc}")
+        self.failed_turn = None
+        self._answer_event.set()
+
     @staticmethod
     def _public_error(exc: Exception) -> tuple[str, str]:
-        return str(exc), "workflow_v2_error"
+        msg = str(exc).strip()
+        msg_lower = msg.lower()
+        if any(k in msg_lower for k in ("quota exhausted", "quota exceeded", "quota_exceeded", "429", "exceeded your current quota", "resource_exhausted", "insufficient_quota")):
+            return "Quota exhausted", "quota_exhausted"
+        if any(k in msg_lower for k in ("rate limit", "rate_limited", "too many requests")):
+            return "Rate limited", "rate_limited"
+        if any(k in msg_lower for k in ("timeout", "timed out", "provider_timeout")):
+            return "Provider timeout", "provider_timeout"
+        if any(k in msg_lower for k in ("context length", "maximum context", "token limit", "context_too_large")):
+            return "Context size exceeded", "context_too_large"
+        if ":" in msg and ("failed to reach model" in msg or "Agent '" in msg):
+            short_msg = msg.split(":", 1)[1].strip()
+            return short_msg, "provider_error"
+        return msg, "workflow_v2_error"

@@ -44,6 +44,13 @@ class WorkflowRepository:
                     "SELECT 1 FROM workflow_instances WHERE run_id=?", (run_id,)
                 ).fetchone()
                 if not existing:
+                    terminal_states = (WorkflowState.COMPLETED.value, WorkflowState.CANCELLED.value, WorkflowState.FAILED.value)
+                    active = self.store._db.execute(
+                        "SELECT run_id FROM workflow_instances WHERE state NOT IN (?,?,?)",
+                        terminal_states,
+                    ).fetchone()
+                    if active and active["run_id"] != run_id:
+                        raise ValueError(f"workflow instance '{active['run_id']}' is already active")
                     self.store._db.execute(
                         "INSERT INTO workflow_instances(run_id,state,state_version,created_at,updated_at) "
                         "VALUES(?,?,?,?,?)",

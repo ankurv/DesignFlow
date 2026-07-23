@@ -29,7 +29,15 @@ async def run_with_approved_review(orchestrator, goal):
     for _ in range(100):
         await asyncio.sleep(0)
         checkpoint = orchestrator.store.current_checkpoint(orchestrator.run_id)
-        if checkpoint and checkpoint.get("phase") == "design_review":
+        if checkpoint and checkpoint.get("phase") == "discovering":
+            options = checkpoint.get("options") or []
+            option_id = options[0]["id"] if options else ""
+            choice_text = options[0]["summary"] if options else "Clarification provided"
+            orchestrator.store.answer_checkpoint(
+                orchestrator.run_id, checkpoint["id"], "test", option_id, "Clarification response",
+            )
+            await orchestrator.accept_structured_checkpoint_answer(choice_text, False, "test")
+        elif checkpoint and checkpoint.get("phase") == "design_review":
             option = checkpoint["options"][0]
             orchestrator.store.answer_checkpoint(
                 orchestrator.run_id, checkpoint["id"], "test", option["id"], "",
@@ -44,6 +52,10 @@ async def run_with_approved_review(orchestrator, goal):
 
 class JsonProposalAgent(AgentBase):
     manages_context = True
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._has_verified_model = True
 
     def _raw_send(self, messages, system, *args, **kwargs):
         if "discovery gate" in system:
@@ -67,6 +79,7 @@ class ScriptedInteractionAgent(AgentBase):
 
     def __init__(self, config, responses):
         super().__init__(config)
+        self._has_verified_model = True
         self.responses = iter(responses)
 
     def _raw_send(self, messages, system, *args, **kwargs):
@@ -76,7 +89,7 @@ class ScriptedInteractionAgent(AgentBase):
 class BlockingDiscoveryAgent(JsonProposalAgent):
     def _raw_send(self, messages, system, *args, **kwargs):
         if "discovery gate" in system:
-            return '{"adequate":false,"evidence_summary":"No product users or outcomes are established.","blocking_questions":["Who uses this product and what outcome must they achieve?"]}', Usage(input_tokens=10, output_tokens=10)
+            return '{"adequate":false,"evidence_summary":"Who uses this product and what outcome must they achieve?","blocking_questions":[]}', Usage(input_tokens=10, output_tokens=10)
         return super()._raw_send(messages, system, *args, **kwargs)
 
 

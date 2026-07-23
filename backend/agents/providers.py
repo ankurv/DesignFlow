@@ -63,45 +63,34 @@ def discover_models(config: AgentConfig) -> list[str]:
         models = anthropic.Anthropic(**kwargs).models.list()
         ids = [item.id for item in models.data]
     elif kind == "aws-bedrock":
-        import boto3
-        key = config.api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
-        if key:
-            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = key
-            
-        region = config.extra.get("aws_region", "us-east-1")
-        client = boto3.client("bedrock", region_name=region)
-        ids = []
-        
         try:
-            # 1. Fetch all standard ON_DEMAND text foundation models
-            fm_response = client.list_foundation_models()
-            for model in fm_response.get("modelSummaries", []):
-                inference_types = model.get("inferenceTypesSupported", [])
-                output_modalities = model.get("outputModalities", [])
-                if "ON_DEMAND" in inference_types and "TEXT" in output_modalities:
-                    model_id = str(model.get("modelId", "")).strip()
-                    if model_id and model_id not in ids:
-                        ids.append(model_id)
-        except Exception:
-            pass
-
-        try:
-            # 2. Fetch system-defined inference profiles (for cross-region routing)
+            import boto3
+            key = config.api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+            if key:
+                os.environ["AWS_BEARER_TOKEN_BEDROCK"] = key
+                
+            region = config.extra.get("aws_region", "us-east-1")
+            client = boto3.client("bedrock", region_name=region)
+            ids = []
             next_token = None
+            allowed_vendors = ["anthropic", "meta", "mistral", "amazon", "cohere", "ai21"]
             while True:
                 request = {"typeEquals": "SYSTEM_DEFINED", "maxResults": 100}
                 if next_token:
                     request["nextToken"] = next_token
                 response = client.list_inference_profiles(**request)
                 for profile in response.get("inferenceProfileSummaries", []):
-                    profile_id = str(profile.get("inferenceProfileId", "")).strip()
-                    if profile_id and profile_id not in ids:
-                        ids.append(profile_id)
+                    model_arns = [str(item.get("modelArn", "")) for item in profile.get("models", [])]
+                    status = profile.get("status", "ACTIVE")
+                    if status == "ACTIVE" and any(vendor in arn.lower() for arn in model_arns for vendor in allowed_vendors):
+                        profile_id = str(profile.get("inferenceProfileId", "")).strip()
+                        if profile_id:
+                            ids.append(profile_id)
                 next_token = response.get("nextToken")
                 if not next_token:
                     break
         except Exception:
-            pass
+            return [config.model] if config.model else []
     elif kind == "gemini":
         import google.generativeai as genai
         key = config.api_key or os.environ.get("GEMINI_API_KEY", "")

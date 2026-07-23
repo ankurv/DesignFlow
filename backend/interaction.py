@@ -36,6 +36,15 @@ If evidence is insufficient, say what is unknown and ask one useful follow-up qu
 """
 
 
+ROUTING_SYSTEM = """You are an intent classifier for DesignFlow.
+Read the user's prompt and output exactly one word from the following choices based on their intent:
+1. "ANSWER": The user is asking a conversational question, inquiring about system status, agents, project details, or making a general chat statement (e.g. "hello", "are agents ready?").
+2. "PLANNING": The user is providing a design goal, requirements, architecture instruction, or asking to build/create/refine a product/app/system.
+3. "RECOVERY": The user is explicitly asking to continue, resume, retry, or recover a previous workflow.
+Output EXACTLY ONE WORD: ANSWER, PLANNING, or RECOVERY. Do not output anything else.
+"""
+
+
 class InteractionService:
     def __init__(self, agent, workspace, store, workflow_snapshot: dict | None = None):
         self.agent = agent
@@ -59,28 +68,50 @@ class InteractionService:
         ).text
 
     async def route(self, request: str) -> InteractionDecision:
-        """Route locally; provider latency is never part of request intake."""
-        anchors = [
-            (InteractionKind.ANSWER, "answer a question explain current status progress decisions models files or what has been done"),
-            (InteractionKind.PLANNING, "design architect plan refine change build debate requirements scope implementation approach"),
-            (InteractionKind.RECOVERY, "continue resume retry recover the interrupted or paused planning workflow"),
-        ]
-        scores = {
-            kind: self.semantic.similarity(request, text) for kind, text in anchors
-        }
-        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0].value))
-        selected, score = ranked[0]
+        """Route using LLM classification, falling back to local semantics."""
         workflow_state = str(self.workflow_snapshot.get("state", ""))
-        if selected == InteractionKind.RECOVERY and not workflow_state:
-            selected = InteractionKind.PLANNING
-        # Ambiguous requests are read-only unless they have stronger planning or
-        # recovery evidence. This prevents a vague question from mutating design.
-        if score < 0.08:
-            selected = InteractionKind.ANSWER
-        return InteractionDecision(
-            kind=selected,
-            reason=f"Local semantic route selected {selected.value} (score={score:.3f}).",
-        )
+        try:
+            prompt = f"Classify this prompt:\n\n{request}"
+            response = await asyncio.to_thread(
+                self.agent.send, prompt, ROUTING_SYSTEM, "", context_only=True,
+            )
+            choice = response.strip().upper()
+            if "ANSWER" in choice:
+                selected = InteractionKind.ANSWER
+            elif "RECOVERY" in choice:
+                selected = InteractionKind.RECOVERY
+            else:
+                selected = InteractionKind.PLANNING
+                
+            if selected == InteractionKind.RECOVERY and not workflow_state:
+                selected = InteractionKind.PLANNING
+            
+            return InteractionDecision(
+                kind=selected,
+                reason=f"LLM semantic route selected {selected.value}."
+            )
+        except Exception as e:
+            # Fallback to local semantic routing
+            anchors = [
+                (InteractionKind.ANSWER, "answer a question explain current status progress decisions models files or what has been done"),
+                (InteractionKind.PLANNING, "design architect plan refine change build debate requirements scope implementation approach"),
+                (InteractionKind.RECOVERY, "continue resume retry recover the interrupted or paused planning workflow"),
+            ]
+            scores = {
+                kind: self.semantic.similarity(request, text) for kind, text in anchors
+            }
+            ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0].value))
+            selected, score = ranked[0]
+            if selected == InteractionKind.RECOVERY and not workflow_state:
+                selected = InteractionKind.PLANNING
+            # Ambiguous requests are read-only unless they have stronger planning or
+            # recovery evidence. This prevents a vague question from mutating design.
+            if score < 0.08:
+                selected = InteractionKind.ANSWER
+            return InteractionDecision(
+                kind=selected,
+                reason=f"Local semantic route selected {selected.value} (score={score:.3f}). Fallback from LLM error.",
+            )
 
     async def answer(self, request: str) -> str:
         config = self.agent.config
